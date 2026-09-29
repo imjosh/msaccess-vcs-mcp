@@ -74,6 +74,45 @@ contradictory guidance.
 
 ---
 
+## 2026-09-29 — Click OK-only VBA MsgBox of any caption (`vba_msgbox`)
+
+**Trigger**: After the classification work, a VBA `MsgBox` with a custom caption was kind `unknown` and never clicked, so an unattended run stalled on a dialog Access cannot continue past.
+
+**Options explored**:
+- *Caption allow-list only*: the user must guess every caption in advance. Kept as a possible later widening (ticket M10), not the fix.
+- *Click any OK-only dialog by button count alone*: rejected as a bare rule. The signature is a `#32770` dialog whose actionable buttons are exactly one OK (a Help button is ignored), and destructive text still blocks the click.
+- *Click multi-button custom dialogs (OK/Cancel, Yes/No)*: rejected. Picking a button is a decision the tool cannot make.
+
+**Decision**: New kind `vba_msgbox`, assigned only to the single-OK signature with any caption. Microsoft Access and Microsoft Visual Basic captions still get `access_dialog`. `safe` clicks it when the text has no save, delete, discard or overwrite words, and reports kind, title and text in `closed`. This is a deliberate exception to "recognised captions only" from the entry below.
+
+**What this rules out**: Auto-clicking any dialog with two or more buttons, or a single non-OK button (Retry, Save). Keystrokes and coordinate clicks. Revisit if a real OK-only dialog is found whose OK is not safe to press.
+
+**Relevant files**: `dialog_recovery.py` (`MSGBOX_KIND`, `SAFE_OK_KINDS`, `classify_window`), `docs/DIALOGS.md`, `specs/dialog-recovery-review-fixes.md`.
+
+---
+
+## 2026-09-29 — Dialog recovery rules: identity, positive signature, interruptions, off-event-loop
+
+**Trigger**: Two-axis review of commit `e982918` found the dialog-recovery code did not meet the entry below. This records the four rules the fixes (M01 to M05) implement. `specs/dialog-recovery-review-fixes.md` holds the detail.
+
+**Options explored**:
+- *Treat an unreadable PID, name or creation time as "probably Access"*: rejected. A failed query is not permission; a reused PID could get a stranger's dialog dismissed.
+- *Classify by caption alone or by absence of danger words*: rejected. Unknown is the default and a kind needs a positive signature.
+- *Let a dismissed error dialog be reported as the operation's success*: rejected. The clicked-away error must survive to the final result.
+- *Run gate-exempt tools on the event loop or the COM thread*: rejected. Those are what a blocking dialog or gated call occupies.
+
+**Decision**:
+1. **Identity**: no click unless the process is confirmed Access and its creation time is known and unchanged. Unconfirmed means no action, with a distinct `error_pattern`. Handles are re-verified just before the click.
+2. **Positive signature**: a dialog is a known kind only by a positive signature. Everything else is `unknown` and is reported, never clicked.
+3. **Interruptions** (M05): dismissing a runtime or compile error records an interruption keyed by PID plus creation time, carrying the in-flight gated call. When that call finishes it is forced to `success: false`, `execution_interrupted: true`, `error_pattern: execution_interrupted`, keeping the original text, and the record is removed. With no call in flight it shows as `last_interruption` until the identity changes or the next gated call on that database starts. Precedence: `decision_required` > `execution_interrupted` > plain error. A call on a different database does not adopt the record.
+4. **Off the event loop**: every gate-exempt tool runs in a worker thread with a ceiling slightly above the dialog timeout, not only the four dialog tools.
+
+**What this rules out**: Treating a dismissed error dialog as success. Acting on an unverified process. Adding a gate-exempt tool that uses the COM thread. Revisit the interruption rule if records need to span databases.
+
+**Relevant files**: `dialog_recovery.py`, `access_gate.py` (`InFlight.call_id`), `tools.py` (`vcs_tool` gated path), `docs/DIALOGS.md`.
+
+---
+
 ## 2026-09-29 — Noninteractive add-in runs, Win32 dialog recovery off the Access gate
 
 **Trigger**: An agent driving Access gets stuck when the add-in or VBA opens a modal dialog, and a second MCP call cannot inspect that dialog because it waits on the same Access COM gate.
