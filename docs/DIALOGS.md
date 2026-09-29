@@ -135,14 +135,24 @@ starts.
 
 A dialog gets a known kind only from a positive signature (a Microsoft
 Access or Visual Basic caption, run-time or compile error text, the End/Debug
-button set, the add-in caption). A standard dialog box that matches none is
-`kind: "unknown"`, reported with its title, text and buttons. `unknown` is
-blocking and is never clicked automatically; dismiss it explicitly with
-`vcs_dismiss_dialog(..., button=...)`.
+button set, the add-in caption, or the single-OK-button rule below). A standard
+dialog box with a custom caption is `kind: "vba_msgbox"` when its only
+actionable button is OK (a Help button does not count); this is the shape of a
+VBA `MsgBox "text", vbOKOnly, "Caption"`. Any other standard dialog that
+matches no signature, including a custom-caption box with two or more buttons
+or a single non-OK button, is `kind: "unknown"`. Both are reported with title,
+text and buttons and are blocking.
 
-`policy="safe"` clicks OK only on a known-kind OK-only dialog whose text is
-not a save, discard, delete, or overwrite confirmation. Everything else is
-returned in `skipped` with its buttons.
+`policy="safe"` clicks OK only on an OK-only dialog of a known kind
+(`access_dialog`, `vba_compile_error`, `vba_msgbox`) whose text is not a save,
+discard, delete, or overwrite confirmation. A single-button `vba_msgbox` is
+closed because Access cannot continue until it is, and the closed dialog is
+listed in `closed` with its `kind`, `title` and `message`. A `vba_msgbox` with
+destructive words stays open and is listed in `skipped`. `unknown` is never
+clicked automatically; dismiss it explicitly with
+`vcs_dismiss_dialog(..., button=...)`. Everything skipped is returned in
+`skipped` with its buttons. Debug, save and discard are never clicked, and the
+click is a button message, never a keystroke or coordinate click.
 
 `vcs_dismiss_dialog` and `vcs_recover_dialogs` wait the same way after a
 click: they poll until the dialogs they clicked have closed (dialogs the call

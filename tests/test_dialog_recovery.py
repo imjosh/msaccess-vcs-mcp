@@ -108,7 +108,7 @@ def test_classify_runtime_compile_break_and_msgbox():
     assert classify_window(runtime) == "vba_runtime_error"
     assert classify_window(compile_error) == "vba_compile_error"
     assert classify_window(paused) == "vba_break"
-    assert classify_window(msg) == "unknown"
+    assert classify_window(msg) == "vba_msgbox"
     assert classify_window(addin) == "addin_window"
 
 

@@ -107,7 +107,8 @@ When any of those can't be confirmed, they report and do nothing. Every import p
 **Classification and automatic recovery**
 
 - A dialog gets a known kind only through a positive signature: a recognised caption, text or button set. It never gets one by elimination. Any standard dialog box that matches no signature is `unknown`.
-- The `safe` policy clicks only dialogs with a known kind, and within those only OK-only ones without destructive text. `unknown` is always reported, never clicked automatically.
+- Exception, kind `vba_msgbox`: a standard dialog of any caption whose only actionable button is OK (Help ignored) is a VBA MsgBox and gets that kind. The button set is its positive signature. A custom-caption box with two or more buttons, or one non-OK button, stays `unknown`.
+- The `safe` policy clicks only dialogs with a known kind (including `vba_msgbox`), and within those only OK-only ones without destructive text. A `vba_msgbox` with destructive text is reported, not clicked. `unknown` is always reported, never clicked automatically. Debug, save/discard, keystrokes and coordinate clicks remain excluded.
 - Dismissing any dialog classified as a failure (runtime or compile error) records an interruption, whether the dismissal came from the explicit or the automatic path.
 
 **Waiting after an action**

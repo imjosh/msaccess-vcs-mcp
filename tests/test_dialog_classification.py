@@ -108,12 +108,67 @@ def test_unrecognised_dialog_is_reported_as_unknown_with_title_text_and_buttons(
     assert result["blocking_dialog"] is True
 
 
-def test_safe_policy_never_clicks_an_unrecognised_ok_only_dialog():
-    odd = _dialog(2, "Contoso Tool", "Hello")
-    backend = SlowCloseBackend([_main(), odd])
+def test_custom_caption_ok_only_msgbox_is_vba_msgbox_and_reported_with_title_and_text():
+    box = _dialog(2, "Contoso Tool", "Hello")
+    result = _call(tools.vcs_list_dialogs, SlowCloseBackend([_main(), box]))
+    item = next(d for d in result["dialogs"] if d["dialog_id"] == "hwnd:2")
+    assert item["kind"] == "vba_msgbox"
+    assert item["title"] == "Contoso Tool"
+    assert item["message"] == "Hello"
+    assert item["buttons"] == ["OK"]
+    assert result["blocking_dialog"] is True
+
+
+def test_safe_policy_clicks_a_custom_caption_ok_only_msgbox_and_reports_it():
+    box = _dialog(2, "Contoso Tool", "Hello")
+    backend = SlowCloseBackend([_main(), box])
+    result = _call(tools.vcs_recover_dialogs, backend, policy="safe", pid=10)
+    assert backend.clicked == [20]
+    assert result["success"] is True
+    closed = result["closed"][0]
+    assert closed["kind"] == "vba_msgbox"
+    assert closed["title"] == "Contoso Tool"
+    assert closed["message"] == "Hello"
+
+
+def test_safe_policy_ignores_help_button_on_single_button_msgbox():
+    box = _dialog(2, "Contoso Tool", "Hello", ("OK", "Help"))
+    backend = SlowCloseBackend([_main(), box])
+    _call(tools.vcs_recover_dialogs, backend, policy="safe", pid=10)
+    assert backend.clicked == [20]
+
+
+@pytest.mark.parametrize(
+    "buttons", [("Yes", "No"), ("OK", "Cancel"), ("Alpha", "Beta"), ("Retry",), ("Save",)]
+)
+def test_custom_caption_msgbox_with_other_buttons_stays_unknown_and_is_not_clicked(buttons):
+    box = _dialog(2, "Contoso Tool", "Pick one", buttons)
+    backend = SlowCloseBackend([_main(), box])
+    listed = _call(tools.vcs_list_dialogs, backend)
+    assert next(d for d in listed["dialogs"] if d["dialog_id"] == "hwnd:2")["kind"] == "unknown"
     result = _call(tools.vcs_recover_dialogs, backend, policy="safe", pid=10)
     assert backend.clicked == []
     assert [item["kind"] for item in result["skipped"]] == ["unknown"]
+
+
+@pytest.mark.parametrize("policy", ["safe", "end_runtime_error"])
+@pytest.mark.parametrize(
+    "text",
+    ["Do you want to save changes?", "This will delete all rows.", "Discard your edits", "Overwrite it"],
+)
+def test_destructive_text_in_a_single_button_msgbox_stops_the_click(policy, text):
+    box = _dialog(2, "Contoso Tool", text)
+    backend = SlowCloseBackend([_main(), box])
+    result = _call(tools.vcs_recover_dialogs, backend, policy=policy, pid=10)
+    assert backend.clicked == []
+    assert [item["kind"] for item in result["skipped"]] == ["vba_msgbox"]
+
+
+def test_report_policy_never_clicks_a_single_button_msgbox():
+    box = _dialog(2, "Contoso Tool", "Hello")
+    backend = SlowCloseBackend([_main(), box])
+    _call(tools.vcs_recover_dialogs, backend, policy="report", pid=10)
+    assert backend.clicked == []
 
 
 def test_safe_policy_clicks_a_recognised_ok_only_dialog():
@@ -132,9 +187,9 @@ def test_safe_policy_skips_a_recognised_dialog_with_destructive_text():
 
 
 def test_explicit_dismiss_can_still_click_an_unknown_dialog():
-    odd = _dialog(2, "Contoso Tool", "Hello")
+    odd = _dialog(2, "Contoso Tool", "Hello", ("Alpha", "Beta"))
     backend = SlowCloseBackend([_main(), odd])
-    result = _call(tools.vcs_dismiss_dialog, backend, "hwnd:2", button="OK", pid=10)
+    result = _call(tools.vcs_dismiss_dialog, backend, "hwnd:2", button="Alpha", pid=10)
     assert backend.clicked == [20]
     assert result["success"] is True
 
@@ -184,7 +239,7 @@ def test_dialog_still_open_at_the_deadline_is_dismiss_uncertain(tool_name):
 
 def test_recover_stops_early_when_only_uncovered_dialogs_remain():
     known = _dialog(2, "Microsoft Access", "Something went wrong.")
-    odd = _dialog(3, "Contoso Tool", "Hello")
+    odd = _dialog(3, "Contoso Tool", "Hello", ("Alpha", "Beta"))
     backend = SlowCloseBackend([_main(), known, odd], close_after=0)
     started = time.monotonic()
     result = _call(tools.vcs_recover_dialogs, backend, policy="safe", pid=10, timeout_seconds=10)
