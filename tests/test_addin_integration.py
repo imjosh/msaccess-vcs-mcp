@@ -227,7 +227,7 @@ class TestVCSAddinIntegration:
         
         addin = VCSAddinIntegration(str(addin_file))
         mock_app = Mock()
-        mock_app.Run = Mock(return_value=None)
+        mock_app.Run = Mock(return_value='{"success": true, "started": true}')
         
         addin._app = mock_app
         addin._addin_loaded = True
@@ -236,8 +236,39 @@ class TestVCSAddinIntegration:
         result = addin.merge_build(db_path)
         
         assert result["success"] is True
+        assert result["started"] is True
         assert "database_path" in result
         mock_app.Run.assert_called()
+
+    def test_merge_build_returns_parsed_refusal(self, tmp_path):
+        """A refusal is passed through, not flattened into success."""
+        addin_file = tmp_path / "test_addin.accda"
+        addin_file.touch()
+        addin = VCSAddinIntegration(str(addin_file))
+        mock_app = Mock()
+        mock_app.Run = Mock(return_value=(
+            '{"success": false, "error_pattern": "decision_required", '
+            '"decision_required": true, "decisions": [{"object": "a"}]}',
+        ))
+        addin._app = mock_app
+        addin._addin_loaded = True
+
+        result = addin.merge_build(str(tmp_path / "test.accdb"))
+
+        assert result["success"] is False
+        assert result["error_pattern"] == "decision_required"
+        assert result["decisions"] == [{"object": "a"}]
+
+    def test_merge_build_unparseable_result_is_not_success(self, tmp_path):
+        addin_file = tmp_path / "test_addin.accda"
+        addin_file.touch()
+        addin = VCSAddinIntegration(str(addin_file))
+        mock_app = Mock()
+        mock_app.Run = Mock(return_value=None)
+        addin._app = mock_app
+        addin._addin_loaded = True
+
+        assert addin.merge_build(str(tmp_path / "test.accdb"))["success"] is False
     
     def test_build_from_source(self, tmp_path):
         """Test build from source operation."""

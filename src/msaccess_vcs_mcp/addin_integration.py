@@ -6,6 +6,7 @@ delegating all export/import/build operations to the battle-tested add-in
 rather than reimplementing them in Python.
 """
 
+import json
 import os
 import threading
 import time
@@ -594,19 +595,9 @@ class VCSAddinIntegration:
         
         try:
             if decision_policy:
-                self._call_addin_function("MergeBuild", decision_policy)
+                raw = self._call_addin_function("MergeBuild", decision_policy)
             else:
-                self._call_addin_function("MergeBuild")
-            
-            log_path = os.path.join(source_path, "Build.log")
-            
-            return {
-                "success": True,
-                "database_path": db_path,
-                "log_path": log_path if os.path.exists(log_path) else None,
-                "message": "Merge build completed successfully"
-            }
-            
+                raw = self._call_addin_function("MergeBuild")
         except Exception as e:
             return {
                 "success": False,
@@ -614,7 +605,30 @@ class VCSAddinIntegration:
                 "log_path": None,
                 "message": f"Merge build failed: {e}"
             }
-    
+
+        # The add-in's return is its own start result: a refusal, or a
+        # ``started`` marker. Pass it through; never invent a success.
+        parsed: Any = raw
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = None
+        if not isinstance(parsed, dict):
+            return {
+                "success": False,
+                "database_path": db_path,
+                "log_path": None,
+                "message": "Merge build returned no parseable result; "
+                           "the add-in build may be too old.",
+            }
+        result = dict(parsed)
+        result.setdefault("database_path", db_path)
+        if not result.get("log_path"):
+            log_path = os.path.join(source_path, "Build.log")
+            result["log_path"] = log_path if os.path.exists(log_path) else None
+        return result
+
     def build_from_source(
         self,
         source_folder: str,

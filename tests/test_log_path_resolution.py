@@ -387,7 +387,7 @@ class TestImportObjectsAsyncPaths:
         """{"sync": true} means the add-in already ran it inline."""
         from msaccess_vcs_mcp.tools import vcs_import_objects
 
-        with _patch_merge_tool(tmp_path, {"sync": True, "result": "done"}) as (
+        with _patch_merge_tool(tmp_path, {"sync": True, "result": json.dumps({"success": True})}) as (
             db_path,
             src_path,
             mock_addin,

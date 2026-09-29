@@ -228,6 +228,55 @@ def _apply_decision_result(result: dict[str, Any], completion: dict[str, Any] | 
     return result
 
 
+def _parse_addin_payload(value: Any) -> dict[str, Any]:
+    """Parse an add-in result (JSON string or dict) into a dict, never raising."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return {"success": False, "error": f"Unparseable add-in result: {value[:200]}"}
+    if isinstance(value, dict):
+        return value
+    return {"success": False, "error": "Add-in returned no result"}
+
+
+def _is_start_refusal(payload: dict[str, Any]) -> bool:
+    """A sync start result that refused (or declined) the operation."""
+    return payload.get("success") is False and not payload.get("async") and not payload.get("sync")
+
+
+def _normalize_import_result(
+    payload: dict[str, Any],
+    *,
+    db_path: Any,
+    src_path: Any,
+) -> dict[str, Any]:
+    """The one exit for every merge path.
+
+    ``payload`` is the last add-in result: a completion callback, the inline
+    ``sync`` result, a sync-fallback merge result, or a start refusal.
+    ``decision_required`` beats ``success``; ``decisions`` and any
+    ``error_pattern`` the add-in reported pass through unchanged.
+    """
+    success = payload.get("success") is True
+    result: dict[str, Any] = {
+        "success": success,
+        "imported_count": "See log for details" if success else 0,
+        "database_path": str(db_path),
+        "source_dir": str(src_path),
+    }
+    if not success:
+        result["error"] = payload.get("error") or payload.get("message") or "Import failed"
+    if payload.get("error_pattern"):
+        result["error_pattern"] = payload["error_pattern"]
+    if payload.get("runtime_error"):
+        result["runtime_error"] = payload["runtime_error"]
+    if payload.get("completion_unconfirmed"):
+        result["completion_unconfirmed"] = True
+    result = _apply_decision_result(result, payload)
+    return _attach_log_context(result, src_path, "Merge", payload)
+
+
 def _apply_test_run_success(parsed: dict[str, Any]) -> dict[str, Any]:
     """Set ``success`` from the runner summary, not from Operation.Result."""
     summary = parsed.get("summary", {})
@@ -1290,14 +1339,22 @@ async def vcs_import_objects(
                 result.setdefault("source_dir", str(src_path))
                 if result.get("success") and "imported_count" not in result:
                     result["imported_count"] = "See log for details"
+                result = _apply_decision_result(result, result)
                 return _attach_log_context(result, src_path, "Merge")
             
-            # Check if async import is available
+            # Every branch below ends with one payload for the normaliser.
+            # The add-in's sync return is a start result, never a final one.
+            def _merge_sync() -> dict[str, Any]:
+                merged = addin.merge_build(str(db_path), str(src_path), policy)
+                if merged.get("started") and merged.get("success"):
+                    # No callback exists on this path to report the outcome.
+                    merged = {**merged, "completion_unconfirmed": True}
+                return merged
+
             if callback_url and op_manager:
                 # Ensure operation manager uses the correct event loop (FastMCP's loop)
                 op_manager.set_event_loop(asyncio.get_running_loop())
-                
-                # Use async path with progress callbacks
+
                 operation_id, queue = op_manager.register_operation(
                     database_path=str(db_path),
                     command="MergeBuild"
@@ -1305,76 +1362,46 @@ async def vcs_import_objects(
                 callback_info = op_manager.create_callback_info(
                     operation_id, callback_url, "cursor"
                 )
-                
+
                 try:
-                    # Call async API for MergeBuild
-                    completion = None
                     if policy:
                         async_result = addin.call_async(callback_info, "MergeBuild", policy)
                     else:
                         async_result = addin.call_async(callback_info, "MergeBuild")
-                    
+
                     if async_result.get("async"):
-                        # Wait for completion with progress reporting
+                        # Started: the callback carries the final result.
                         timeout_ms = async_result.get("timeout_ms", 300000)
-                        completion = await op_manager.wait_for_completion(
+                        final = await op_manager.wait_for_completion(
                             operation_id,
                             ctx=ctx,
                             timeout_seconds=timeout_ms / 1000
                         )
-                        
-                        if not completion.get("success"):
-                            return _attach_log_context(_apply_decision_result({
-                                "success": False,
-                                "error": completion.get("error", "Import failed"),
-                                "imported_count": 0,
-                            }, completion), src_path, "Merge", completion)
                     elif async_result.get("sync"):
                         # The add-in already ran the merge inline; re-running it
-                        # here would merge twice. Fall through and resolve the
-                        # log from disk.
+                        # here would merge twice. Its inline result is final.
                         op_manager.unregister_operation(operation_id)
+                        final = _parse_addin_payload(async_result.get("result"))
+                    elif _is_start_refusal(async_result):
+                        # Refusals are also posted to the callback. Unregistering
+                        # makes the first arrival win; the duplicate is dropped.
+                        op_manager.unregister_operation(operation_id)
+                        final = async_result
                     else:
                         # Neither marker: the add-in never started the operation,
                         # so run it synchronously rather than reporting success
                         # for work that never happened.
                         op_manager.unregister_operation(operation_id)
-                        result = addin.merge_build(str(db_path), str(src_path), policy)
-                        if not result["success"]:
-                            return _attach_log_context({
-                                "success": False,
-                                "error": result["message"],
-                                "imported_count": 0,
-                            }, src_path, "Merge")
-                except Exception as e:
+                        final = _merge_sync()
+                except Exception:
                     # Async call failed - fall back to sync
-                    completion = None
                     op_manager.unregister_operation(operation_id)
-                    result = addin.merge_build(str(db_path), str(src_path), policy)
-                    if not result["success"]:
-                        return _attach_log_context({
-                            "success": False,
-                            "error": result["message"],
-                            "imported_count": 0,
-                        }, src_path, "Merge")
+                    final = _merge_sync()
             else:
-                # Use sync path
-                completion = None
-                result = addin.merge_build(str(db_path), str(src_path), policy)
-                if not result["success"]:
-                    return _attach_log_context({
-                        "success": False,
-                        "error": result["message"],
-                        "imported_count": 0,
-                    }, src_path, "Merge")
-            
-            return _attach_log_context(_apply_decision_result({
-                "success": True,
-                "imported_count": "See log for details",
-                "database_path": str(db_path),
-                "source_dir": str(src_path),
-            }, completion), src_path, "Merge", completion)
-    
+                final = _merge_sync()
+
+            return _normalize_import_result(final, db_path=db_path, src_path=src_path)
+
     except PermissionError as e:
         return {
             "success": False,
