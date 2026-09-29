@@ -3456,13 +3456,15 @@ def vcs_recover_dialogs(
 
     ``policy``:
     - ``report`` (default): inspection only.
-    - ``safe``: click OK on a recognized OK-only dialog that is not a
+    - ``safe``: click OK on a known-kind OK-only dialog that is not a
       save, discard, delete, or overwrite confirmation. Never clicks Debug,
-      Yes, or End.
+      Yes, or End, and never clicks a dialog of kind ``unknown``.
     - ``end_runtime_error``: ``safe`` plus End on a VBA End/Debug dialog.
 
-    Unknown dialogs are returned in ``skipped`` with their buttons. The
-    original operation is not retried.
+    Unknown dialogs are returned in ``skipped`` with their buttons. After
+    clicking, it waits until the clicked dialogs close or the dialog timeout
+    elapses; one still open then is ``dismiss_uncertain``. The original
+    operation is not retried.
 
     Examples:
         vcs_recover_dialogs("C:\\\\db.accdb")

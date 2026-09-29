@@ -121,9 +121,22 @@ and `no_windows_to_probe` (wait) are different outcomes; the others are
 and `server_busy`.
 `execution_interrupted` carries the dialog text captured before End or cancel.
 
-`policy="safe"` clicks OK only on a recognized OK-only dialog whose text is
-not a save, discard, delete, or overwrite confirmation. Unknown dialogs are
-returned in `skipped` with their buttons. `end_runtime_error` adds End on a
+A dialog gets a known kind only from a positive signature (a Microsoft
+Access or Visual Basic caption, run-time or compile error text, the End/Debug
+button set, the add-in caption). A standard dialog box that matches none is
+`kind: "unknown"`, reported with its title, text and buttons. `unknown` is
+blocking and is never clicked automatically; dismiss it explicitly with
+`vcs_dismiss_dialog(..., button=...)`.
+
+`policy="safe"` clicks OK only on a known-kind OK-only dialog whose text is
+not a save, discard, delete, or overwrite confirmation. Everything else is
+returned in `skipped` with its buttons.
+
+`vcs_dismiss_dialog` and `vcs_recover_dialogs` wait the same way after a
+click: they poll until the dialogs they clicked have closed (dialogs the call
+did not act on never extend the wait) or the timeout elapses, then inspect
+once for the report. A dialog they clicked that is still open at the deadline
+is `dismiss_uncertain`, for both tools. `end_runtime_error` adds End on a
 runtime-error dialog and still never clicks Debug.
 
 If two Access windows match the database, the tools return

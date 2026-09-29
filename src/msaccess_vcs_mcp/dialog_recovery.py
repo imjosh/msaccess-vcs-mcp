@@ -33,14 +33,20 @@ SMTO_ABORTIFHUNG = 0x0002
 ACCESS_EXE_NAMES = {"msaccess.exe", "msaccess"}
 ADDIN_CAPTIONS = {"msaccessvcs", "version control system"}
 FAILURE_KINDS = {"vba_runtime_error", "vba_compile_error"}
+# A kind other than "unknown" is assigned only by a positive signature (see
+# classify_window). Automatic recovery never clicks "unknown".
+UNKNOWN_KIND = "unknown"
 BLOCKING_KINDS = {
     "vba_runtime_error",
     "vba_compile_error",
     "access_dialog",
-    "vba_msgbox",
-    "win32_dialog",
+    UNKNOWN_KIND,
     "vba_break",
 }
+# Kinds whose OK-only form the ``safe`` policy may acknowledge.
+SAFE_OK_KINDS = {"vba_compile_error", "access_dialog"}
+POLL_INTERVAL_SEC = 0.05
+DIALOG_ID_PREFIX = "hwnd:"
 _DESTRUCTIVE_TEXT = (
     "save changes",
     "discard",
@@ -105,6 +111,22 @@ class WindowBackend(Protocol):
     def responsive(self, hwnd: int, timeout_ms: int) -> bool: ...
 
 
+def dialog_id_for(hwnd: int) -> str:
+    """The only place a dialog id is built."""
+    return f"{DIALOG_ID_PREFIX}{int(hwnd)}"
+
+
+def parse_dialog_id(dialog_id: str) -> int | None:
+    """The only place a dialog id is read. None when it is not one of ours."""
+    text = (dialog_id or "").strip()
+    if not text.lower().startswith(DIALOG_ID_PREFIX):
+        return None
+    try:
+        return int(text[len(DIALOG_ID_PREFIX):])
+    except ValueError:
+        return None
+
+
 def dialog_timeout_sec(override: float | None = None) -> float:
     """Bound a dialog wait. The environment supplies the default."""
     if override is None:
@@ -118,7 +140,12 @@ def dialog_timeout_sec(override: float | None = None) -> float:
 
 
 def classify_window(window: WindowInfo) -> str:
-    """Return a dialog kind, or ``ignored`` for ordinary Access windows."""
+    """Return a dialog kind, or ``ignored`` for ordinary Access windows.
+
+    A known kind comes only from a positive signature: a recognised caption,
+    text, or button set. A standard dialog box that matches none is ``unknown``,
+    never a known kind by elimination.
+    """
     title = window.title or ""
     title_l = title.lower()
     blob = " ".join([title, *window.texts]).lower()
@@ -143,7 +170,7 @@ def classify_window(window: WindowInfo) -> str:
             return "access_dialog"
         if title_l.startswith("microsoft visual basic"):
             return "access_dialog"
-        return "vba_msgbox"
+        return UNKNOWN_KIND
     return "ignored"
 
 
@@ -188,11 +215,12 @@ def auto_button(window: WindowInfo, kind: str, policy: str) -> str | None:
 
     Debug is never chosen. Destructive confirmations (save, discard, delete,
     overwrite) are never acknowledged automatically. End is used only for a
-    runtime-error dialog when the policy is ``end_runtime_error``.
+    runtime-error dialog when the policy is ``end_runtime_error``. An
+    ``unknown`` dialog is never clicked.
     """
     if policy in {"", "report"}:
         return None
-    if kind == "vba_break" or kind == "ignored":
+    if kind != "vba_runtime_error" and kind not in SAFE_OK_KINDS:
         return None
     if _destructive_text(window):
         return None
@@ -209,8 +237,7 @@ def auto_button(window: WindowInfo, kind: str, policy: str) -> str | None:
         if button.text.strip() and _button_label(button.text) != "help"
     ]
     if len(actionable) == 1 and _button_label(actionable[0]) == "ok":
-        if kind in {"vba_compile_error", "access_dialog", "vba_msgbox", "win32_dialog"}:
-            return actionable[0]
+        return actionable[0]
     return None
 
 
@@ -439,7 +466,7 @@ def _gate_busy_here(gate: dict[str, Any]) -> bool:
 def _dialog_record(window: WindowInfo, kind: str) -> dict[str, Any]:
     message = "\n".join(text for text in window.texts if text and text != window.title)
     return {
-        "dialog_id": f"hwnd:{window.hwnd}",
+        "dialog_id": dialog_id_for(window.hwnd),
         "hwnd": window.hwnd,
         "kind": kind,
         "is_dialog": kind not in {"vba_break", "addin_window", "ignored"},
@@ -536,8 +563,11 @@ def inspect_windows(
 
 
 def _find_dialog(report: dict[str, Any], dialog_id: str) -> dict[str, Any] | None:
+    hwnd = parse_dialog_id(dialog_id)
+    if hwnd is None:
+        return None
     for item in report.get("dialogs") or []:
-        if item.get("dialog_id") == dialog_id:
+        if item.get("hwnd") == hwnd:
             return item
     return None
 
@@ -1046,6 +1076,43 @@ def _responsive_for(windows: list[WindowInfo], pid: int, backend: WindowBackend,
     return any(backend.responsive(hwnd, timeout_ms) for hwnd in hwnds[:8])
 
 
+def _open_ids(windows: Iterable[WindowInfo], pid: int, ids: set[str]) -> set[str]:
+    return {dialog_id_for(w.hwnd) for w in windows if w.pid == pid} & ids
+
+
+def _settle_and_reinspect(
+    live: WindowBackend,
+    database_path: str,
+    preview: dict[str, Any],
+    acted: set[str],
+    timeout: float,
+) -> tuple[dict[str, Any], set[str]]:
+    """The post-action sequence shared by dismiss and recover: wait, then re-inspect.
+
+    Polls until none of the dialogs this call acted on is still open, or the
+    timeout elapses. Dialogs the call did not act on (for example ones the
+    policy does not cover) never extend the wait. Then inspects once for the
+    returned report. Returns that report and the acted-on dialogs still open at
+    the deadline, which the caller reports as ``dismiss_uncertain``.
+    """
+    pid = int(preview["pid"])
+    deadline = time.monotonic() + timeout
+    windows = live.list_windows()
+    while acted and _open_ids(windows, pid, acted) and time.monotonic() < deadline:
+        time.sleep(POLL_INTERVAL_SEC)
+        windows = live.list_windows()
+    pending = _open_ids(windows, pid, acted)
+    follow = inspect_windows(
+        windows,
+        database_path,
+        backend=live,
+        pid=pid,
+        create_time=preview.get("create_time"),
+        responsive=_responsive_for(windows, pid, live, timeout),
+    )
+    return note_ready(follow, filter_remaining(windows, pid)), pending
+
+
 def list_dialogs(
     database_path: str,
     pid: int | None = None,
@@ -1111,29 +1178,9 @@ def dismiss_dialog(
     if not result.get("success"):
         result["timeout_seconds"] = timeout
         return result
-    deadline = time.monotonic() + timeout
-    remaining_windows = windows
-    while time.monotonic() < deadline:
-        remaining_windows = live.list_windows()
-        still = [
-            window
-            for window in remaining_windows
-            if window.pid == int(preview["pid"]) and f"hwnd:{window.hwnd}" == dialog_id
-        ]
-        if not still:
-            break
-        time.sleep(0.05)
-    remaining = filter_remaining(remaining_windows, int(preview["pid"]))
-    follow = inspect_windows(
-        remaining_windows,
-        database_path,
-        backend=live,
-        pid=int(preview["pid"]),
-        create_time=preview.get("create_time"),
-        responsive=_responsive_for(remaining_windows, int(preview["pid"]), live, timeout),
-    )
-    follow = note_ready(follow, remaining)
-    uncertain = any(item.get("dialog_id") == dialog_id for item in remaining)
+    acted = {str(item["dialog_id"]) for item in result.get("closed") or []}
+    follow, pending = _settle_and_reinspect(live, database_path, preview, acted, timeout)
+    uncertain = bool(pending)
     follow.update({
         "success": not uncertain,
         "dismissed": not uncertain,
@@ -1179,30 +1226,16 @@ def recover_dialogs(
     if policy.strip().lower() == "report" or not result.get("success"):
         result["timeout_seconds"] = timeout
         return result
-    deadline = time.monotonic() + timeout
-    remaining_windows = windows
-    while time.monotonic() < deadline:
-        remaining_windows = live.list_windows()
-        if not filter_remaining(remaining_windows, int(preview["pid"])):
-            break
-        # Stop early when only uncovered dialogs remain.
-        time.sleep(0.05)
-        break
-    remaining = filter_remaining(remaining_windows, int(preview["pid"]))
-    follow = inspect_windows(
-        remaining_windows,
-        database_path,
-        backend=live,
-        pid=int(preview["pid"]),
-        create_time=preview.get("create_time"),
-        responsive=_responsive_for(remaining_windows, int(preview["pid"]), live, timeout),
-    )
-    follow = note_ready(follow, remaining)
-    if result.get("uncertain"):
+    acted = {str(item["dialog_id"]) for item in result.get("closed") or []}
+    follow, pending = _settle_and_reinspect(live, database_path, preview, acted, timeout)
+    if result.get("uncertain") or pending:
         follow["success"] = False
         follow["uncertain"] = True
         follow["error_pattern"] = "dismiss_uncertain"
-        follow["error"] = "A click was not delivered before the timeout. It was not retried."
+        follow["error"] = (
+            "A click was not delivered, or a clicked dialog was still open when the "
+            "timeout elapsed. Nothing was retried."
+        )
     follow.update({
         "policy": result.get("policy"),
         "automatic": True,

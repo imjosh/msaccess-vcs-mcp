@@ -238,7 +238,7 @@ def test_live_access_dialogs_can_be_inspected_while_blocked():
             ]
             assert matches, listed
             dialog = matches[0]
-            assert dialog["kind"] == "vba_msgbox"
+            assert dialog["kind"] == "unknown"  # custom caption: no positive signature
             assert _has_button(dialog["buttons"], "ok")
             assert listed["ready"] is False
             assert listed["pid"] == pid_a

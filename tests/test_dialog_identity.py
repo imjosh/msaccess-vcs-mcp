@@ -215,8 +215,8 @@ def test_close_reverifies_before_closing():
 
 
 def test_recover_skips_a_dialog_that_changed_and_clicks_nothing():
-    backend = ScriptedBackend([_main(), _msgbox()])
-    backend.script_windows([_main(), _msgbox()], [_main()])
+    backend = ScriptedBackend([_main(), _msgbox(title="Microsoft Access")])
+    backend.script_windows([_main(), _msgbox(title="Microsoft Access")], [_main()])
     result = _call(tools.vcs_recover_dialogs, backend, DB, policy="safe", pid=10)
     assert backend.clicked == []
     assert [item["reason"] for item in result["skipped"]] == ["dialog_changed"]
