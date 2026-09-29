@@ -51,11 +51,12 @@ from .access_com.connection import (
 from .access_com.dao_helpers import list_query_defs, list_table_defs
 from .access_com.process_qos import list_access_pids, prefer_full_power_if_created
 from .access_gate import EXEMPT_TOOLS, get_access_gate
-from .dialog_recovery import begin_gated_call, finish_gated_call
 from .dialog_recovery import (
     automation_status,
+    begin_gated_call,
     dialog_timeout_sec,
     dismiss_dialog,
+    finish_gated_call,
     list_dialogs,
     recover_dialogs,
 )
