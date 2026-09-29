@@ -282,6 +282,7 @@ def resolve_target(
             "success": True,
             **_describe(candidate),
             "identity_confirmed": ident.confirmed,
+            "running": ident.running,
             "matched_by": matched_by,
         }
 
@@ -304,6 +305,7 @@ def resolve_target(
                 owned_pids.add(record.pid)
     except Exception:
         owned_pids = set()
+    dead_owned = {item for item in owned_pids if _ident(item).running is False}
     owned_pids = {item for item in owned_pids if _ident(item).is_access}
 
     # Prefer the intersection when both sources agree on a live window.
@@ -316,6 +318,14 @@ def resolve_target(
         candidates = owned_pids
 
     if len(candidates) == 0:
+        if dead_owned and not unconfirmed_pids:
+            return {
+                "success": False,
+                "ready": False,
+                "error_pattern": "access_not_running",
+                "error": "The Access instance for this database is no longer running. Relaunch it.",
+                "candidates": [_describe(item) for item in sorted(dead_owned)],
+            }
         if unconfirmed_pids:
             return {
                 "success": False,
@@ -388,6 +398,44 @@ def _dialog_changed(report: dict[str, Any], item: dict[str, Any]) -> dict[str, A
     }
 
 
+def _readiness(
+    *,
+    identity_confirmed: bool,
+    running: bool | None,
+    responsive: bool | None,
+    dialogs: list[dict[str, Any]],
+    gate_busy_here: bool,
+) -> tuple[bool, str | None]:
+    """Readiness and, when not ready, the first reason as an ``error_pattern``.
+
+    Every condition must be positively confirmed: an unknown answer (identity,
+    liveness, responsiveness) is not ready.
+    """
+    if running is False:
+        return False, "access_not_running"
+    if running is None or not identity_confirmed:
+        return False, "identity_unconfirmed"
+    if responsive is None:
+        return False, "no_windows_to_probe"
+    if responsive is False:
+        return False, "access_unresponsive"
+    if any(item.get("kind") == "vba_break" for item in dialogs):
+        return False, "vba_break"
+    if any(item.get("kind") in BLOCKING_KINDS for item in dialogs):
+        return False, "blocking_dialog"
+    if gate_busy_here:
+        return False, "server_busy"
+    return True, None
+
+
+def _gate_busy_here(gate: dict[str, Any]) -> bool:
+    """The gate is busy with this database, or with one we cannot name."""
+    if not gate.get("gate_busy"):
+        return False
+    operation = gate.get("operation") or {}
+    return bool(operation.get("same_database")) or not operation.get("database")
+
+
 def _dialog_record(window: WindowInfo, kind: str) -> dict[str, Any]:
     message = "\n".join(text for text in window.texts if text and text != window.title)
     return {
@@ -452,11 +500,12 @@ def inspect_windows(
     break_mode = any(item["kind"] == "vba_break" for item in dialogs)
     blocking = [item for item in dialogs if item["kind"] in BLOCKING_KINDS]
     gate = _gate_snapshot(database_path)
-    ready = (
-        responsive is not False
-        and not break_mode
-        and not blocking
-        and not gate["gate_busy"]
+    ready, _reason = _readiness(
+        identity_confirmed=bool(target.get("identity_confirmed")),
+        running=target.get("running"),
+        responsive=responsive,
+        dialogs=dialogs,
+        gate_busy_here=_gate_busy_here(gate),
     )
     interruption = _interruptions.get(chosen)
     return {
@@ -466,6 +515,7 @@ def inspect_windows(
         "create_time": target.get("create_time"),
         "process_name": target.get("process_name") or None,
         "identity_confirmed": target.get("identity_confirmed", False),
+        "running": target.get("running"),
         "matched_by": target.get("matched_by"),
         "dialogs": dialogs,
         "break_mode": break_mode,
@@ -477,8 +527,9 @@ def inspect_windows(
         "execution_interrupted": interruption is not None,
         "last_interruption": interruption,
         "note": (
-            "ready means this process is not in break mode, has no blocking dialog, "
-            "and the MCP Access gate is free. Dismissing a dialog does not retry the "
+            "ready means this process is confirmed as a running, responsive Access, "
+            "is not in break mode, has no blocking dialog, and the MCP Access gate "
+            "is free for this database. Dismissing a dialog does not retry the "
             "operation that was waiting."
         ),
     }
@@ -812,11 +863,14 @@ def note_ready(report: dict[str, Any], remaining: list[dict[str, Any]]) -> dict[
     blocking = [item for item in remaining if item.get("kind") in BLOCKING_KINDS]
     pid = report.get("pid")
     interruption = _interruptions.get(int(pid)) if pid else None
-    ready = (
-        report.get("responsive") is not False
-        and not break_mode
-        and not blocking
-        and not report.get("gate_busy")
+    ready, _reason = _readiness(
+        identity_confirmed=bool(report.get("identity_confirmed")),
+        running=report.get("running"),
+        responsive=report.get("responsive"),
+        dialogs=remaining,
+        gate_busy_here=_gate_busy_here(
+            {"gate_busy": report.get("gate_busy"), "operation": report.get("operation")}
+        ),
     )
     report = dict(report)
     report["dialogs"] = remaining
@@ -1177,9 +1231,27 @@ def automation_status(
         timeout_seconds=timeout_seconds,
         backend=backend,
     )
-    if report.get("responsive") is False and report.get("success"):
-        report["error_pattern"] = "access_unresponsive"
+    if not report.get("success"):
         report["ready"] = False
+        return report
+    _ready, pattern = _readiness(
+        identity_confirmed=bool(report.get("identity_confirmed")),
+        running=report.get("running"),
+        responsive=report.get("responsive"),
+        dialogs=report.get("dialogs") or [],
+        gate_busy_here=_gate_busy_here(
+            {"gate_busy": report.get("gate_busy"), "operation": report.get("operation")}
+        ),
+    )
+    if pattern:
+        report["error_pattern"] = pattern
+    if pattern in {"access_not_running", "no_windows_to_probe"}:
+        report["success"] = False
+        report["error"] = (
+            "The Access process is not running. Relaunch it."
+            if pattern == "access_not_running"
+            else "The Access process has no windows to probe yet. Wait and check again."
+        )
     return report
 
 

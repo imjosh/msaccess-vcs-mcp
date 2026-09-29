@@ -3492,8 +3492,11 @@ def vcs_automation_status(
     """
     Check whether the target Access instance can accept another COM call.
 
-    ``ready`` is true only when the process responds, VBA is not in break
-    mode, no blocking dialog is open, and the MCP Access gate is free.
+    ``ready`` is true only when the process is confirmed as a running Access,
+    it responds (unknown is not ready), VBA is not in break mode, no blocking
+    dialog is open, and the MCP Access gate is not busy with this database.
+    When false, ``error_pattern`` says why (``access_not_running`` and
+    ``no_windows_to_probe`` are distinct).
     ``execution_interrupted`` is true after End or an explicit cancel; the
     diagnostics from that dialog are in ``last_interruption``. This does not
     click anything and does not use the Access COM gate.

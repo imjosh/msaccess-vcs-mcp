@@ -111,8 +111,14 @@ result sets `failure_dialog_dismissed` or `interrupted`. The waiting tool
 still returns its own error or timeout. Do not retry the mutation until
 `vcs_automation_status` reports `ready: true`.
 
-`ready` means the process answered a window message, VBA is not in break
-mode, no blocking dialog is open, and the Access gate is free.
+`ready` means every one of these is confirmed: the process is Access with a
+readable creation time, it is running, it answered a window message (an
+unknown answer is not ready), VBA is not in break mode, no blocking dialog is
+open, and the Access gate is not busy with that database. When it is false,
+`error_pattern` names the first missing condition. `access_not_running` (relaunch)
+and `no_windows_to_probe` (wait) are different outcomes; the others are
+`identity_unconfirmed`, `access_unresponsive`, `vba_break`, `blocking_dialog`
+and `server_busy`.
 `execution_interrupted` carries the dialog text captured before End or cancel.
 
 `policy="safe"` clicks OK only on a recognized OK-only dialog whose text is
