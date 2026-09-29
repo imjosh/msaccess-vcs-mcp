@@ -36,15 +36,19 @@ FAILURE_KINDS = {"vba_runtime_error", "vba_compile_error"}
 # A kind other than "unknown" is assigned only by a positive signature (see
 # classify_window). Automatic recovery never clicks "unknown".
 UNKNOWN_KIND = "unknown"
+# A standard dialog whose only actionable button is OK, under any caption: a VBA
+# MsgBox with a custom title. Positive signature is the button set alone.
+MSGBOX_KIND = "vba_msgbox"
 BLOCKING_KINDS = {
     "vba_runtime_error",
     "vba_compile_error",
     "access_dialog",
+    MSGBOX_KIND,
     UNKNOWN_KIND,
     "vba_break",
 }
 # Kinds whose OK-only form the ``safe`` policy may acknowledge.
-SAFE_OK_KINDS = {"vba_compile_error", "access_dialog"}
+SAFE_OK_KINDS = {"vba_compile_error", "access_dialog", MSGBOX_KIND}
 POLL_INTERVAL_SEC = 0.05
 DIALOG_ID_PREFIX = "hwnd:"
 _DESTRUCTIVE_TEXT = (
@@ -170,8 +174,20 @@ def classify_window(window: WindowInfo) -> str:
             return "access_dialog"
         if title_l.startswith("microsoft visual basic"):
             return "access_dialog"
+        # Help is not a choice, so OK + Help is still a single-button box.
+        actionable = {label for label in buttons if label != "help"}
+        if actionable == {"ok"} and len(_actionable_buttons(window)) == 1:
+            return MSGBOX_KIND
         return UNKNOWN_KIND
     return "ignored"
+
+
+def _actionable_buttons(window: WindowInfo) -> list[ButtonInfo]:
+    return [
+        button
+        for button in window.buttons
+        if button.text.strip() and _button_label(button.text) != "help"
+    ]
 
 
 def _destructive_text(window: WindowInfo) -> bool:
@@ -214,7 +230,8 @@ def auto_button(window: WindowInfo, kind: str, policy: str) -> str | None:
     """Return a button caption the policy may click, or None.
 
     Debug is never chosen. Destructive confirmations (save, discard, delete,
-    overwrite) are never acknowledged automatically. End is used only for a
+    overwrite) are never acknowledged automatically, including in a
+    single-button ``vba_msgbox``. End is used only for a
     runtime-error dialog when the policy is ``end_runtime_error``. An
     ``unknown`` dialog is never clicked.
     """
@@ -231,11 +248,7 @@ def auto_button(window: WindowInfo, kind: str, policy: str) -> str | None:
             return "End"
         return None
     # OK-only, ignoring a Help button that we do not click.
-    actionable = [
-        button.text.strip()
-        for button in window.buttons
-        if button.text.strip() and _button_label(button.text) != "help"
-    ]
+    actionable = [button.text.strip() for button in _actionable_buttons(window)]
     if len(actionable) == 1 and _button_label(actionable[0]) == "ok":
         return actionable[0]
     return None
