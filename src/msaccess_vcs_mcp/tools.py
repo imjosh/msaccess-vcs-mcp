@@ -202,6 +202,37 @@ def _noninteractive_policy(noninteractive: bool, decision_policy: str | None) ->
     return policy
 
 
+_INTERACTION_MODE_NORMAL = 0  # add-in eInteractionMode.eimNormal
+
+
+def _select_interactive_mode(addin: Any) -> None:
+    """Send an explicit interactive mode, so the run never inherits a stale one.
+
+    Call only outside a noninteractive scope (``policy`` is None), and before
+    the operation starts.
+    """
+    addin.call_sync("SetInteractionMode", _INTERACTION_MODE_NORMAL)
+
+
+def _clear_operation_policy(addin: Any) -> str | None:
+    """Clear the add-in operation policy. Never raises; returns a failure message.
+
+    ``ClearOperationPolicy`` is idempotent, so this is safe after the add-in's
+    ``Finish`` has already restored the mode. A failure is usage-logged so a
+    policy left set in the add-in is visible.
+    """
+    try:
+        cleared = _addin_json_result(addin.call_sync("ClearOperationPolicy"))
+        if cleared.get("success") is False:
+            message = str(cleared.get("error") or cleared.get("message") or "ClearOperationPolicy refused")
+        else:
+            return None
+    except Exception as e:
+        message = str(e) or type(e).__name__
+    log_diagnostic_event("policy_cleanup_failed", error=message)
+    return message
+
+
 def _coerce_decisions(value: Any) -> Any:
     if isinstance(value, str):
         try:
@@ -1262,12 +1293,13 @@ async def vcs_import_objects(
             and the merge results window. Required confirmations and merge
             conflicts use ``decision_policy`` and otherwise return
             ``error_pattern: decision_required`` instead of a dialog.
-            Pass False to keep the existing interactive prompts (and the
-            older MCP behavior that lets source win conflicts).
+            Pass False to select interactive mode explicitly, with the
+            add-in's normal prompts.
         decision_policy: Used when ``noninteractive`` is True. One of
             ``block`` (default), ``prefer_source``, ``prefer_database``,
-            ``skip``, or ``decline``. ``prefer_source`` is the explicit
-            choice that overwrites conflicting database objects from source.
+            ``skip``, or ``decline``. ``prefer_source`` takes each conflict's
+            requested action, and overwrites from source when it asks for none.
+            ``prefer_database`` keeps the database object, same as ``skip``.
     
     Returns:
         Dictionary with import results and any errors, plus ``log_path`` for
@@ -1323,25 +1355,39 @@ async def vcs_import_objects(
                         "imported_count": 0,
                     }
                 if policy:
+                    # A refusal here (for example operation_already_running)
+                    # is a normal result, not an error.
                     policy_result = _addin_json_result(
                         addin.call_sync("SetOperationPolicy", policy)
                     )
                     if policy_result.get("success") is False:
                         return policy_result
+                else:
+                    _select_interactive_mode(addin)
+                op_error: Exception | None = None
                 try:
                     result = _addin_json_result(
                         addin.call_sync("ImportByType", types_arg, full_import)
                     )
+                except Exception as e:
+                    op_error = e
+                    result = {"success": False, "error": str(e), "imported_count": 0}
                 finally:
-                    if policy:
-                        addin.call_sync("ClearOperationPolicy")
+                    cleanup_error = _clear_operation_policy(addin) if policy else None
+                if cleanup_error:
+                    # Secondary information: never replaces the operation's result.
+                    result["policy_cleanup_error"] = cleanup_error
                 result.setdefault("database_path", str(db_path))
                 result.setdefault("source_dir", str(src_path))
-                if result.get("success") and "imported_count" not in result:
-                    result["imported_count"] = "See log for details"
-                result = _apply_decision_result(result, result)
+                if op_error is None:
+                    if result.get("success") and "imported_count" not in result:
+                        result["imported_count"] = "See log for details"
+                    result = _apply_decision_result(result, result)
                 return _attach_log_context(result, src_path, "Merge")
             
+            if not policy:
+                _select_interactive_mode(addin)
+
             # Every branch below ends with one payload for the normaliser.
             # The add-in's sync return is a start result, never a final one.
             def _merge_sync() -> dict[str, Any]:
@@ -3106,9 +3152,9 @@ async def vcs_run_tests(
     Headless here means no add-in UI (no web runner, no console form, no
     message boxes) -- not a hidden Access window. The host instance stays
     visible. ``noninteractive`` defaults to True and is scoped to the run:
-    the add-in restores the previous interaction mode when the run finishes,
-    fails, or is cancelled. Pass ``noninteractive=False`` for the ribbon-style
-    console. ``decision_policy`` (default ``block``) answers confirmations;
+    the add-in restores its interaction mode when the run finishes,
+    fails, or is cancelled. Pass ``noninteractive=False`` to select interactive
+    mode explicitly and get the ribbon-style console. ``decision_policy`` (default ``block``) answers confirmations;
     an uncovered prompt returns ``error_pattern: decision_required`` instead
     of a dialog.
 
@@ -3182,7 +3228,10 @@ async def vcs_run_tests(
             addin.load_addin(app, db_path=str(db_path))
 
             # The add-in scopes noninteractive mode inside RunFilteredTests and
-            # restores it when the run ends. Do not set a process-wide mode here.
+            # restores it when the run ends. Do not set a process-wide mode
+            # here; only an interactive run selects its mode explicitly.
+            if not policy:
+                _select_interactive_mode(addin)
 
             # Set the filter option (session-scoped, does not modify user's vcs-options.json)
             addin.call_sync("SetOption", "DefaultTestFilter", filter or "")

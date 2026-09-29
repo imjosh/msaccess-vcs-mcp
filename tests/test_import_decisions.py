@@ -134,3 +134,80 @@ def test_duplicate_refusal_returned_once(tmp_path):
     assert result["error_pattern"] == "operation_already_running"
     addin.merge_build.assert_not_called()
     addin.call_async.assert_called_once()
+
+
+def _scripted_sync(import_result, clear_error=None):
+    """call_sync stand-in: policy set succeeds, import and clear are scripted."""
+    def _call(command, *_args):
+        if command == "SetOperationPolicy":
+            return json.dumps({"success": True})
+        if command == "ImportByType":
+            if isinstance(import_result, Exception):
+                raise import_result
+            return json.dumps(import_result)
+        if command == "ClearOperationPolicy":
+            if clear_error:
+                raise clear_error
+            return json.dumps({"success": True})
+        return None
+    return _call
+
+
+def test_operation_and_cleanup_both_raise_returns_original_error(tmp_path):
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_sync.side_effect = _scripted_sync(
+            RuntimeError("import exploded"), clear_error=RuntimeError("clear exploded")
+        )
+        result = _run((db, src), object_types=["forms"])
+    assert result["success"] is False
+    assert result["error"] == "import exploded"
+    assert result["policy_cleanup_error"] == "clear exploded"
+
+
+def test_cleanup_failure_is_attached_and_logged_on_success(tmp_path):
+    from unittest.mock import patch
+
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_sync.side_effect = _scripted_sync(
+            {"success": True}, clear_error=RuntimeError("clear exploded")
+        )
+        with patch("msaccess_vcs_mcp.tools.log_diagnostic_event") as log:
+            result = _run((db, src), object_types=["forms"])
+    assert result["success"] is True
+    assert result["policy_cleanup_error"] == "clear exploded"
+    log.assert_called_once_with("policy_cleanup_failed", error="clear exploded")
+
+
+def test_policy_set_refusal_is_a_normal_result(tmp_path):
+    refusal = {"success": False, "error_pattern": "operation_already_running", "error": "busy"}
+    with _patch_import_tool(tmp_path, call_sync_result=json.dumps(refusal)) as (db, src, addin, ops):
+        result = _run((db, src), object_types=["forms"])
+    assert result["error_pattern"] == "operation_already_running"
+    commands = [c.args[0] for c in addin.call_sync.call_args_list]
+    assert "ImportByType" not in commands
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_interactive_sends_explicit_mode_before_operation(tmp_path, scoped):
+    kwargs = {"noninteractive": False}
+    if scoped:
+        kwargs["object_types"] = ["forms"]
+    with _patch_import_tool(tmp_path, call_sync_result=json.dumps({"success": True})) as (
+        db, src, addin, ops,
+    ):
+        events = []
+        addin.call_sync.side_effect = lambda c, *a: events.append(c) or json.dumps({"success": True})
+        addin.call_async.side_effect = lambda *a: events.append("async") or {"async": True}
+        addin.merge_build.side_effect = lambda *a: events.append("merge") or {"success": True}
+        _run((db, src), **kwargs)
+    assert events[0] == "SetInteractionMode"
+    assert "SetOperationPolicy" not in events
+    addin.call_sync.assert_any_call("SetInteractionMode", 0)
+
+
+def test_noninteractive_never_sends_interactive_mode(tmp_path):
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_sync.side_effect = _scripted_sync({"success": True})
+        _run((db, src), object_types=["forms"])
+    commands = [c.args[0] for c in addin.call_sync.call_args_list]
+    assert "SetInteractionMode" not in commands
