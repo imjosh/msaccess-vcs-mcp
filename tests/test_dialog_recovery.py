@@ -108,7 +108,7 @@ def test_classify_runtime_compile_break_and_msgbox():
     assert classify_window(runtime) == "vba_runtime_error"
     assert classify_window(compile_error) == "vba_compile_error"
     assert classify_window(paused) == "vba_break"
-    assert classify_window(msg) == "vba_msgbox"
+    assert classify_window(msg) == "unknown"
     assert classify_window(addin) == "addin_window"
 
 
@@ -208,7 +208,7 @@ def test_safe_policy_acks_ok_only_and_skips_unknown_and_destructive():
     assert 21 not in backend.clicked
     skipped_kinds = {item["kind"] for item in result["skipped"]}
     assert "vba_runtime_error" in skipped_kinds
-    assert "vba_msgbox" in skipped_kinds
+    assert "unknown" in skipped_kinds
     assert result["failure_dialog_dismissed"] is False
 
 
@@ -385,7 +385,7 @@ def test_auto_button_never_returns_debug_or_yes():
     assert auto_button(runtime, "vba_runtime_error", "safe") is None
     assert auto_button(runtime, "vba_runtime_error", "end_runtime_error") == "End"
     confirm = _win(texts=("Overwrite?",), buttons=(_button(3, "Yes"), _button(4, "No")))
-    assert auto_button(confirm, "vba_msgbox", "safe") is None
+    assert auto_button(confirm, "unknown", "safe") is None
 
 
 def test_dialog_tools_run_while_the_access_gate_is_held(tmp_path):

@@ -111,13 +111,32 @@ result sets `failure_dialog_dismissed` or `interrupted`. The waiting tool
 still returns its own error or timeout. Do not retry the mutation until
 `vcs_automation_status` reports `ready: true`.
 
-`ready` means the process answered a window message, VBA is not in break
-mode, no blocking dialog is open, and the Access gate is free.
+`ready` means every one of these is confirmed: the process is Access with a
+readable creation time, it is running, it answered a window message (an
+unknown answer is not ready), VBA is not in break mode, no blocking dialog is
+open, and the Access gate is not busy with that database. When it is false,
+`error_pattern` names the first missing condition. `access_not_running` (relaunch)
+and `no_windows_to_probe` (wait) are different outcomes; the others are
+`identity_unconfirmed`, `access_unresponsive`, `vba_break`, `blocking_dialog`
+and `server_busy`.
 `execution_interrupted` carries the dialog text captured before End or cancel.
 
-`policy="safe"` clicks OK only on a recognized OK-only dialog whose text is
-not a save, discard, delete, or overwrite confirmation. Unknown dialogs are
-returned in `skipped` with their buttons. `end_runtime_error` adds End on a
+A dialog gets a known kind only from a positive signature (a Microsoft
+Access or Visual Basic caption, run-time or compile error text, the End/Debug
+button set, the add-in caption). A standard dialog box that matches none is
+`kind: "unknown"`, reported with its title, text and buttons. `unknown` is
+blocking and is never clicked automatically; dismiss it explicitly with
+`vcs_dismiss_dialog(..., button=...)`.
+
+`policy="safe"` clicks OK only on a known-kind OK-only dialog whose text is
+not a save, discard, delete, or overwrite confirmation. Everything else is
+returned in `skipped` with its buttons.
+
+`vcs_dismiss_dialog` and `vcs_recover_dialogs` wait the same way after a
+click: they poll until the dialogs they clicked have closed (dialogs the call
+did not act on never extend the wait) or the timeout elapses, then inspect
+once for the report. A dialog they clicked that is still open at the deadline
+is `dismiss_uncertain`, for both tools. `end_runtime_error` adds End on a
 runtime-error dialog and still never clicks Debug.
 
 If two Access windows match the database, the tools return

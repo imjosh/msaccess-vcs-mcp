@@ -148,7 +148,7 @@ vcs_recover_dialogs(database_path, policy="end_runtime_error")
 vcs_automation_status(database_path)
 ```
 
-`ready: true` from `vcs_automation_status` means the process responded, VBA is not in break mode, no blocking dialog is open, and the gate is free. Ending a runtime-error dialog sets `execution_interrupted` and does not turn the failed call into a success. Debug is never clicked. The inspector only touches windows of the matched Access PID.
+`ready: true` from `vcs_automation_status` means the process is confirmed as a running Access, it responded (unknown is not ready), VBA is not in break mode, no blocking dialog is open, and the gate is not busy with that database. Otherwise `error_pattern` names why, with `access_not_running` and `no_windows_to_probe` kept distinct. Ending a runtime-error dialog sets `execution_interrupted` and does not turn the failed call into a success. Debug is never clicked. The inspector only touches windows of the matched Access PID.
 
 ### Rebuilding the VCS add-in
 
