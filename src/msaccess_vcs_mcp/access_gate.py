@@ -10,6 +10,7 @@ instead of queueing into a client-side timeout.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import os
 import threading
 import time
@@ -25,6 +26,7 @@ except ImportError:
     COM_AVAILABLE = False
 
 DEFAULT_BUSY_WAIT_SEC = 15.0
+_call_ids = itertools.count(1)
 
 # Tools that never touch an Access instance — they stay responsive while
 # a long export or test run holds the gate.
@@ -61,6 +63,9 @@ class InFlight:
     tool: str
     database: str | None
     started_at: float
+    # Identifies this call among all others. Interruption records use it to
+    # find the call they belong to, so a later call never inherits one.
+    call_id: int = 0
 
 
 def _busy_error(in_flight: InFlight) -> dict[str, Any]:
@@ -138,6 +143,7 @@ class AccessGate:
                 tool=tool,
                 database=database,
                 started_at=time.perf_counter(),
+                call_id=next(_call_ids),
             )
 
         try:

@@ -121,6 +121,18 @@ and `no_windows_to_probe` (wait) are different outcomes; the others are
 and `server_busy`.
 `execution_interrupted` carries the dialog text captured before End or cancel.
 
+Interruption records are keyed by process identity (PID plus creation time), so
+a new process that reuses a PID starts clean. Dismissing a runtime or compile
+error records one, from `vcs_dismiss_dialog` or `vcs_recover_dialogs` alike.
+A record made while a gated call on that database was in flight belongs to that
+call: when the call finishes, its result is forced to `success: false`,
+`execution_interrupted: true`, `error_pattern: execution_interrupted` (original
+error text kept), and the record is removed. Precedence with add-in results is
+`decision_required`, then `execution_interrupted`, then a plain error. A record
+made with the gate free is shown as `last_interruption` by the status tools
+until the process identity changes or the next gated call on that database
+starts.
+
 A dialog gets a known kind only from a positive signature (a Microsoft
 Access or Visual Basic caption, run-time or compile error text, the End/Debug
 button set, the add-in caption). A standard dialog box that matches none is
