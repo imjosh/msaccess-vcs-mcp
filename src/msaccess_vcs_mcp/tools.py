@@ -51,6 +51,7 @@ from .access_com.connection import (
 from .access_com.dao_helpers import list_query_defs, list_table_defs
 from .access_com.process_qos import list_access_pids, prefer_full_power_if_created
 from .access_gate import EXEMPT_TOOLS, get_access_gate
+from .dialog_recovery import begin_gated_call, finish_gated_call
 from .dialog_recovery import (
     automation_status,
     dialog_timeout_sec,
@@ -866,14 +867,38 @@ def vcs_tool(name: str):
                     database = args[0]
 
             gate = get_access_gate()
-            return await gate.run_exclusive(
-                name,
-                str(database) if database is not None else None,
-                logged,
-                is_async_body,
-                *args,
-                **kwargs,
-            )
+            claimed: dict[str, int] = {}
+
+            def _claim_call() -> None:
+                # Runs inside the gate, so the in-flight call is this one.
+                current = gate.current_in_flight()
+                if current is not None:
+                    claimed["call_id"] = current.call_id
+                begin_gated_call(str(database) if database is not None else None)
+
+            if is_async_body:
+                async def body(*a, **kw):
+                    _claim_call()
+                    return await logged(*a, **kw)
+            else:
+                def body(*a, **kw):
+                    _claim_call()
+                    return logged(*a, **kw)
+
+            try:
+                result = await gate.run_exclusive(
+                    name,
+                    str(database) if database is not None else None,
+                    body,
+                    is_async_body,
+                    *args,
+                    **kwargs,
+                )
+            except BaseException:
+                finish_gated_call(claimed.get("call_id"), None)
+                raise
+            # A busy answer never ran the body, so nothing was claimed.
+            return finish_gated_call(claimed.get("call_id"), result)
 
         return mcp.tool()(with_refresh)
     return decorator

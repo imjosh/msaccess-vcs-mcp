@@ -12,6 +12,7 @@ an error dialog does not make the failed Access operation a success.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Protocol
@@ -59,8 +60,90 @@ _DESTRUCTIVE_TEXT = (
     "lose changes",
 )
 
-# pid -> last time we ended or reset execution from outside Access
-_interruptions: dict[int, dict[str, Any]] = {}
+# (pid, process creation time) -> record of an End/cancel done from outside Access.
+# Keyed by identity so a new process that reuses the PID starts clean. A record
+# made while a gated call was in flight carries that call (``busy_with`` and
+# ``call_id``) and is used up when the call finishes; otherwise it stays as
+# ``last_interruption`` until the identity changes or the next gated call on
+# its database starts.
+_interruptions: dict[tuple[int, int | None], dict[str, Any]] = {}
+_interruptions_lock = threading.Lock()
+
+
+def _same_path(a: str | None, b: str | None) -> bool:
+    if not a or not b:
+        return False
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def _record_interruption(
+    pid: int,
+    create_time: int | None,
+    database_path: str | None,
+    payload: dict[str, Any],
+) -> None:
+    """Record an interruption for one process identity.
+
+    Attaches the in-flight gated call when it is on the same database.
+    """
+    record = dict(payload)
+    record["database_path"] = database_path
+    record["busy_with"] = None
+    current = get_access_gate().current_in_flight()
+    if current is not None and _same_path(current.database, database_path):
+        record["busy_with"] = {"tool": current.tool, "database": current.database}
+        record["call_id"] = current.call_id
+    with _interruptions_lock:
+        # Any other identity on this PID is a dead process; forget it.
+        for key in [k for k in _interruptions if k[0] == int(pid) and k[1] != create_time]:
+            del _interruptions[key]
+        _interruptions[(int(pid), create_time)] = record
+
+
+def _interruption_for(pid: int | None, create_time: int | None) -> dict[str, Any] | None:
+    if not pid:
+        return None
+    with _interruptions_lock:
+        record = _interruptions.get((int(pid), create_time))
+    if record is None:
+        return None
+    return {k: v for k, v in record.items() if k != "call_id"}
+
+
+def begin_gated_call(database_path: str | None) -> None:
+    """A new gated call on ``database_path`` starts: unattached records are stale."""
+    with _interruptions_lock:
+        for key in [
+            k for k, v in _interruptions.items()
+            if v.get("busy_with") is None and _same_path(v.get("database_path"), database_path)
+        ]:
+            del _interruptions[key]
+
+
+def finish_gated_call(call_id: int | None, result: Any) -> Any:
+    """Use up the interruption records of a finished gated call.
+
+    Precedence: ``decision_required`` > ``execution_interrupted`` > plain error.
+    """
+    if call_id is None:
+        return result
+    with _interruptions_lock:
+        matched = [k for k, v in _interruptions.items() if v.get("call_id") == call_id]
+        records = [_interruptions.pop(k) for k in matched]
+    if not records or not isinstance(result, dict):
+        return result
+    if result.get("decision_required") or result.get("error_pattern") == "decision_required":
+        return result
+    record = records[-1]
+    result["success"] = False
+    result["execution_interrupted"] = True
+    result["error_pattern"] = "execution_interrupted"
+    if not result.get("error"):
+        detail = record.get("message") or "a runtime or compile error"
+        result["error"] = (
+            f"Execution was interrupted: a dialog was dismissed while this call ran ({detail})."
+        )
+    return result
 
 
 @dataclass(frozen=True)
@@ -534,7 +617,7 @@ def inspect_windows(
         dialogs=dialogs,
         gate_busy_here=_gate_busy_here(gate),
     )
-    interruption = _interruptions.get(chosen)
+    interruption = _interruption_for(chosen, target.get("create_time"))
     return {
         "success": True,
         "database_path": database_path,
@@ -681,13 +764,13 @@ def dismiss_one(
         closed.append({**item, "button": target_button.text, "how": "click"})
         if _button_label(target_button.text) == "end" or failure_dialog:
             interrupted = True
-            _interruptions[int(before["pid"])] = {
+            _record_interruption(int(before["pid"]), before.get("create_time"), database_path, {
                 "dialog_id": dialog_id,
                 "kind": kind,
                 "button": target_button.text,
                 "title": item.get("title"),
                 "message": item.get("message"),
-            }
+            })
     elif action_l == "cancel":
         if kind != "addin_window":
             return {
@@ -702,13 +785,13 @@ def dismiss_one(
         backend.close(int(item["hwnd"]))
         closed.append({**item, "how": "cancel"})
         interrupted = True
-        _interruptions[int(before["pid"])] = {
+        _record_interruption(int(before["pid"]), before.get("create_time"), database_path, {
             "dialog_id": dialog_id,
             "kind": kind,
             "button": None,
             "title": item.get("title"),
             "message": "Add-in window close requested as cancellation.",
-        }
+        })
     elif action_l == "close":
         if kind == "addin_window" and (before.get("operation") or {}).get("same_database"):
             return {
@@ -854,13 +937,13 @@ def recover_windows(
         record = {**item, "button": button.text, "how": "auto"}
         closed.append(record)
         if item["kind"] in FAILURE_KINDS or _button_label(button.text) == "end":
-            _interruptions[int(report["pid"])] = {
+            _record_interruption(int(report["pid"]), report.get("create_time"), database_path, {
                 "dialog_id": item["dialog_id"],
                 "kind": item["kind"],
                 "button": button.text,
                 "title": item.get("title"),
                 "message": item.get("message"),
-            }
+            })
 
     result = {
         "success": True,
@@ -892,7 +975,7 @@ def note_ready(report: dict[str, Any], remaining: list[dict[str, Any]]) -> dict[
     break_mode = any(item.get("kind") == "vba_break" for item in remaining)
     blocking = [item for item in remaining if item.get("kind") in BLOCKING_KINDS]
     pid = report.get("pid")
-    interruption = _interruptions.get(int(pid)) if pid else None
+    interruption = _interruption_for(pid, report.get("create_time"))
     ready, _reason = _readiness(
         identity_confirmed=bool(report.get("identity_confirmed")),
         running=report.get("running"),
@@ -1290,4 +1373,5 @@ def automation_status(
 
 def reset_interruptions() -> None:
     """Clear recorded End/cancel diagnostics. Used by tests."""
-    _interruptions.clear()
+    with _interruptions_lock:
+        _interruptions.clear()
