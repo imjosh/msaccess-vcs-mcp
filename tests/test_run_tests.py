@@ -209,7 +209,7 @@ class TestRunTestsSuccess:
         )
 
         mock_addin.call_sync.assert_any_call("SetOption", "DefaultTestFilter", "")
-        mock_addin.call_sync.assert_any_call("RunFilteredTests")
+        mock_addin.call_sync.assert_any_call("RunFilteredTests", "block")
 
     def test_filter_sets_default_test_filter(self, tmp_path):
         result, mock_app, mock_addin = _call_run_tests(
@@ -221,20 +221,18 @@ class TestRunTestsSuccess:
         mock_addin.call_sync.assert_any_call(
             "SetOption", "DefaultTestFilter", "modTestFoo,-slow"
         )
-        mock_addin.call_sync.assert_any_call("RunFilteredTests")
+        mock_addin.call_sync.assert_any_call("RunFilteredTests", "block")
 
-    def test_silent_mode_set(self, tmp_path):
-        """SetInteractionMode(1) is called via app.Run before tests."""
+    def test_noninteractive_policy_is_scoped_argument(self, tmp_path):
+        """The run passes a decision policy and does not stick the process in silent mode."""
         result, mock_app, mock_addin = _call_run_tests(
             tmp_path,
             call_sync_return=json.dumps(SAMPLE_RESULTS_ALL_PASS),
         )
 
-        addin_path = mock_addin.addin_path
-        addin_lib = os.path.splitext(os.path.abspath(addin_path))[0]
-        mock_app.Run.assert_called_once_with(
-            f"{addin_lib}.SetInteractionMode", 1
-        )
+        mock_app.Run.assert_not_called()
+        mock_addin.call_sync.assert_any_call("RunFilteredTests", "block")
+        assert result["success"] is True
 
 
 class TestRunTestsFailure:
@@ -336,24 +334,18 @@ class TestRunTestsCallOrder:
     """Verify the COM call sequence."""
 
     def test_call_order(self, tmp_path):
-        """SetInteractionMode (app.Run) -> SetOption -> RunFilteredTests (call_sync)."""
+        """SetOption -> RunFilteredTests(policy). Interaction mode is not set globally."""
         result, mock_app, mock_addin = _call_run_tests(
             tmp_path,
             call_sync_return=json.dumps(SAMPLE_RESULTS_ALL_PASS),
             filter_value="SQL,-slow",
         )
 
-        # SetInteractionMode goes through app.Run, not call_sync
-        addin_lib = os.path.splitext(os.path.abspath(mock_addin.addin_path))[0]
-        mock_app.Run.assert_called_once_with(
-            f"{addin_lib}.SetInteractionMode", 1
-        )
-
-        # SetOption + RunFilteredTests go through call_sync
+        mock_app.Run.assert_not_called()
         calls = mock_addin.call_sync.call_args_list
         assert len(calls) == 2
         assert calls[0] == call("SetOption", "DefaultTestFilter", "SQL,-slow")
-        assert calls[1] == call("RunFilteredTests")
+        assert calls[1] == call("RunFilteredTests", "block")
 
         mock_addin.load_addin.assert_called_once()
 
@@ -414,6 +406,7 @@ class TestRunTestsAsync:
         assert result["summary"]["subs"] == 5
         mock_addin.call_async.assert_called_once()
         assert mock_addin.call_async.call_args[0][1] == "RunFilteredTests"
+        assert mock_addin.call_async.call_args[0][2] == "block"
         mock_addin.call_sync.assert_called_once_with("SetOption", "DefaultTestFilter", "")
 
     def test_failed_suite_still_returns_json(self, tmp_path):

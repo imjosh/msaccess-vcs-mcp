@@ -434,7 +434,10 @@ class OperationManager:
                             "result": callback.get("result"),
                             "log_path": callback.get("log_path"),
                             "results_path": callback.get("results_path"),
-                            "log_messages": log_messages if log_messages else None
+                            "log_messages": log_messages if log_messages else None,
+                            "decisions": callback.get("decisions"),
+                            "decision_required": callback.get("decision_required"),
+                            "error_pattern": callback.get("error_pattern"),
                         }
                         
                     elif msg_type == "error":
@@ -448,6 +451,9 @@ class OperationManager:
                             "log_path": callback.get("log_path"),
                             "results_path": callback.get("results_path"),
                             "result": callback.get("result"),
+                            "decisions": callback.get("decisions"),
+                            "decision_required": callback.get("decision_required"),
+                            "error_pattern": callback.get("error_pattern"),
                         }
                     
                     elif msg_type == "cancelled":

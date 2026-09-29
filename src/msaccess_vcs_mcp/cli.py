@@ -53,6 +53,16 @@ def build_parser() -> argparse.ArgumentParser:
     merge = sub.add_parser("merge", help="Merge source files into a database")
     merge.add_argument("database_path")
     merge.add_argument("source_dir")
+    merge.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Show add-in prompts. The default suppresses them.",
+    )
+    merge.add_argument(
+        "--decision-policy",
+        default="block",
+        help="block, prefer_source, prefer_database, skip, or decline",
+    )
 
     rebuild_db = sub.add_parser(
         "rebuild-database",
@@ -92,6 +102,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Wait timeout in seconds (default 10 minutes from the add-in)",
     )
+    run_tests.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Show the add-in test console. The default is noninteractive.",
+    )
+    run_tests.add_argument(
+        "--decision-policy",
+        default="block",
+        help="block, prefer_source, prefer_database, skip, or decline",
+    )
     return parser
 
 
@@ -107,6 +127,8 @@ def arguments_for(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
         return "vcs_import_objects", {
             "database_path": args.database_path,
             "source_dir": args.source_dir,
+            "noninteractive": not args.interactive,
+            "decision_policy": args.decision_policy,
         }
     if args.command == "rebuild-database":
         payload = {
@@ -127,6 +149,8 @@ def arguments_for(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
             payload["filter"] = args.filter
         if args.timeout_seconds is not None:
             payload["timeout_seconds"] = args.timeout_seconds
+        payload["noninteractive"] = not args.interactive
+        payload["decision_policy"] = args.decision_policy
         return "vcs_run_tests", payload
     raise ValueError(f"Unknown command: {args.command}")
 

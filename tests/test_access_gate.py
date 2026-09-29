@@ -137,6 +137,10 @@ def test_exempt_tools_include_status_queries():
     assert "vcs_get_recent_calls" in EXEMPT_TOOLS
     assert "vcs_cancel_operation" in EXEMPT_TOOLS
     assert "vcs_rebuild_addin" in EXEMPT_TOOLS
+    assert "vcs_list_dialogs" in EXEMPT_TOOLS
+    assert "vcs_dismiss_dialog" in EXEMPT_TOOLS
+    assert "vcs_recover_dialogs" in EXEMPT_TOOLS
+    assert "vcs_automation_status" in EXEMPT_TOOLS
 
 
 def test_com_initializer_runs_for_sync_work():

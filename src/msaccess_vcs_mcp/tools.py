@@ -51,6 +51,12 @@ from .access_com.connection import (
 from .access_com.dao_helpers import list_query_defs, list_table_defs
 from .access_com.process_qos import list_access_pids, prefer_full_power_if_created
 from .access_gate import EXEMPT_TOOLS, get_access_gate
+from .dialog_recovery import (
+    automation_status,
+    dismiss_dialog,
+    list_dialogs,
+    recover_dialogs,
+)
 from .config import (
     get_config,
     get_callback_url,
@@ -171,6 +177,57 @@ _TEST_NO_RESULTS_ERROR = (
 )
 
 
+_DECISION_POLICIES = frozenset({
+    "block",
+    "prefer_source",
+    "prefer_database",
+    "skip",
+    "decline",
+})
+
+
+def _noninteractive_policy(noninteractive: bool, decision_policy: str | None) -> str | None:
+    """Return the add-in policy name, or None to keep interactive behavior.
+
+    Raises ValueError for an unknown policy. The tool wrappers turn that into
+    ``success: false`` without calling Access.
+    """
+    if not noninteractive:
+        return None
+    policy = (decision_policy or "block").strip().lower()
+    if policy not in _DECISION_POLICIES:
+        raise ValueError(
+            "Unknown decision_policy. Use block, prefer_source, prefer_database, skip, or decline."
+        )
+    return policy
+
+
+def _coerce_decisions(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _apply_decision_result(result: dict[str, Any], completion: dict[str, Any] | None) -> dict[str, Any]:
+    """Surface an unresolved add-in prompt. Never leave success true in that case."""
+    if not completion:
+        return result
+    decisions = completion.get("decisions")
+    if decisions is not None:
+        result["decisions"] = _coerce_decisions(decisions)
+    if completion.get("decision_required") or completion.get("error_pattern") == "decision_required":
+        result["success"] = False
+        result["decision_required"] = True
+        result["error_pattern"] = "decision_required"
+        result["error"] = completion.get("error") or completion.get("message") or (
+            "A required decision was not covered by the decision policy."
+        )
+    return result
+
+
 def _apply_test_run_success(parsed: dict[str, Any]) -> dict[str, Any]:
     """Set ``success`` from the runner summary, not from Operation.Result."""
     summary = parsed.get("summary", {})
@@ -200,6 +257,13 @@ def _parse_test_runner_json(result_json: Any) -> dict[str, Any]:
 
     if not isinstance(parsed, dict):
         return {"success": True, "result": parsed}
+    if parsed.get("decision_required") or parsed.get("error_pattern") == "decision_required":
+        parsed["success"] = False
+        parsed["decision_required"] = True
+        parsed["error_pattern"] = "decision_required"
+        if "decisions" in parsed:
+            parsed["decisions"] = _coerce_decisions(parsed.get("decisions"))
+        return parsed
     if "summary" not in parsed and "tests" not in parsed:
         return parsed if "success" in parsed else {"success": True, "result": parsed}
     return _apply_test_run_success(parsed)
@@ -229,6 +293,7 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
         if completion.get("cancelled"):
             parsed["cancelled"] = True
             parsed["success"] = False
+        parsed = _apply_decision_result(parsed, completion)
         log_path = completion.get("log_path")
         if log_path:
             parsed.setdefault("log_path", log_path)
@@ -238,6 +303,15 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
     raw = completion.get("result")
     if raw not in (None, ""):
         return _parse_test_runner_json(raw)
+
+    if completion.get("decision_required") or completion.get("error_pattern") == "decision_required":
+        return _apply_decision_result(
+            {
+                "success": False,
+                "error": completion.get("error") or completion.get("message"),
+            },
+            completion,
+        )
 
     if completion.get("cancelled"):
         return {
@@ -1075,6 +1149,8 @@ async def vcs_import_objects(
     source_dir: str,
     object_types: list[str] | None = None,
     full_import: bool = False,
+    noninteractive: bool = True,
+    decision_policy: str = "block",
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """
@@ -1133,6 +1209,16 @@ async def vcs_import_objects(
             only changed source files; if True, merge all source files in
             those categories (ignores the change index, skips conflict
             prompts). Ignored for a full project merge.
+        noninteractive: When True (default), suppress add-in message boxes
+            and the merge results window. Required confirmations and merge
+            conflicts use ``decision_policy`` and otherwise return
+            ``error_pattern: decision_required`` instead of a dialog.
+            Pass False to keep the existing interactive prompts (and the
+            older MCP behavior that lets source win conflicts).
+        decision_policy: Used when ``noninteractive`` is True. One of
+            ``block`` (default), ``prefer_source``, ``prefer_database``,
+            ``skip``, or ``decline``. ``prefer_source`` is the explicit
+            choice that overwrites conflicting database objects from source.
     
     Returns:
         Dictionary with import results and any errors, plus ``log_path`` for
@@ -1146,6 +1232,7 @@ async def vcs_import_objects(
     op_manager = _get_operation_manager()
     
     try:
+        policy = _noninteractive_policy(noninteractive, decision_policy)
         # Check if writes are disabled
         check_write_permission(config)
         
@@ -1186,9 +1273,19 @@ async def vcs_import_objects(
                         "error": "object_types was empty after stripping blanks",
                         "imported_count": 0,
                     }
-                result = _addin_json_result(
-                    addin.call_sync("ImportByType", types_arg, full_import)
-                )
+                if policy:
+                    policy_result = _addin_json_result(
+                        addin.call_sync("SetOperationPolicy", policy)
+                    )
+                    if policy_result.get("success") is False:
+                        return policy_result
+                try:
+                    result = _addin_json_result(
+                        addin.call_sync("ImportByType", types_arg, full_import)
+                    )
+                finally:
+                    if policy:
+                        addin.call_sync("ClearOperationPolicy")
                 result.setdefault("database_path", str(db_path))
                 result.setdefault("source_dir", str(src_path))
                 if result.get("success") and "imported_count" not in result:
@@ -1212,7 +1309,10 @@ async def vcs_import_objects(
                 try:
                     # Call async API for MergeBuild
                     completion = None
-                    async_result = addin.call_async(callback_info, "MergeBuild")
+                    if policy:
+                        async_result = addin.call_async(callback_info, "MergeBuild", policy)
+                    else:
+                        async_result = addin.call_async(callback_info, "MergeBuild")
                     
                     if async_result.get("async"):
                         # Wait for completion with progress reporting
@@ -1224,11 +1324,11 @@ async def vcs_import_objects(
                         )
                         
                         if not completion.get("success"):
-                            return _attach_log_context({
+                            return _attach_log_context(_apply_decision_result({
                                 "success": False,
                                 "error": completion.get("error", "Import failed"),
                                 "imported_count": 0,
-                            }, src_path, "Merge", completion)
+                            }, completion), src_path, "Merge", completion)
                     elif async_result.get("sync"):
                         # The add-in already ran the merge inline; re-running it
                         # here would merge twice. Fall through and resolve the
@@ -1239,7 +1339,7 @@ async def vcs_import_objects(
                         # so run it synchronously rather than reporting success
                         # for work that never happened.
                         op_manager.unregister_operation(operation_id)
-                        result = addin.merge_build(str(db_path), str(src_path))
+                        result = addin.merge_build(str(db_path), str(src_path), policy)
                         if not result["success"]:
                             return _attach_log_context({
                                 "success": False,
@@ -1250,7 +1350,7 @@ async def vcs_import_objects(
                     # Async call failed - fall back to sync
                     completion = None
                     op_manager.unregister_operation(operation_id)
-                    result = addin.merge_build(str(db_path), str(src_path))
+                    result = addin.merge_build(str(db_path), str(src_path), policy)
                     if not result["success"]:
                         return _attach_log_context({
                             "success": False,
@@ -1260,7 +1360,7 @@ async def vcs_import_objects(
             else:
                 # Use sync path
                 completion = None
-                result = addin.merge_build(str(db_path), str(src_path))
+                result = addin.merge_build(str(db_path), str(src_path), policy)
                 if not result["success"]:
                     return _attach_log_context({
                         "success": False,
@@ -1268,12 +1368,12 @@ async def vcs_import_objects(
                         "imported_count": 0,
                     }, src_path, "Merge")
             
-            return _attach_log_context({
+            return _attach_log_context(_apply_decision_result({
                 "success": True,
                 "imported_count": "See log for details",
                 "database_path": str(db_path),
                 "source_dir": str(src_path),
-            }, src_path, "Merge", completion)
+            }, completion), src_path, "Merge", completion)
     
     except PermissionError as e:
         return {
@@ -2965,6 +3065,8 @@ async def vcs_run_tests(
     database_path: str,
     filter: str | None = None,
     timeout_seconds: float | None = None,
+    noninteractive: bool = True,
+    decision_policy: str = "block",
     ctx: Context = None,
 ) -> dict[str, Any]:
     """
@@ -2974,8 +3076,14 @@ async def vcs_run_tests(
     calls), executes their test procedures, and returns structured JSON results
     with per-test status, assertion details, timing, and tags.
 
-    Headless here means no add-in UI (no web runner, no console form, silent
-    dialogs) -- not a hidden Access window. The host instance stays visible.
+    Headless here means no add-in UI (no web runner, no console form, no
+    message boxes) -- not a hidden Access window. The host instance stays
+    visible. ``noninteractive`` defaults to True and is scoped to the run:
+    the add-in restores the previous interaction mode when the run finishes,
+    fails, or is cancelled. Pass ``noninteractive=False`` for the ribbon-style
+    console. ``decision_policy`` (default ``block``) answers confirmations;
+    an uncovered prompt returns ``error_pattern: decision_required`` instead
+    of a dialog.
 
     **Live output:** MCP progress is best-effort in Cursor. For a live stream
     (dots for fast passes, names for tests ≥ 1s, FAIL lines, then a human
@@ -3020,6 +3128,11 @@ async def vcs_run_tests(
             all tests.
         timeout_seconds: How long to wait for the async run (default from the
             add-in's timeout_ms, 10 minutes). Unused on the sync fallback.
+        noninteractive: Suppress add-in dialogs and the test console for this
+            run (default True).
+        decision_policy: ``block`` (default), ``prefer_source``,
+            ``prefer_database``, ``skip``, or ``decline``. Ignored when
+            ``noninteractive`` is False.
 
     Returns:
         Dictionary with ``success`` (True when all tests pass, none errored,
@@ -3027,6 +3140,7 @@ async def vcs_run_tests(
         and other fields from the test runner JSON output.
     """
     try:
+        policy = _noninteractive_policy(noninteractive, decision_policy)
         db_path = validate_database_path(database_path)
 
         busy_error = _check_database_busy(str(db_path))
@@ -3040,9 +3154,8 @@ async def vcs_run_tests(
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
             addin.load_addin(app, db_path=str(db_path))
 
-            # Silent mode: suppress MsgBox dialogs during test run
-            addin_lib = os.path.splitext(os.path.abspath(addin.addin_path))[0]
-            app.Run(f"{addin_lib}.SetInteractionMode", 1)
+            # The add-in scopes noninteractive mode inside RunFilteredTests and
+            # restores it when the run ends. Do not set a process-wide mode here.
 
             # Set the filter option (session-scoped, does not modify user's vcs-options.json)
             addin.call_sync("SetOption", "DefaultTestFilter", filter or "")
@@ -3060,7 +3173,12 @@ async def vcs_run_tests(
                     operation_id, callback_url, "cursor"
                 )
                 try:
-                    async_result = addin.call_async(callback_info, "RunFilteredTests")
+                    if policy:
+                        async_result = addin.call_async(
+                            callback_info, "RunFilteredTests", policy
+                        )
+                    else:
+                        async_result = addin.call_async(callback_info, "RunFilteredTests")
                     if async_result.get("sync"):
                         op_manager.unregister_operation(operation_id)
                         return _parse_test_runner_json(async_result.get("result"))
@@ -3081,6 +3199,8 @@ async def vcs_run_tests(
                 except Exception:
                     op_manager.unregister_operation(operation_id)
 
+            if policy:
+                return _parse_test_runner_json(addin.call_sync("RunFilteredTests", policy))
             return _parse_test_runner_json(addin.call_sync("RunFilteredTests"))
 
     except Exception as e:
@@ -3136,5 +3256,156 @@ def vcs_end_session(
             
             return {"success": True, "result": result_json}
     
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@vcs_tool("vcs_list_dialogs")
+def vcs_list_dialogs(
+    database_path: str,
+    pid: int | None = None,
+    create_time: int | None = None,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    """
+    List Access, VBA, and add-in dialogs for one database without clicking.
+
+    Uses Win32 windows for the Access process that has this database open.
+    Does not call Access COM, so it still works while another tool is blocked
+    on a modal dialog or VBA break. Pass ``pid`` (and ``create_time`` when
+    you have it) if more than one Access window is open.
+
+    A VBA break is reported as ``kind: vba_break`` and ``break_mode: true``.
+    That is not a dialog. ``ready`` is false while a blocking dialog, a break,
+    or the Access gate is held.
+
+    Examples:
+        vcs_list_dialogs("C:\\\\db.accdb")
+        vcs_list_dialogs("C:\\\\db.accdb", pid=12345, create_time=133000)
+    """
+    try:
+        db_path = validate_database_path(database_path)
+        return list_dialogs(
+            str(db_path),
+            pid=pid,
+            create_time=create_time,
+            timeout_seconds=timeout_seconds,
+        )
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@vcs_tool("vcs_dismiss_dialog")
+def vcs_dismiss_dialog(
+    database_path: str,
+    dialog_id: str,
+    button: str | None = None,
+    action: str = "close",
+    pid: int | None = None,
+    create_time: int | None = None,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    """
+    Dismiss one dialog on the target Access instance.
+
+    ``dialog_id`` comes from ``vcs_list_dialogs`` (``hwnd:<number>``).
+    Pass ``button`` to click that button (``OK``, ``Cancel``, ``No``, ``End``).
+    ``Debug`` is refused. ``action=close`` closes a finished add-in results
+    window and does not cancel a running operation. ``action=cancel`` closes
+    an add-in progress window in order to interrupt the operation.
+
+    Closing an error dialog sets ``failure_dialog_dismissed`` or
+    ``interrupted``. The operation that was waiting is not reported as a
+    success and is not retried. Call ``vcs_automation_status`` before the
+    next mutation.
+
+    Examples:
+        vcs_dismiss_dialog("C:\\\\db.accdb", "hwnd:100", button="OK")
+        vcs_dismiss_dialog("C:\\\\db.accdb", "hwnd:100", button="End")
+        vcs_dismiss_dialog("C:\\\\db.accdb", "hwnd:200", action="close")
+        vcs_dismiss_dialog("C:\\\\db.accdb", "hwnd:200", action="cancel")
+    """
+    try:
+        db_path = validate_database_path(database_path)
+        return dismiss_dialog(
+            str(db_path),
+            dialog_id,
+            button=button,
+            action=action,
+            pid=pid,
+            create_time=create_time,
+            timeout_seconds=timeout_seconds,
+        )
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@vcs_tool("vcs_recover_dialogs")
+def vcs_recover_dialogs(
+    database_path: str,
+    policy: str = "report",
+    pid: int | None = None,
+    create_time: int | None = None,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    """
+    Inspect dialogs, and optionally click only the ones a policy names.
+
+    ``policy``:
+    - ``report`` (default): inspection only.
+    - ``safe``: click OK on a recognized OK-only dialog that is not a
+      save, discard, delete, or overwrite confirmation. Never clicks Debug,
+      Yes, or End.
+    - ``end_runtime_error``: ``safe`` plus End on a VBA End/Debug dialog.
+
+    Unknown dialogs are returned in ``skipped`` with their buttons. The
+    original operation is not retried.
+
+    Examples:
+        vcs_recover_dialogs("C:\\\\db.accdb")
+        vcs_recover_dialogs("C:\\\\db.accdb", policy="safe")
+        vcs_recover_dialogs("C:\\\\db.accdb", policy="end_runtime_error", pid=12345)
+    """
+    try:
+        db_path = validate_database_path(database_path)
+        return recover_dialogs(
+            str(db_path),
+            policy=policy,
+            pid=pid,
+            create_time=create_time,
+            timeout_seconds=timeout_seconds,
+        )
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@vcs_tool("vcs_automation_status")
+def vcs_automation_status(
+    database_path: str,
+    pid: int | None = None,
+    create_time: int | None = None,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    """
+    Check whether the target Access instance can accept another COM call.
+
+    ``ready`` is true only when the process responds, VBA is not in break
+    mode, no blocking dialog is open, and the MCP Access gate is free.
+    ``execution_interrupted`` is true after End or an explicit cancel; the
+    diagnostics from that dialog are in ``last_interruption``. This does not
+    click anything and does not use the Access COM gate.
+
+    Examples:
+        vcs_automation_status("C:\\\\db.accdb")
+        vcs_automation_status("C:\\\\db.accdb", pid=12345)
+    """
+    try:
+        db_path = validate_database_path(database_path)
+        return automation_status(
+            str(db_path),
+            pid=pid,
+            create_time=create_time,
+            timeout_seconds=timeout_seconds,
+        )
     except Exception as e:
         return {"success": False, "error": str(e)}

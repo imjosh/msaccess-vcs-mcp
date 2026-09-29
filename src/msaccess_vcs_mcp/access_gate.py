@@ -34,6 +34,12 @@ EXEMPT_TOOLS = frozenset({
     "vcs_get_recent_calls",
     # Launch holds the gate itself; the subsequent status-file wait must not.
     "vcs_rebuild_addin",
+    # Dialog recovery uses Win32/UI messages, not Access COM, so it must stay
+    # callable while a modal dialog or VBA break holds the Access gate.
+    "vcs_list_dialogs",
+    "vcs_dismiss_dialog",
+    "vcs_recover_dialogs",
+    "vcs_automation_status",
 })
 
 

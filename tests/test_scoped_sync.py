@@ -3,7 +3,7 @@
 import asyncio
 import json
 from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -144,7 +144,9 @@ class TestImportObjectsScoped:
                 )
             )
 
-        mock_addin.call_sync.assert_called_once_with("ImportByType", "modules", False)
+        assert mock_addin.call_sync.call_args_list[0] == call("SetOperationPolicy", "block")
+        assert mock_addin.call_sync.call_args_list[1] == call("ImportByType", "modules", False)
+        assert mock_addin.call_sync.call_args_list[2] == call("ClearOperationPolicy")
         mock_addin.call_async.assert_not_called()
         mock_addin.merge_build.assert_not_called()
         assert result["success"] is True
@@ -169,9 +171,11 @@ class TestImportObjectsScoped:
                 )
             )
 
-        mock_addin.call_sync.assert_called_once_with(
+        assert mock_addin.call_sync.call_args_list[0] == call("SetOperationPolicy", "block")
+        assert mock_addin.call_sync.call_args_list[1] == call(
             "ImportByType", ["queries", "forms"], True
         )
+        assert mock_addin.call_sync.call_args_list[2] == call("ClearOperationPolicy")
 
     def test_none_object_types_uses_async_merge(self, tmp_path):
         from msaccess_vcs_mcp.tools import vcs_import_objects
@@ -187,6 +191,7 @@ class TestImportObjectsScoped:
         mock_addin.call_sync.assert_not_called()
         mock_addin.call_async.assert_called_once()
         assert mock_addin.call_async.call_args[0][1] == "MergeBuild"
+        assert mock_addin.call_async.call_args[0][2] == "block"
         assert result["success"] is True
 
     def test_addin_validation_error_propagates(self, tmp_path):

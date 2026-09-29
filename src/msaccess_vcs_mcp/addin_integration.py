@@ -565,7 +565,12 @@ class VCSAddinIntegration:
                 "message": f"VBA export failed: {e}"
             }
     
-    def merge_build(self, db_path: str, source_folder: Optional[str] = None) -> dict[str, Any]:
+    def merge_build(
+        self,
+        db_path: str,
+        source_folder: Optional[str] = None,
+        decision_policy: Optional[str] = None,
+    ) -> dict[str, Any]:
         """
         Merge source files into existing database.
         
@@ -588,7 +593,10 @@ class VCSAddinIntegration:
         source_path = self._get_export_folder(db_path, source_folder)
         
         try:
-            self._call_addin_function("MergeBuild")
+            if decision_policy:
+                self._call_addin_function("MergeBuild", decision_policy)
+            else:
+                self._call_addin_function("MergeBuild")
             
             log_path = os.path.join(source_path, "Build.log")
             

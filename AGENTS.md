@@ -129,6 +129,26 @@ One MCP server process is shared across all Cursor windows. Sync tools run in a 
 
 `vcs_run_vba` executes Access COM work in a daemon worker thread with a hard timeout. If a snippet hangs because Access is in break mode, blocked on a modal dialog, or otherwise unresponsive, the MCP server abandons that thread and returns a recoverable timeout. It does **not** kill `MSACCESS.EXE` or close user-owned Access windows; after Access becomes responsive, the next call runs an automatic probe and resumes normal operation.
 
+### Dialogs and noninteractive runs
+
+`vcs_run_tests` and `vcs_import_objects` default to `noninteractive=True` with `decision_policy="block"`. The add-in suppresses its own message boxes and results window for that call and restores the previous mode when the operation finishes, fails, or is cancelled. A confirmation or merge conflict that the policy does not cover returns `error_pattern: decision_required` and does not open a dialog. Pass `decision_policy="prefer_source"` to overwrite conflicting objects from source. Pass `noninteractive=False` for the previous interactive behavior.
+
+`DoCmd.SetWarnings` is not used as a blanket suppressor. See [docs/DIALOGS.md](docs/DIALOGS.md) for which dialogs the add-in can prevent and which need the Win32 inspector.
+
+These tools do not take the Access gate, so they stay callable while another request is blocked:
+
+```python
+vcs_list_dialogs(database_path)
+vcs_dismiss_dialog(database_path, "hwnd:123456", button="OK")
+vcs_dismiss_dialog(database_path, "hwnd:123456", button="End")
+vcs_dismiss_dialog(database_path, "hwnd:123456", action="close")   # finished add-in window
+vcs_dismiss_dialog(database_path, "hwnd:123456", action="cancel")  # interrupt a running operation
+vcs_recover_dialogs(database_path, policy="end_runtime_error")
+vcs_automation_status(database_path)
+```
+
+`ready: true` from `vcs_automation_status` means the process responded, VBA is not in break mode, no blocking dialog is open, and the gate is free. Ending a runtime-error dialog sets `execution_interrupted` and does not turn the failed call into a success. Debug is never clicked. The inspector only touches windows of the matched Access PID.
+
 ### Rebuilding the VCS add-in
 
 To rebuild `Version Control.accda` from source after editing add-in files, do **not** use `vcs_rebuild_database` (that rebuilds a user project). Call:

@@ -74,6 +74,24 @@ contradictory guidance.
 
 ---
 
+## 2026-09-29 — Noninteractive add-in runs, Win32 dialog recovery off the Access gate
+
+**Trigger**: An agent driving Access gets stuck when the add-in or VBA opens a modal dialog, and a second MCP call cannot inspect that dialog because it waits on the same Access COM gate.
+
+**Options explored**:
+- *`DoCmd.SetWarnings False`*: rejected. It does not cover `MsgBox`, the conflict form, VBA End/Debug, or compile errors, and it hides failures.
+- *Keep `eimSilent` and its caller-supplied default*: rejected for agent calls. Several prompts default to Yes, which approves a destructive choice with no record.
+- *UI Automation only*: Win32 `BM_CLICK` on the button window already names the control. UI Automation would be a second path for the same buttons. Standard dialogs expose their captions to `GetWindowText`, so the Win32 path is the one implemented.
+- *Put recovery on the Access gate*: rejected. The gate is what a modal dialog blocks.
+
+**Decision**: Agent test and merge calls default to a scoped noninteractive mode (`decision_policy=block`). The add-in acknowledges OK-only prompts, applies an explicit conflict or decline policy, and otherwise returns `decision_required` without opening UI or choosing Yes. `Finish` restores the previous mode. Dialog inspection uses Win32 enumeration filtered to one Access PID plus creation time, and those tools are exempt from the Access gate. Automatic recovery clicks only recognized OK-only dialogs, plus End when `end_runtime_error` is requested. Debug, save/discard, and unknown dialogs are reported. Dismissing an error dialog records the failure and does not retry the mutation.
+
+**What this rules out**: Treating a clicked error dialog as a successful operation. Silently overwriting merge conflicts on agent imports unless `decision_policy` is `prefer_source`. Sending keys, Enter, Escape, or coordinates. Closing a different Access instance because a PID was reused. Using `SetWarnings` as the suppression mechanism.
+
+**Relevant files**: add-in `modDialogPolicy.bas`, `modUIUtil.MsgBox2`, `clsConflicts.ResolveOrPrompt`, `clsOperation`; MCP `dialog_recovery.py`, `access_gate.EXEMPT_TOOLS`, `tools.py` (`vcs_run_tests`, `vcs_import_objects`, `vcs_list_dialogs`, `vcs_dismiss_dialog`, `vcs_recover_dialogs`, `vcs_automation_status`).
+
+---
+
 ## 2026-09-10 — Persist server-created Access; own it by PID
 
 **Trigger**: Merge / test / edit loops were spawning a new `MSACCESS.EXE` per

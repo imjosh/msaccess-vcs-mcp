@@ -37,7 +37,12 @@ def test_arguments_for_each_subcommand():
     merge = parser.parse_args(["merge", r"C:\db.accdb", r"C:\src"])
     assert arguments_for(merge) == (
         "vcs_import_objects",
-        {"database_path": r"C:\db.accdb", "source_dir": r"C:\src"},
+        {
+            "database_path": r"C:\db.accdb",
+            "source_dir": r"C:\src",
+            "noninteractive": True,
+            "decision_policy": "block",
+        },
     )
 
     rebuild = parser.parse_args([
@@ -71,6 +76,8 @@ def test_arguments_for_each_subcommand():
             "database_path": r"C:\db.accda",
             "filter": "SQL,-slow",
             "timeout_seconds": 90.0,
+            "noninteractive": True,
+            "decision_policy": "block",
         },
     )
 
