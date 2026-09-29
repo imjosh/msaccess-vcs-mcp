@@ -189,17 +189,28 @@ _DECISION_POLICIES = frozenset({
 })
 
 
+class InvalidDecisionPolicy(ValueError):
+    """An unknown ``decision_policy``; refused before Access is called."""
+
+    error_pattern = "invalid_decision_policy"
+
+
+def _invalid_policy_result(exc: InvalidDecisionPolicy, **extra: Any) -> dict[str, Any]:
+    return {"success": False, "error": str(exc), "error_pattern": exc.error_pattern, **extra}
+
+
 def _noninteractive_policy(noninteractive: bool, decision_policy: str | None) -> str | None:
     """Return the add-in policy name, or None to keep interactive behavior.
 
-    Raises ValueError for an unknown policy. The tool wrappers turn that into
-    ``success: false`` without calling Access.
+    Raises InvalidDecisionPolicy for an unknown policy. The tool wrappers turn
+    that into ``success: false`` with ``error_pattern: invalid_decision_policy``
+    without calling Access.
     """
     if not noninteractive:
         return None
     policy = (decision_policy or "block").strip().lower()
     if policy not in _DECISION_POLICIES:
-        raise ValueError(
+        raise InvalidDecisionPolicy(
             "Unknown decision_policy. Use block, prefer_source, prefer_database, skip, or decline."
         )
     return policy
@@ -1501,6 +1512,8 @@ async def vcs_import_objects(
 
             return _normalize_import_result(final, db_path=db_path, src_path=src_path)
 
+    except InvalidDecisionPolicy as e:
+        return _invalid_policy_result(e, imported_count=0)
     except PermissionError as e:
         return {
             "success": False,
@@ -3332,6 +3345,8 @@ async def vcs_run_tests(
                 return _parse_test_runner_json(addin.call_sync("RunFilteredTests", policy))
             return _parse_test_runner_json(addin.call_sync("RunFilteredTests"))
 
+    except InvalidDecisionPolicy as e:
+        return _invalid_policy_result(e)
     except Exception as e:
         return {"success": False, "error": str(e)}
 

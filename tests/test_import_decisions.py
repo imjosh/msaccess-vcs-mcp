@@ -120,6 +120,28 @@ def test_new_error_patterns_pass_through(tmp_path, pattern):
     addin.merge_build.assert_not_called()
 
 
+@pytest.mark.parametrize("object_types", [None, ["forms"]])
+def test_invalid_policy_refused_with_pattern_before_access(tmp_path, object_types):
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        result = _run((db, src), decision_policy="bogus", object_types=object_types)
+    assert result["success"] is False
+    assert result["error_pattern"] == "invalid_decision_policy"
+    assert "prefer_source" in result["error"]
+    addin.merge_build.assert_not_called()
+    addin.call_sync.assert_not_called()
+
+
+def test_run_tests_invalid_policy_refused_with_pattern():
+    from msaccess_vcs_mcp.tools import vcs_run_tests
+
+    fn = vcs_run_tests
+    while hasattr(fn, "__wrapped__"):
+        fn = fn.__wrapped__
+    result = asyncio.run(fn(r"C:\x\y.accdb", decision_policy="bogus"))
+    assert result["success"] is False
+    assert result["error_pattern"] == "invalid_decision_policy"
+
+
 def test_duplicate_refusal_returned_once(tmp_path):
     """A refusal delivered synchronously and again by callback is one result."""
     refusal = {
