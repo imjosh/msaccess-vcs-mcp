@@ -29,6 +29,7 @@ WM_CLOSE = 0x0010
 WM_NULL = 0x0000
 SMTO_ABORTIFHUNG = 0x0002
 
+ACCESS_EXE_NAMES = {"msaccess.exe", "msaccess"}
 ADDIN_CAPTIONS = {"msaccessvcs", "version control system"}
 FAILURE_KINDS = {"vba_runtime_error", "vba_compile_error"}
 BLOCKING_KINDS = {
@@ -68,16 +69,36 @@ class WindowInfo:
     title: str
     class_name: str
     owner_hwnd: int = 0
-    process_name: str = ""
     texts: tuple[str, ...] = ()
     buttons: tuple[ButtonInfo, ...] = ()
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    """What the backend could read about a PID. ``None`` means unknown."""
+
+    name: str | None = None
     create_time: int | None = None
+    running: bool | None = None
+
+    @property
+    def is_access(self) -> bool:
+        return bool(self.name) and self.name.lower() in ACCESS_EXE_NAMES
+
+    @property
+    def confirmed(self) -> bool:
+        """Access by name and a readable creation time: the only state that may be acted on."""
+        return self.is_access and self.create_time is not None
 
 
 class WindowBackend(Protocol):
     def list_windows(self) -> list[WindowInfo]: ...
 
-    def click(self, hwnd: int) -> None: ...
+    def process_identity(self, pid: int) -> ProcessIdentity: ...
+
+    def click(self, hwnd: int, *, expected_pid: int | None = None, timeout_ms: int = 5000) -> bool:
+        """Send BM_CLICK. True only when the message was handled within ``timeout_ms``."""
+        ...
 
     def close(self, hwnd: int) -> None: ...
 
@@ -212,70 +233,69 @@ def _title_matches(title: str, database_path: str) -> bool:
 def resolve_target(
     windows: Iterable[WindowInfo],
     database_path: str,
+    backend: WindowBackend,
     pid: int | None = None,
     create_time: int | None = None,
 ) -> dict[str, Any]:
-    """Pick one Access process. Ambiguous or mismatched identity is an error."""
+    """Pick one Access process. Ambiguous or mismatched identity is an error.
+
+    Success carries ``identity_confirmed``. Only a confirmed identity (Access by
+    name, creation time readable and equal to ``create_time`` when given) may be
+    acted on; an unconfirmed one may still be inspected. ``create_time`` in the
+    result is the observed value, fixed for the rest of the call.
+    """
     listed = list(windows)
-    by_pid: dict[int, list[WindowInfo]] = {}
-    for window in listed:
-        by_pid.setdefault(window.pid, []).append(window)
+    identities: dict[int, ProcessIdentity] = {}
 
-    def _identity(candidate: int) -> dict[str, Any]:
-        group = by_pid.get(candidate, [])
-        names = {window.process_name.lower() for window in group if window.process_name}
-        stamp = None
-        for window in group:
-            if window.create_time is not None:
-                stamp = window.create_time
-                break
-        if stamp is None:
-            try:
-                stamp = process_create_time(candidate)
-            except Exception:
-                stamp = None
-        return {
-            "pid": candidate,
-            "create_time": stamp,
-            "process_name": next(iter(names), ""),
-        }
+    def _ident(candidate: int) -> ProcessIdentity:
+        if candidate not in identities:
+            identities[candidate] = backend.process_identity(candidate)
+        return identities[candidate]
 
-    def _reject_stranger(candidate: int) -> dict[str, Any] | None:
-        group = by_pid.get(candidate, [])
-        names = {window.process_name.lower() for window in group if window.process_name}
-        if names and not any(name in {"msaccess.exe", "msaccess"} for name in names):
+    def _describe(candidate: int) -> dict[str, Any]:
+        ident = _ident(candidate)
+        return {"pid": candidate, "create_time": ident.create_time, "process_name": ident.name}
+
+    def _accept(candidate: int, matched_by: str) -> dict[str, Any]:
+        ident = _ident(candidate)
+        if ident.name and not ident.is_access:
             return {
                 "success": False,
                 "error_pattern": "not_access_process",
-                "error": f"PID {candidate} is not MSACCESS.EXE ({', '.join(sorted(names))}).",
+                "error": f"PID {candidate} is not MSACCESS.EXE ({ident.name}).",
                 "pid": candidate,
             }
-        if create_time is not None:
-            actual = _identity(candidate)["create_time"]
-            if actual is not None and int(actual) != int(create_time):
-                return {
-                    "success": False,
-                    "error_pattern": "process_identity_mismatch",
-                    "error": "PID was reused or does not match the expected process creation time.",
-                    "pid": candidate,
-                    "create_time": actual,
-                    "expected_create_time": create_time,
-                }
-        return None
+        if (
+            create_time is not None
+            and ident.create_time is not None
+            and int(ident.create_time) != int(create_time)
+        ):
+            return {
+                "success": False,
+                "error_pattern": "process_identity_mismatch",
+                "error": "PID was reused or does not match the expected process creation time.",
+                "pid": candidate,
+                "create_time": ident.create_time,
+                "expected_create_time": create_time,
+            }
+        return {
+            "success": True,
+            **_describe(candidate),
+            "identity_confirmed": ident.confirmed,
+            "matched_by": matched_by,
+        }
 
     if pid is not None:
-        rejected = _reject_stranger(pid)
-        if rejected:
-            return rejected
-        ident = _identity(pid)
-        return {"success": True, **ident, "matched_by": "pid"}
+        return _accept(pid, "pid")
 
-    title_pids = {
-        window.pid
-        for window in listed
-        if _title_matches(window.title, database_path)
-        or any(_title_matches(text, database_path) for text in window.texts)
-    }
+    def _titled(window: WindowInfo) -> bool:
+        return _title_matches(window.title, database_path) or any(
+            _title_matches(text, database_path) for text in window.texts
+        )
+
+    titled = {window.pid for window in listed if _titled(window)}
+    title_pids = {item for item in titled if _ident(item).is_access}
+    unconfirmed_pids = {item for item in titled if not _ident(item).name}
     owned_pids: set[int] = set()
     try:
         wanted = os.path.normcase(os.path.abspath(database_path))
@@ -284,18 +304,28 @@ def resolve_target(
                 owned_pids.add(record.pid)
     except Exception:
         owned_pids = set()
+    owned_pids = {item for item in owned_pids if _ident(item).is_access}
 
-    candidates = title_pids | {item for item in owned_pids if item in by_pid or not title_pids}
     # Prefer the intersection when both sources agree on a live window.
     both = title_pids & owned_pids
     if len(both) == 1:
         candidates = both
     elif title_pids:
         candidates = title_pids
-    elif owned_pids:
+    else:
         candidates = owned_pids
 
     if len(candidates) == 0:
+        if unconfirmed_pids:
+            return {
+                "success": False,
+                "error_pattern": "identity_unconfirmed",
+                "error": (
+                    "A window matches this database but its process name could not be read, "
+                    "so it is not confirmed as Access. Nothing was touched."
+                ),
+                "candidates": [_describe(item) for item in sorted(unconfirmed_pids)],
+            }
         return {
             "success": False,
             "error_pattern": "access_not_found",
@@ -306,14 +336,56 @@ def resolve_target(
             "success": False,
             "error_pattern": "ambiguous_instance",
             "error": "More than one Access window matches this database. Pass pid to choose one.",
-            "candidates": [_identity(item) for item in sorted(candidates)],
+            "candidates": [_describe(item) for item in sorted(candidates)],
         }
-    chosen = next(iter(candidates))
-    rejected = _reject_stranger(chosen)
-    if rejected:
-        return rejected
-    ident = _identity(chosen)
-    return {"success": True, **ident, "matched_by": "database"}
+    return _accept(next(iter(candidates)), "database")
+
+
+def _identity_refusal(report: dict[str, Any]) -> dict[str, Any] | None:
+    """Refuse to act unless the target's identity is confirmed."""
+    if report.get("identity_confirmed"):
+        return None
+    return {
+        **report,
+        "success": False,
+        "error_pattern": "identity_unconfirmed",
+        "error": (
+            "The process name or creation time could not be confirmed. "
+            "Inspection is reported; nothing was clicked or closed."
+        ),
+        "dismissed": False,
+    }
+
+
+def _still_same_target(
+    backend: WindowBackend,
+    report: dict[str, Any],
+    dialog_hwnd: int,
+    button_hwnd: int | None = None,
+) -> bool:
+    """Re-list windows right before acting: same process, same dialog, same button."""
+    pid = int(report["pid"])
+    ident = backend.process_identity(pid)
+    if not ident.confirmed or ident.create_time != report.get("create_time"):
+        return False
+    for window in backend.list_windows():
+        if window.hwnd != dialog_hwnd:
+            continue
+        if window.pid != pid:
+            return False
+        return button_hwnd is None or any(b.hwnd == button_hwnd for b in window.buttons)
+    return False
+
+
+def _dialog_changed(report: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **report,
+        "success": False,
+        "dismissed": False,
+        "error_pattern": "dialog_changed",
+        "error": "The dialog or its process changed since it was inspected. Nothing was clicked. Re-inspect and decide again.",
+        "dialog_id": item.get("dialog_id"),
+    }
 
 
 def _dialog_record(window: WindowInfo, kind: str) -> dict[str, Any]:
@@ -328,9 +400,7 @@ def _dialog_record(window: WindowInfo, kind: str) -> dict[str, Any]:
         "buttons": [button.text for button in window.buttons],
         "class_name": window.class_name,
         "pid": window.pid,
-        "process_name": window.process_name or None,
         "owner_hwnd": window.owner_hwnd or None,
-        "create_time": window.create_time,
     }
 
 
@@ -358,13 +428,14 @@ def inspect_windows(
     windows: Iterable[WindowInfo],
     database_path: str,
     *,
+    backend: WindowBackend,
     pid: int | None = None,
     create_time: int | None = None,
     responsive: bool | None = None,
 ) -> dict[str, Any]:
     """Build an inspection report for one Access instance. Does not click."""
     listed = list(windows)
-    target = resolve_target(listed, database_path, pid=pid, create_time=create_time)
+    target = resolve_target(listed, database_path, backend, pid=pid, create_time=create_time)
     if not target.get("success"):
         target["dialogs"] = []
         target["remaining"] = []
@@ -398,6 +469,7 @@ def inspect_windows(
         "pid": chosen,
         "create_time": target.get("create_time"),
         "process_name": target.get("process_name") or None,
+        "identity_confirmed": target.get("identity_confirmed", False),
         "matched_by": target.get("matched_by"),
         "dialogs": dialogs,
         "remaining": dialogs,
@@ -424,6 +496,25 @@ def _find_dialog(report: dict[str, Any], dialog_id: str) -> dict[str, Any] | Non
     return None
 
 
+def _click_timeout_ms(click_timeout_sec: float | None) -> int:
+    return int(dialog_timeout_sec(click_timeout_sec) * 1000)
+
+
+def _uncertain_click(before: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **before,
+        "success": False,
+        "dismissed": False,
+        "uncertain": True,
+        "error_pattern": "dismiss_uncertain",
+        "error": (
+            "The click was not delivered before the timeout, or was refused because the "
+            "button no longer belongs to the target process. It was not retried."
+        ),
+        "dialog_id": item.get("dialog_id"),
+    }
+
+
 def _windows_for_pid(windows: Iterable[WindowInfo], pid: int) -> dict[int, WindowInfo]:
     return {window.hwnd: window for window in windows if window.pid == pid}
 
@@ -438,11 +529,17 @@ def dismiss_one(
     pid: int | None = None,
     create_time: int | None = None,
     responsive: bool | None = None,
-    backend: WindowBackend | None = None,
+    backend: WindowBackend,
+    click_timeout_sec: float | None = None,
 ) -> dict[str, Any]:
     """Click one button or close one add-in window belonging to the target pid."""
     before = inspect_windows(
-        windows, database_path, pid=pid, create_time=create_time, responsive=responsive
+        windows,
+        database_path,
+        backend=backend,
+        pid=pid,
+        create_time=create_time,
+        responsive=responsive,
     )
     if not before.get("success"):
         return before
@@ -455,6 +552,9 @@ def dismiss_one(
             "pid": before.get("pid"),
             "dialogs": before.get("dialogs"),
         }
+    refused = _identity_refusal(before)
+    if refused:
+        return refused
     if responsive is False:
         return {
             **before,
@@ -494,8 +594,14 @@ def dismiss_one(
             }
         target_button = _button_named(window, button)
         assert target_button is not None
-        if backend is not None:
-            backend.click(target_button.hwnd)
+        if not _still_same_target(backend, before, int(item["hwnd"]), target_button.hwnd):
+            return _dialog_changed(before, item)
+        if not backend.click(
+            target_button.hwnd,
+            expected_pid=int(before["pid"]),
+            timeout_ms=_click_timeout_ms(click_timeout_sec),
+        ):
+            return _uncertain_click(before, item)
         closed.append({**item, "button": target_button.text, "how": "click"})
         if _button_label(target_button.text) == "end" or failure_dialog:
             interrupted = True
@@ -515,8 +621,9 @@ def dismiss_one(
                 "error": "cancel closes an add-in progress window. For a VBA dialog pass button.",
                 "dismissed": False,
             }
-        if backend is not None:
-            backend.close(int(item["hwnd"]))
+        if not _still_same_target(backend, before, int(item["hwnd"])):
+            return _dialog_changed(before, item)
+        backend.close(int(item["hwnd"]))
         closed.append({**item, "how": "cancel"})
         interrupted = True
         _interruptions[int(before["pid"])] = {
@@ -557,8 +664,9 @@ def dismiss_one(
                 "buttons": item.get("buttons"),
                 "dismissed": False,
             }
-        if backend is not None:
-            backend.close(int(item["hwnd"]))
+        if not _still_same_target(backend, before, int(item["hwnd"])):
+            return _dialog_changed(before, item)
+        backend.close(int(item["hwnd"]))
         closed.append({**item, "how": "close"})
     else:
         return {
@@ -593,8 +701,9 @@ def recover_windows(
     pid: int | None = None,
     create_time: int | None = None,
     responsive: bool | None = None,
-    backend: WindowBackend | None = None,
+    backend: WindowBackend,
     max_dialogs: int = MAX_AUTO_DIALOGS,
+    click_timeout_sec: float | None = None,
 ) -> dict[str, Any]:
     """Apply a bounded automatic policy. Unknown dialogs are reported, not clicked."""
     policy_l = (policy or "report").strip().lower()
@@ -605,7 +714,12 @@ def recover_windows(
             "error": "policy must be report, safe, or end_runtime_error.",
         }
     report = inspect_windows(
-        windows, database_path, pid=pid, create_time=create_time, responsive=responsive
+        windows,
+        database_path,
+        backend=backend,
+        pid=pid,
+        create_time=create_time,
+        responsive=responsive,
     )
     if not report.get("success"):
         return report
@@ -614,6 +728,10 @@ def recover_windows(
         report["automatic"] = False
         report["closed"] = []
         return report
+    refused = _identity_refusal(report)
+    if refused:
+        refused["closed"] = []
+        return refused
     if responsive is False:
         report["success"] = False
         report["error_pattern"] = "access_unresponsive"
@@ -623,6 +741,7 @@ def recover_windows(
 
     closed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    uncertain = False
     by_hwnd = _windows_for_pid(windows, int(report["pid"]))
     handled = 0
     for item in list(report["dialogs"]):
@@ -641,10 +760,21 @@ def recover_windows(
             })
             continue
         button = _button_named(window, caption)
-        if button is None or backend is None:
+        if button is None:
             skipped.append({**item, "reason": "button_missing"})
             continue
-        backend.click(button.hwnd)
+        if not _still_same_target(backend, report, int(item["hwnd"]), button.hwnd):
+            skipped.append({**item, "reason": "dialog_changed"})
+            continue
+        if not backend.click(
+            button.hwnd,
+            expected_pid=int(report["pid"]),
+            timeout_ms=_click_timeout_ms(click_timeout_sec),
+        ):
+            # Never retry an undelivered click, and stop touching this instance.
+            skipped.append({**item, "reason": "dismiss_uncertain"})
+            uncertain = True
+            break
         handled += 1
         record = {**item, "button": button.text, "how": "auto"}
         closed.append(record)
@@ -657,7 +787,7 @@ def recover_windows(
                 "message": item.get("message"),
             }
 
-    return {
+    result = {
         "success": True,
         "policy": policy_l,
         "automatic": True,
@@ -676,6 +806,10 @@ def recover_windows(
             "Skipped dialogs are unchanged. This does not retry the blocked operation."
         ),
     }
+    if uncertain:
+        result["uncertain"] = True
+        result["error_pattern"] = "dismiss_uncertain"
+    return result
 
 
 def note_ready(report: dict[str, Any], remaining: list[dict[str, Any]]) -> dict[str, Any]:
@@ -743,10 +877,8 @@ class Win32Backend:
                     title=title,
                     class_name=class_name,
                     owner_hwnd=int(owner or 0),
-                    process_name=_process_basename(int(pid)),
                     texts=tuple(texts),
                     buttons=tuple(buttons),
-                    create_time=process_create_time(int(pid)),
                 )
             )
             return True
@@ -754,10 +886,36 @@ class Win32Backend:
         win32gui.EnumWindows(_callback, None)
         return found
 
-    def click(self, hwnd: int) -> None:
-        import win32gui
+    def process_identity(self, pid: int) -> ProcessIdentity:
+        return ProcessIdentity(
+            name=_process_basename(pid) or None,
+            create_time=process_create_time(pid),
+            running=_process_running(pid),
+        )
 
-        win32gui.SendMessage(hwnd, BM_CLICK, 0, 0)
+    def click(self, hwnd: int, *, expected_pid: int | None = None, timeout_ms: int = 5000) -> bool:
+        import ctypes
+
+        import win32process
+
+        if expected_pid is not None:
+            try:
+                _thread, owner_pid = win32process.GetWindowThreadProcessId(int(hwnd))
+            except Exception:
+                return False
+            if int(owner_pid) != int(expected_pid):
+                return False
+        result = ctypes.c_ulong()
+        sent = ctypes.windll.user32.SendMessageTimeoutW(
+            int(hwnd),
+            BM_CLICK,
+            0,
+            0,
+            SMTO_ABORTIFHUNG,
+            int(timeout_ms),
+            ctypes.byref(result),
+        )
+        return bool(sent)
 
     def close(self, hwnd: int) -> None:
         import win32gui
@@ -820,6 +978,23 @@ def _process_basename(pid: int) -> str:
         return ""
 
 
+def _process_running(pid: int) -> bool | None:
+    if pid <= 0:
+        return False
+    try:
+        import win32api
+        import win32con
+        import win32process
+
+        handle = win32api.OpenProcess(win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        try:
+            return win32process.GetExitCodeProcess(handle) == 259  # STILL_ACTIVE
+        finally:
+            win32api.CloseHandle(handle)
+    except Exception:
+        return None
+
+
 def _default_backend() -> WindowBackend:
     return Win32Backend()
 
@@ -845,7 +1020,7 @@ def list_dialogs(
     windows = live.list_windows()
     target_pid = pid
     if target_pid is None:
-        preview = resolve_target(windows, database_path, pid=None, create_time=create_time)
+        preview = resolve_target(windows, database_path, live, pid=None, create_time=create_time)
         if not preview.get("success"):
             preview["timeout_seconds"] = timeout
             return preview
@@ -854,6 +1029,7 @@ def list_dialogs(
     report = inspect_windows(
         windows,
         database_path,
+        backend=live,
         pid=target_pid,
         create_time=create_time,
         responsive=responsive,
@@ -877,7 +1053,7 @@ def dismiss_dialog(
     timeout = dialog_timeout_sec(timeout_seconds)
     live = backend or _default_backend()
     windows = live.list_windows()
-    preview = resolve_target(windows, database_path, pid=pid, create_time=create_time)
+    preview = resolve_target(windows, database_path, live, pid=pid, create_time=create_time)
     if not preview.get("success"):
         return preview
     responsive = _responsive_for(windows, int(preview["pid"]), live, timeout)
@@ -888,9 +1064,10 @@ def dismiss_dialog(
         button=button,
         action=action,
         pid=int(preview["pid"]),
-        create_time=create_time,
+        create_time=preview.get("create_time"),
         responsive=responsive,
         backend=live,
+        click_timeout_sec=timeout,
     )
     if not result.get("success"):
         result["timeout_seconds"] = timeout
@@ -911,8 +1088,9 @@ def dismiss_dialog(
     follow = inspect_windows(
         remaining_windows,
         database_path,
+        backend=live,
         pid=int(preview["pid"]),
-        create_time=create_time,
+        create_time=preview.get("create_time"),
         responsive=_responsive_for(remaining_windows, int(preview["pid"]), live, timeout),
     )
     follow = note_ready(follow, remaining)
@@ -945,7 +1123,7 @@ def recover_dialogs(
     timeout = dialog_timeout_sec(timeout_seconds)
     live = backend or _default_backend()
     windows = live.list_windows()
-    preview = resolve_target(windows, database_path, pid=pid, create_time=create_time)
+    preview = resolve_target(windows, database_path, live, pid=pid, create_time=create_time)
     if not preview.get("success"):
         return preview
     responsive = _responsive_for(windows, int(preview["pid"]), live, timeout)
@@ -954,9 +1132,10 @@ def recover_dialogs(
         database_path,
         policy=policy,
         pid=int(preview["pid"]),
-        create_time=create_time,
+        create_time=preview.get("create_time"),
         responsive=responsive,
         backend=live,
+        click_timeout_sec=timeout,
     )
     if policy.strip().lower() in {"report", "inspect"} or not result.get("success"):
         result["timeout_seconds"] = timeout
@@ -974,11 +1153,17 @@ def recover_dialogs(
     follow = inspect_windows(
         remaining_windows,
         database_path,
+        backend=live,
         pid=int(preview["pid"]),
-        create_time=create_time,
+        create_time=preview.get("create_time"),
         responsive=_responsive_for(remaining_windows, int(preview["pid"]), live, timeout),
     )
     follow = note_ready(follow, remaining)
+    if result.get("uncertain"):
+        follow["success"] = False
+        follow["uncertain"] = True
+        follow["error_pattern"] = "dismiss_uncertain"
+        follow["error"] = "A click was not delivered before the timeout. It was not retried."
     follow.update({
         "policy": result.get("policy"),
         "automatic": True,

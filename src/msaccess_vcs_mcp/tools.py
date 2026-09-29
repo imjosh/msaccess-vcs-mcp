@@ -53,6 +53,7 @@ from .access_com.process_qos import list_access_pids, prefer_full_power_if_creat
 from .access_gate import EXEMPT_TOOLS, get_access_gate
 from .dialog_recovery import (
     automation_status,
+    dialog_timeout_sec,
     dismiss_dialog,
     list_dialogs,
     recover_dialogs,
@@ -701,6 +702,32 @@ async def _ensure_env_loaded(ctx: Context | None) -> None:
     log_diagnostic_event("lazy_init_no_env_in_roots", roots=root_uris)
 
 
+EXEMPT_WORKER_MARGIN_SEC = 5.0
+
+
+async def _run_exempt_in_worker(name: str, logged, args: tuple, kwargs: dict) -> Any:
+    """Run a sync gate-exempt tool off the event loop and off the COM apartment thread.
+
+    Past the ceiling (just above the dialog timeout) the worker is abandoned and a
+    recoverable timeout is returned, as ``vcs_run_vba`` does for a hung worker.
+    """
+    requested = kwargs.get("timeout_seconds")
+    ceiling = dialog_timeout_sec(requested if isinstance(requested, (int, float)) else None)
+    ceiling += EXEMPT_WORKER_MARGIN_SEC
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(logged, *args, **kwargs), timeout=ceiling)
+    except asyncio.TimeoutError:
+        return {
+            "success": False,
+            "error_pattern": "tool_timeout",
+            "error": (
+                f"{name} did not finish within {ceiling:.0f}s and was abandoned. "
+                "Access may be hung; re-run vcs_list_dialogs or vcs_automation_status."
+            ),
+            "recoverable": True,
+        }
+
+
 def vcs_tool(name: str):
     """Register an MCP tool with lazy .env discovery, config reload, and logging.
 
@@ -749,7 +776,7 @@ def vcs_tool(name: str):
             if name in EXEMPT_TOOLS:
                 if is_async_body:
                     return await logged(*args, **kwargs)
-                return logged(*args, **kwargs)
+                return await _run_exempt_in_worker(name, logged, args, kwargs)
 
             database = kwargs.get("database_path")
             if database is None and args:

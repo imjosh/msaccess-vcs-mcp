@@ -9,9 +9,11 @@ import pytest
 
 from msaccess_vcs_mcp.dialog_recovery import (
     ButtonInfo,
+    ProcessIdentity,
     WindowInfo,
     auto_button,
     classify_window,
+    dismiss_dialog,
     dismiss_one,
     inspect_windows,
     recover_windows,
@@ -22,15 +24,19 @@ from msaccess_vcs_mcp.access_gate import get_access_gate, reset_access_gate
 
 
 class FakeBackend:
-    def __init__(self, windows):
+    def __init__(self, windows, identities=None):
         self.windows = list(windows)
+        self.identities = dict(identities or {})
         self.clicked: list[int] = []
         self.closed: list[int] = []
+
+    def process_identity(self, pid: int) -> ProcessIdentity:
+        return self.identities.get(pid, ProcessIdentity("MSACCESS.EXE", 1000, True))
 
     def list_windows(self):
         return list(self.windows)
 
-    def click(self, hwnd: int) -> None:
+    def click(self, hwnd: int, *, expected_pid=None, timeout_ms=5000) -> bool:
         self.clicked.append(hwnd)
         self.windows = [window for window in self.windows if window.hwnd != hwnd and not any(
             button.hwnd == hwnd for button in window.buttons
@@ -41,6 +47,7 @@ class FakeBackend:
             for window in self.windows
             if not any(button.hwnd == hwnd for button in window.buttons)
         ]
+        return True
 
     def close(self, hwnd: int) -> None:
         self.closed.append(hwnd)
@@ -61,10 +68,8 @@ def _win(**kwargs) -> WindowInfo:
         title="",
         class_name="#32770",
         owner_hwnd=50,
-        process_name="MSACCESS.EXE",
         texts=(),
         buttons=(),
-        create_time=1000,
     )
     defaults.update(kwargs)
     return WindowInfo(**defaults)
@@ -113,7 +118,7 @@ def test_break_mode_is_not_a_dialog_and_blocks_readiness():
         _win(hwnd=1, title="Northwind : Database", class_name="OMain", texts=()),
         _win(hwnd=2, title="Module1 (Code) [break]", class_name="wndclass_desked_gsk"),
     ]
-    report = inspect_windows(windows, r"C:\data\Northwind.accdb", responsive=True)
+    report = inspect_windows(windows, r"C:\data\Northwind.accdb", backend=FakeBackend(windows), responsive=True)
     assert report["success"] is True
     assert report["break_mode"] is True
     assert report["ready"] is False
@@ -133,7 +138,6 @@ def test_two_instances_only_the_named_pid_is_touched():
             title="Other",
             texts=("two",),
             buttons=(_button(21, "OK"),),
-            create_time=2000,
         ),
     ]
     backend = FakeBackend(windows)
@@ -156,17 +160,17 @@ def test_two_instances_only_the_named_pid_is_touched():
 def test_ambiguous_database_is_not_clicked():
     windows = [
         _win(hwnd=1, pid=10, title="Northwind : Database", class_name="OMain"),
-        _win(hwnd=2, pid=20, title="Northwind : Database", class_name="OMain", create_time=2000),
+        _win(hwnd=2, pid=20, title="Northwind : Database", class_name="OMain"),
     ]
-    resolved = resolve_target(windows, r"C:\data\Northwind.accdb")
+    resolved = resolve_target(windows, r"C:\data\Northwind.accdb", FakeBackend(windows))
     assert resolved["success"] is False
     assert resolved["error_pattern"] == "ambiguous_instance"
     assert len(resolved["candidates"]) == 2
 
 
 def test_create_time_mismatch_refuses_the_pid():
-    windows = [_win(hwnd=1, pid=10, title="Northwind", class_name="OMain", create_time=1000)]
-    resolved = resolve_target(windows, r"C:\data\Northwind.accdb", pid=10, create_time=999)
+    windows = [_win(hwnd=1, pid=10, title="Northwind", class_name="OMain")]
+    resolved = resolve_target(windows, r"C:\data\Northwind.accdb", FakeBackend(windows), pid=10, create_time=999)
     assert resolved["error_pattern"] == "process_identity_mismatch"
 
 
@@ -228,7 +232,7 @@ def test_end_runtime_error_clicks_end_and_records_interruption():
     assert backend.clicked == [41]
     assert result["interrupted"] is True
     assert result["failure_dialog_dismissed"] is True
-    follow = inspect_windows([runtime], r"C:\data\Northwind.accdb", pid=10, responsive=True)
+    follow = inspect_windows([runtime], r"C:\data\Northwind.accdb", backend=backend, pid=10, responsive=True)
     assert follow["execution_interrupted"] is True
     assert follow["last_interruption"]["button"] == "End"
     assert follow["last_interruption"]["message"].startswith("Run-time error")
@@ -418,3 +422,88 @@ def test_dialog_tools_run_while_the_access_gate_is_held(tmp_path):
     result = asyncio.run(main())
     assert result.get("error_pattern") != "server_busy"
     assert result.get("exempt_probe") is True
+
+
+class HungClickBackend(FakeBackend):
+    """Click is never delivered (target thread hung); the dialog stays open."""
+
+    def click(self, hwnd: int, *, expected_pid=None, timeout_ms=5000) -> bool:
+        self.clicked.append(hwnd)
+        return False
+
+
+def test_undelivered_click_is_dismiss_uncertain_and_not_retried():
+    import time
+
+    windows = [
+        _win(hwnd=1, pid=10, title="VCS Probe", texts=("one",), buttons=(_button(11, "OK"),)),
+    ]
+    backend = HungClickBackend(windows)
+    started = time.monotonic()
+    result = dismiss_dialog(
+        r"C:\data\Northwind.accdb",
+        "hwnd:1",
+        button="OK",
+        pid=10,
+        create_time=1000,
+        timeout_seconds=1.0,
+        backend=backend,
+    )
+    assert time.monotonic() - started < 1.0 + 5.0
+    assert result["success"] is False
+    assert result["error_pattern"] == "dismiss_uncertain"
+    assert backend.clicked == [11]
+
+
+def test_exempt_tool_runs_off_event_loop(monkeypatch):
+    import asyncio
+    import threading
+    import time
+
+    from msaccess_vcs_mcp import tools
+
+    main_thread = threading.get_ident()
+    seen: dict[str, int] = {}
+
+    def blocking(**_kwargs):
+        seen["thread"] = threading.get_ident()
+        time.sleep(0.3)
+        return {"success": True}
+
+    async def scenario():
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.02)
+                ticks += 1
+
+        task = asyncio.create_task(ticker())
+        result = await tools._run_exempt_in_worker("vcs_list_dialogs", blocking, (), {})
+        task.cancel()
+        return result, ticks
+
+    result, ticks = asyncio.run(scenario())
+    assert result == {"success": True}
+    assert seen["thread"] != main_thread
+    assert ticks >= 5
+
+
+def test_exempt_tool_ceiling_returns_recoverable_timeout(monkeypatch):
+    import asyncio
+    import time
+
+    from msaccess_vcs_mcp import tools
+
+    monkeypatch.setattr(tools, "EXEMPT_WORKER_MARGIN_SEC", 0.0)
+    monkeypatch.setenv("ACCESS_VCS_DIALOG_TIMEOUT_SEC", "0.2")
+
+    def hung(**_kwargs):
+        time.sleep(1.0)
+        return {"success": True}
+
+    result = asyncio.run(tools._run_exempt_in_worker("vcs_list_dialogs", hung, (), {}))
+    assert result["success"] is False
+    assert result["error_pattern"] == "tool_timeout"
+    assert result["recoverable"] is True
