@@ -203,6 +203,37 @@ def _noninteractive_policy(noninteractive: bool, decision_policy: str | None) ->
     return policy
 
 
+_INTERACTION_MODE_NORMAL = 0  # add-in eInteractionMode.eimNormal
+
+
+def _select_interactive_mode(addin: Any) -> None:
+    """Send an explicit interactive mode, so the run never inherits a stale one.
+
+    Call only outside a noninteractive scope (``policy`` is None), and before
+    the operation starts.
+    """
+    addin.call_sync("SetInteractionMode", _INTERACTION_MODE_NORMAL)
+
+
+def _clear_operation_policy(addin: Any) -> str | None:
+    """Clear the add-in operation policy. Never raises; returns a failure message.
+
+    ``ClearOperationPolicy`` is idempotent, so this is safe after the add-in's
+    ``Finish`` has already restored the mode. A failure is usage-logged so a
+    policy left set in the add-in is visible.
+    """
+    try:
+        cleared = _addin_json_result(addin.call_sync("ClearOperationPolicy"))
+        if cleared.get("success") is False:
+            message = str(cleared.get("error") or cleared.get("message") or "ClearOperationPolicy refused")
+        else:
+            return None
+    except Exception as e:
+        message = str(e) or type(e).__name__
+    log_diagnostic_event("policy_cleanup_failed", error=message)
+    return message
+
+
 def _coerce_decisions(value: Any) -> Any:
     if isinstance(value, str):
         try:
@@ -227,6 +258,55 @@ def _apply_decision_result(result: dict[str, Any], completion: dict[str, Any] | 
             "A required decision was not covered by the decision policy."
         )
     return result
+
+
+def _parse_addin_payload(value: Any) -> dict[str, Any]:
+    """Parse an add-in result (JSON string or dict) into a dict, never raising."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return {"success": False, "error": f"Unparseable add-in result: {value[:200]}"}
+    if isinstance(value, dict):
+        return value
+    return {"success": False, "error": "Add-in returned no result"}
+
+
+def _is_start_refusal(payload: dict[str, Any]) -> bool:
+    """A sync start result that refused (or declined) the operation."""
+    return payload.get("success") is False and not payload.get("async") and not payload.get("sync")
+
+
+def _normalize_import_result(
+    payload: dict[str, Any],
+    *,
+    db_path: Any,
+    src_path: Any,
+) -> dict[str, Any]:
+    """The one exit for every merge path.
+
+    ``payload`` is the last add-in result: a completion callback, the inline
+    ``sync`` result, a sync-fallback merge result, or a start refusal.
+    ``decision_required`` beats ``success``; ``decisions`` and any
+    ``error_pattern`` the add-in reported pass through unchanged.
+    """
+    success = payload.get("success") is True
+    result: dict[str, Any] = {
+        "success": success,
+        "imported_count": "See log for details" if success else 0,
+        "database_path": str(db_path),
+        "source_dir": str(src_path),
+    }
+    if not success:
+        result["error"] = payload.get("error") or payload.get("message") or "Import failed"
+    if payload.get("error_pattern"):
+        result["error_pattern"] = payload["error_pattern"]
+    if payload.get("runtime_error"):
+        result["runtime_error"] = payload["runtime_error"]
+    if payload.get("completion_unconfirmed"):
+        result["completion_unconfirmed"] = True
+    result = _apply_decision_result(result, payload)
+    return _attach_log_context(result, src_path, "Merge", payload)
 
 
 def _apply_test_run_success(parsed: dict[str, Any]) -> dict[str, Any]:
@@ -1240,12 +1320,13 @@ async def vcs_import_objects(
             and the merge results window. Required confirmations and merge
             conflicts use ``decision_policy`` and otherwise return
             ``error_pattern: decision_required`` instead of a dialog.
-            Pass False to keep the existing interactive prompts (and the
-            older MCP behavior that lets source win conflicts).
+            Pass False to select interactive mode explicitly, with the
+            add-in's normal prompts.
         decision_policy: Used when ``noninteractive`` is True. One of
             ``block`` (default), ``prefer_source``, ``prefer_database``,
-            ``skip``, or ``decline``. ``prefer_source`` is the explicit
-            choice that overwrites conflicting database objects from source.
+            ``skip``, or ``decline``. ``prefer_source`` takes each conflict's
+            requested action, and overwrites from source when it asks for none.
+            ``prefer_database`` keeps the database object, same as ``skip``.
     
     Returns:
         Dictionary with import results and any errors, plus ``log_path`` for
@@ -1301,30 +1382,52 @@ async def vcs_import_objects(
                         "imported_count": 0,
                     }
                 if policy:
+                    # A refusal here (for example operation_already_running)
+                    # is a normal result, not an error.
                     policy_result = _addin_json_result(
                         addin.call_sync("SetOperationPolicy", policy)
                     )
                     if policy_result.get("success") is False:
                         return policy_result
+                else:
+                    _select_interactive_mode(addin)
+                op_error: Exception | None = None
                 try:
                     result = _addin_json_result(
                         addin.call_sync("ImportByType", types_arg, full_import)
                     )
+                except Exception as e:
+                    op_error = e
+                    result = {"success": False, "error": str(e), "imported_count": 0}
                 finally:
-                    if policy:
-                        addin.call_sync("ClearOperationPolicy")
+                    cleanup_error = _clear_operation_policy(addin) if policy else None
+                if cleanup_error:
+                    # Secondary information: never replaces the operation's result.
+                    result["policy_cleanup_error"] = cleanup_error
                 result.setdefault("database_path", str(db_path))
                 result.setdefault("source_dir", str(src_path))
-                if result.get("success") and "imported_count" not in result:
-                    result["imported_count"] = "See log for details"
+                if op_error is None:
+                    if result.get("success") and "imported_count" not in result:
+                        result["imported_count"] = "See log for details"
+                    result = _apply_decision_result(result, result)
                 return _attach_log_context(result, src_path, "Merge")
             
-            # Check if async import is available
+            if not policy:
+                _select_interactive_mode(addin)
+
+            # Every branch below ends with one payload for the normaliser.
+            # The add-in's sync return is a start result, never a final one.
+            def _merge_sync() -> dict[str, Any]:
+                merged = addin.merge_build(str(db_path), str(src_path), policy)
+                if merged.get("started") and merged.get("success"):
+                    # No callback exists on this path to report the outcome.
+                    merged = {**merged, "completion_unconfirmed": True}
+                return merged
+
             if callback_url and op_manager:
                 # Ensure operation manager uses the correct event loop (FastMCP's loop)
                 op_manager.set_event_loop(asyncio.get_running_loop())
-                
-                # Use async path with progress callbacks
+
                 operation_id, queue = op_manager.register_operation(
                     database_path=str(db_path),
                     command="MergeBuild"
@@ -1332,76 +1435,46 @@ async def vcs_import_objects(
                 callback_info = op_manager.create_callback_info(
                     operation_id, callback_url, "cursor"
                 )
-                
+
                 try:
-                    # Call async API for MergeBuild
-                    completion = None
                     if policy:
                         async_result = addin.call_async(callback_info, "MergeBuild", policy)
                     else:
                         async_result = addin.call_async(callback_info, "MergeBuild")
-                    
+
                     if async_result.get("async"):
-                        # Wait for completion with progress reporting
+                        # Started: the callback carries the final result.
                         timeout_ms = async_result.get("timeout_ms", 300000)
-                        completion = await op_manager.wait_for_completion(
+                        final = await op_manager.wait_for_completion(
                             operation_id,
                             ctx=ctx,
                             timeout_seconds=timeout_ms / 1000
                         )
-                        
-                        if not completion.get("success"):
-                            return _attach_log_context(_apply_decision_result({
-                                "success": False,
-                                "error": completion.get("error", "Import failed"),
-                                "imported_count": 0,
-                            }, completion), src_path, "Merge", completion)
                     elif async_result.get("sync"):
                         # The add-in already ran the merge inline; re-running it
-                        # here would merge twice. Fall through and resolve the
-                        # log from disk.
+                        # here would merge twice. Its inline result is final.
                         op_manager.unregister_operation(operation_id)
+                        final = _parse_addin_payload(async_result.get("result"))
+                    elif _is_start_refusal(async_result):
+                        # Refusals are also posted to the callback. Unregistering
+                        # makes the first arrival win; the duplicate is dropped.
+                        op_manager.unregister_operation(operation_id)
+                        final = async_result
                     else:
                         # Neither marker: the add-in never started the operation,
                         # so run it synchronously rather than reporting success
                         # for work that never happened.
                         op_manager.unregister_operation(operation_id)
-                        result = addin.merge_build(str(db_path), str(src_path), policy)
-                        if not result["success"]:
-                            return _attach_log_context({
-                                "success": False,
-                                "error": result["message"],
-                                "imported_count": 0,
-                            }, src_path, "Merge")
-                except Exception as e:
+                        final = _merge_sync()
+                except Exception:
                     # Async call failed - fall back to sync
-                    completion = None
                     op_manager.unregister_operation(operation_id)
-                    result = addin.merge_build(str(db_path), str(src_path), policy)
-                    if not result["success"]:
-                        return _attach_log_context({
-                            "success": False,
-                            "error": result["message"],
-                            "imported_count": 0,
-                        }, src_path, "Merge")
+                    final = _merge_sync()
             else:
-                # Use sync path
-                completion = None
-                result = addin.merge_build(str(db_path), str(src_path), policy)
-                if not result["success"]:
-                    return _attach_log_context({
-                        "success": False,
-                        "error": result["message"],
-                        "imported_count": 0,
-                    }, src_path, "Merge")
-            
-            return _attach_log_context(_apply_decision_result({
-                "success": True,
-                "imported_count": "See log for details",
-                "database_path": str(db_path),
-                "source_dir": str(src_path),
-            }, completion), src_path, "Merge", completion)
-    
+                final = _merge_sync()
+
+            return _normalize_import_result(final, db_path=db_path, src_path=src_path)
+
     except PermissionError as e:
         return {
             "success": False,
@@ -3106,9 +3179,9 @@ async def vcs_run_tests(
     Headless here means no add-in UI (no web runner, no console form, no
     message boxes) -- not a hidden Access window. The host instance stays
     visible. ``noninteractive`` defaults to True and is scoped to the run:
-    the add-in restores the previous interaction mode when the run finishes,
-    fails, or is cancelled. Pass ``noninteractive=False`` for the ribbon-style
-    console. ``decision_policy`` (default ``block``) answers confirmations;
+    the add-in restores its interaction mode when the run finishes,
+    fails, or is cancelled. Pass ``noninteractive=False`` to select interactive
+    mode explicitly and get the ribbon-style console. ``decision_policy`` (default ``block``) answers confirmations;
     an uncovered prompt returns ``error_pattern: decision_required`` instead
     of a dialog.
 
@@ -3182,7 +3255,10 @@ async def vcs_run_tests(
             addin.load_addin(app, db_path=str(db_path))
 
             # The add-in scopes noninteractive mode inside RunFilteredTests and
-            # restores it when the run ends. Do not set a process-wide mode here.
+            # restores it when the run ends. Do not set a process-wide mode
+            # here; only an interactive run selects its mode explicitly.
+            if not policy:
+                _select_interactive_mode(addin)
 
             # Set the filter option (session-scoped, does not modify user's vcs-options.json)
             addin.call_sync("SetOption", "DefaultTestFilter", filter or "")

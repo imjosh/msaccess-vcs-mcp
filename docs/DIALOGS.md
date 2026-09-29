@@ -27,14 +27,15 @@ to `block`.
 | --- | --- | --- |
 | `block` | Return `decision_required`. Do not approve. | Same. The database is not overwritten. |
 | `decline` | Answer No, Cancel, or Abort. | Keep the database object. |
-| `prefer_source` | Still `decision_required` (this policy is for conflicts). | Source file wins. |
-| `prefer_database` | Still `decision_required`. | Keep the database object. |
-| `skip` | Still `decision_required`. | Skip the conflicting source file. |
+| `prefer_source` | Still `decision_required` (this policy is for conflicts). | Each conflict takes the action it asks for; source overwrites when it asks for none. |
+| `prefer_database` | Still `decision_required`. | Keep the database object. Same as `skip`. |
+| `skip` | Still `decision_required`. | Keep the database object and skip the source file. |
 
-Pass `noninteractive=False` to show the normal prompts. That is also the
-older MCP behavior, which lets source win conflicts without asking.
+Pass `noninteractive=False` to select interactive mode explicitly and show
+the normal prompts. MCP sends the mode before the operation starts, so the
+run does not depend on the mode the add-in was last left in.
 
-The add-in restores the previous interaction mode when the operation
+The add-in restores its interaction mode when the operation
 finishes, fails, or is cancelled. A blocked prompt is `success: false` with
 `error_pattern: decision_required` and a `decisions` array. It is not a
 successful merge or a successful test run.
