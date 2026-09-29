@@ -256,3 +256,7 @@ Three sensitivity tiers in the usage stream, each independently controlled:
 - Error results include `"error"` key (detected by usage logging)
 - Async tools (`async def`) are supported by `@vcs_tool` transparently
 - `Context` parameters from FastMCP are filtered out of usage logs automatically
+
+## Active cross-repo work: dialog handling hardening
+
+Work on `feat/noninteractive-dialogs` is tracked in a local markdown tracker in the parent folder shared with the sibling repo `msaccess-vcs-addin`: `../issues/INDEX.md` (issue files beside it) and the combined spec `../specs/dialog-handling-hardening.md`. Read the index, pick a `todo` issue whose blockers are `done`, and update its status in both the issue file and the index.
