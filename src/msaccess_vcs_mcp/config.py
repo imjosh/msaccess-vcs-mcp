@@ -457,6 +457,9 @@ def load_config() -> dict[str, Any]:
         "ACCESS_VCS_ADDIN_PATH": _strip_quotes(os.getenv("ACCESS_VCS_ADDIN_PATH", get_default_addin_path())),
         "ACCESS_VCS_DISABLE_WRITES": os.getenv("ACCESS_VCS_DISABLE_WRITES", "false").lower() == "true",
 
+        # Bound on one dialog inspect or click; the dialog module applies its default and ceiling.
+        "ACCESS_VCS_DIALOG_TIMEOUT_SEC": os.getenv("ACCESS_VCS_DIALOG_TIMEOUT_SEC", ""),
+
         # Callback server settings
         "ACCESS_VCS_CALLBACK_ENABLED": callback_enabled,
         "ACCESS_VCS_CALLBACK_HOST": os.getenv("ACCESS_VCS_CALLBACK_HOST", "127.0.0.1"),

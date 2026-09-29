@@ -18,6 +18,7 @@ from typing import Any, Iterable, Protocol
 
 from .access_com.instance_registry import list_owned, process_create_time
 from .access_gate import get_access_gate
+from .config import get_config
 
 DEFAULT_TIMEOUT_SEC = 5.0
 MAX_TIMEOUT_SEC = 30.0
@@ -68,7 +69,6 @@ class WindowInfo:
     pid: int
     title: str
     class_name: str
-    owner_hwnd: int = 0
     texts: tuple[str, ...] = ()
     buttons: tuple[ButtonInfo, ...] = ()
 
@@ -109,7 +109,7 @@ def dialog_timeout_sec(override: float | None = None) -> float:
     """Bound a dialog wait. The environment supplies the default."""
     if override is None:
         try:
-            override = float(os.environ.get("ACCESS_VCS_DIALOG_TIMEOUT_SEC", str(DEFAULT_TIMEOUT_SEC)))
+            override = float(get_config().get("ACCESS_VCS_DIALOG_TIMEOUT_SEC", DEFAULT_TIMEOUT_SEC))
         except (TypeError, ValueError):
             override = DEFAULT_TIMEOUT_SEC
     if override <= 0:
@@ -190,7 +190,7 @@ def auto_button(window: WindowInfo, kind: str, policy: str) -> str | None:
     overwrite) are never acknowledged automatically. End is used only for a
     runtime-error dialog when the policy is ``end_runtime_error``.
     """
-    if policy in {"", "report", "inspect"}:
+    if policy in {"", "report"}:
         return None
     if kind == "vba_break" or kind == "ignored":
         return None
@@ -400,7 +400,6 @@ def _dialog_record(window: WindowInfo, kind: str) -> dict[str, Any]:
         "buttons": [button.text for button in window.buttons],
         "class_name": window.class_name,
         "pid": window.pid,
-        "owner_hwnd": window.owner_hwnd or None,
     }
 
 
@@ -438,7 +437,6 @@ def inspect_windows(
     target = resolve_target(listed, database_path, backend, pid=pid, create_time=create_time)
     if not target.get("success"):
         target["dialogs"] = []
-        target["remaining"] = []
         return target
 
     chosen = int(target["pid"])
@@ -454,10 +452,8 @@ def inspect_windows(
     break_mode = any(item["kind"] == "vba_break" for item in dialogs)
     blocking = [item for item in dialogs if item["kind"] in BLOCKING_KINDS]
     gate = _gate_snapshot(database_path)
-    alive = True
     ready = (
-        alive
-        and responsive is not False
+        responsive is not False
         and not break_mode
         and not blocking
         and not gate["gate_busy"]
@@ -472,7 +468,6 @@ def inspect_windows(
         "identity_confirmed": target.get("identity_confirmed", False),
         "matched_by": target.get("matched_by"),
         "dialogs": dialogs,
-        "remaining": dialogs,
         "break_mode": break_mode,
         "blocking_dialog": bool(blocking),
         "responsive": responsive,
@@ -634,7 +629,7 @@ def dismiss_one(
             "message": "Add-in window close requested as cancellation.",
         }
     elif action_l == "close":
-        if kind == "addin_window" and before.get("gate_busy"):
+        if kind == "addin_window" and (before.get("operation") or {}).get("same_database"):
             return {
                 **before,
                 "success": False,
@@ -702,12 +697,11 @@ def recover_windows(
     create_time: int | None = None,
     responsive: bool | None = None,
     backend: WindowBackend,
-    max_dialogs: int = MAX_AUTO_DIALOGS,
     click_timeout_sec: float | None = None,
 ) -> dict[str, Any]:
     """Apply a bounded automatic policy. Unknown dialogs are reported, not clicked."""
     policy_l = (policy or "report").strip().lower()
-    if policy_l not in {"report", "inspect", "safe", "end_runtime_error"}:
+    if policy_l not in {"report", "safe", "end_runtime_error"}:
         return {
             "success": False,
             "error_pattern": "invalid_recovery_policy",
@@ -723,7 +717,7 @@ def recover_windows(
     )
     if not report.get("success"):
         return report
-    if policy_l in {"report", "inspect"}:
+    if policy_l in {"report"}:
         report["policy"] = policy_l
         report["automatic"] = False
         report["closed"] = []
@@ -745,8 +739,8 @@ def recover_windows(
     by_hwnd = _windows_for_pid(windows, int(report["pid"]))
     handled = 0
     for item in list(report["dialogs"]):
-        if handled >= max_dialogs:
-            skipped.append({**item, "reason": "max_dialogs"})
+        if handled >= MAX_AUTO_DIALOGS:
+            skipped.append({**item, "reason": "max_auto_dialogs"})
             continue
         window = by_hwnd.get(int(item["hwnd"]))
         if window is None:
@@ -826,7 +820,6 @@ def note_ready(report: dict[str, Any], remaining: list[dict[str, Any]]) -> dict[
     )
     report = dict(report)
     report["dialogs"] = remaining
-    report["remaining"] = remaining
     report["break_mode"] = break_mode
     report["blocking_dialog"] = bool(blocking)
     report["ready"] = ready
@@ -863,20 +856,12 @@ class Win32Backend:
             class_name = win32gui.GetClassName(hwnd) or ""
             _thread, pid = win32process.GetWindowThreadProcessId(hwnd)
             buttons, texts = _child_contents(hwnd)
-            owner = 0
-            try:
-                import win32con
-
-                owner = win32gui.GetWindow(hwnd, win32con.GW_OWNER) or 0
-            except Exception:
-                owner = 0
             found.append(
                 WindowInfo(
                     hwnd=int(hwnd),
                     pid=int(pid),
                     title=title,
                     class_name=class_name,
-                    owner_hwnd=int(owner or 0),
                     texts=tuple(texts),
                     buttons=tuple(buttons),
                 )
@@ -1137,7 +1122,7 @@ def recover_dialogs(
         backend=live,
         click_timeout_sec=timeout,
     )
-    if policy.strip().lower() in {"report", "inspect"} or not result.get("success"):
+    if policy.strip().lower() == "report" or not result.get("success"):
         result["timeout_seconds"] = timeout
         return result
     deadline = time.monotonic() + timeout

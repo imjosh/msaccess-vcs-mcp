@@ -98,8 +98,11 @@ vcs_automation_status(r"C:\db.accdb")
 ```
 
 `action=close` closes a finished add-in window and does not cancel a running
-operation. If the gate is still busy, close is refused with
-`operation_in_progress`. `action=cancel` asks the add-in window to stop the
+operation. If the gate is busy with an operation on the same database
+(compared after path normalisation), close is refused with
+`operation_in_progress`. An operation on another database does not block it.
+Closing the window of a noninteractive run cancels that run without any
+confirmation prompt. `action=cancel` asks the add-in window to stop the
 operation and reports `interrupted: true`.
 
 Button names ignore the Win32 accelerator marker, so `End` matches a button caption of `&End`. `button="Debug"` is refused. `button="End"` stops the failed VBA call. Continue is never clicked automatically. The

@@ -67,7 +67,6 @@ def _win(**kwargs) -> WindowInfo:
         pid=10,
         title="",
         class_name="#32770",
-        owner_hwnd=50,
         texts=(),
         buttons=(),
     )
@@ -313,10 +312,10 @@ def test_explicit_debug_is_refused():
     assert backend.clicked == []
 
 
-def test_close_finished_addin_window_does_not_cancel_when_gate_is_busy():
+def test_close_finished_addin_window_does_not_cancel_while_gate_busy_on_same_database():
     addin = _win(hwnd=7, title="MSAccessVCS", class_name="OForm", texts=("Running",))
     backend = FakeBackend([addin])
-    with patch("msaccess_vcs_mcp.dialog_recovery._gate_snapshot", return_value={"gate_busy": True, "operation": {"tool": "vcs_run_tests"}}):
+    with patch("msaccess_vcs_mcp.dialog_recovery._gate_snapshot", return_value={"gate_busy": True, "operation": {"tool": "vcs_run_tests", "same_database": True}}):
         blocked = dismiss_one(
             [addin],
             r"C:\data\Northwind.accdb",
@@ -329,7 +328,8 @@ def test_close_finished_addin_window_does_not_cancel_when_gate_is_busy():
     assert blocked["error_pattern"] == "operation_in_progress"
     assert backend.closed == []
 
-    with patch("msaccess_vcs_mcp.dialog_recovery._gate_snapshot", return_value={"gate_busy": False, "operation": None}):
+    other = {"gate_busy": True, "operation": {"tool": "vcs_run_tests", "same_database": False}}
+    with patch("msaccess_vcs_mcp.dialog_recovery._gate_snapshot", return_value=other):
         closed = dismiss_one(
             [addin],
             r"C:\data\Northwind.accdb",
