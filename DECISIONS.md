@@ -74,6 +74,24 @@ contradictory guidance.
 
 ---
 
+## 2026-09-30 — Re-verify dialog content and re-run the policy before a click
+
+**Trigger**: M22. The pre-click check compared process identity, the dialog handle, its PID and the inspected `ButtonInfo`, but not title, class or text. A modal box cannot change its own text, but it can be replaced: the inspected box closes, another opens, and Windows reuses the handles. Reproduced: an inspected "Hello" box became "Delete all records?" with the same handles, `recover_dialogs(policy="safe")` clicked OK, and the result reported "Hello".
+
+**Options explored**:
+- *Compare the kind only*: rejected. "Hello" and "Delete all records?" are both OK-only `vba_msgbox`.
+- *Compare a content signature only*: catches a replaced box, but the safety rule would still be applied to the inspection, not to the box being clicked.
+- *Re-run the policy on the fresh window only*: catches the destructive case, but lets a different harmless box through under an explicit dismiss, and a result could still describe the earlier box.
+- *Both (chosen)*.
+
+**Decision**: `_reverify` re-lists windows and returns the fresh window and its kind, or None. It requires the same PID and creation time and the same signature: class, title, full text (`window.texts`), classified kind, and the whole button list. `_press_fresh` is the only place a button is clicked: it re-verifies, runs the caller's chooser on the fresh window (`_button_named` for an explicit button, `_policy_button` for `recover_dialogs`), and clicks the `ButtonInfo` read from the fresh window. `_close_fresh` is the only place a window is closed. Any mismatch is `dialog_changed` with nothing clicked. The `closed` record and the interruption record are built from the fresh window. `recover_dialogs` sets top-level `success: false`, `error_pattern: dialog_changed` when a dialog it would have clicked changed; `dismiss_uncertain` takes precedence. `msaa.press` still re-checks role, name and state for NetUI buttons.
+
+**What this rules out**: The race between the last check and the click cannot be closed from outside Access. A box can still be replaced after `_reverify` lists windows and before `BM_CLICK` or `accDoDefaultAction` arrives. The window is now two back-to-back calls instead of the whole inspection. `vcs_dismiss_dialog` compares against its own inspection at the start of the call, not the listing the agent read before deciding; the agent's think time is covered only in that a result describes the box actually clicked. Revisit if a caller-supplied expected signature is added to `vcs_dismiss_dialog`.
+
+**Relevant files**: `dialog_recovery.py` (`_signature`, `_reverify`, `_press_fresh`, `_close_fresh`, `_policy_button`, `recover_dialogs`), `tests/test_dialog_identity.py`, `docs/DIALOGS.md`.
+
+---
+
 ## 2026-09-30 — NetUI dialogs are read and pressed through MSAA with raw ctypes
 
 **Trigger**: M19. The add-in's `MsgBox2` (the `@`-separated bold `MsgBox` form) and Access's own error dialogs appear as a top-level `NUIDialog` whose only child is a `NetUIHWND`. There are no Win32 `Static` or `Button` children, so the inspector dropped the window as ordinary: `vcs_list_dialogs` said `ready: true` while a box blocked the call, and `vcs_dismiss_dialog` returned `dialog_not_found`. A plain `MsgBox` (VBA or `Eval`) is still `#32770`.
@@ -164,6 +182,8 @@ contradictory guidance.
 ## 2026-09-29 — Dialog recovery rules: identity, positive signature, interruptions, off-event-loop
 
 > **⚠ Partially superseded** (2026-09-29): rule 2 has one exception. A dialog with a single OK button and any other caption is kind `vba_msgbox` and is clicked by `safe`. See "Click OK-only VBA MsgBox of any caption (`vba_msgbox`)" above.
+
+> **⚠ Partially superseded** (2026-09-30): in rule 1, the pre-click re-verify also compares class, title, text, kind and buttons, and re-runs the policy on the fresh window. See "Re-verify dialog content and re-run the policy before a click" above.
 
 **Trigger**: Two-axis review of commit `e982918` found the dialog-recovery code did not meet the entry below. This records the four rules the fixes (M01 to M05) implement. `specs/dialog-recovery-review-fixes.md` holds the detail.
 
