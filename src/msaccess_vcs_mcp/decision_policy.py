@@ -234,6 +234,8 @@ def normalize_import_result(payload: dict[str, Any]) -> dict[str, Any]:
     unconfirmed = bool(payload.get("completion_unconfirmed"))
     success = payload.get("success") is True and not unconfirmed
     result: dict[str, Any] = {"success": success}
+    if payload.get("cancelled"):
+        result["cancelled"] = True
     if unconfirmed:
         result["started"] = True
         result["completion_unconfirmed"] = True

@@ -44,6 +44,85 @@ def test_async_completion_decision_required(tmp_path):
         _assert_decision(_run((db, src)))
 
 
+@pytest.mark.parametrize("journal_format", ["array", "json", "absent"])
+@pytest.mark.parametrize("override", [None, "other_pattern", "decision_flag", "decision_pattern"])
+def test_cancelled_merge_through_operation_manager(tmp_path, monkeypatch, journal_format, override):
+    """Resolved conflicts survive a cancelled callback all the way to the public tool."""
+    from unittest.mock import AsyncMock
+
+    from msaccess_vcs_mcp import tools
+    from msaccess_vcs_mcp.access_gate import reset_access_gate
+    from msaccess_vcs_mcp.dialog_recovery import reset_interruptions
+    from msaccess_vcs_mcp.operation_manager import OperationManager
+
+    manager = OperationManager()
+    journal = [{
+        "object": "Form1",
+        "type": "conflict",
+        "policy": "prefer_source",
+        "resolution": "source",
+        "message": 'Use "source" at C:\\src\\Form1\r\nNext line\tΩ',
+    }]
+    log_path = tmp_path / "Merge.log"
+    log_path.write_text("Resolved Form1 using source\nMerge cancelled\n", encoding="utf-8")
+    payload = {
+        "type": "cancelled",
+        "message": "Merge cancelled after resolving conflicts",
+        "log_path": str(log_path),
+    }
+    if journal_format != "absent":
+        payload["decisions"] = json.dumps(journal) if journal_format == "json" else journal
+    if override == "other_pattern":
+        payload["error_pattern"] = "operation_cancelled"
+    elif override == "decision_flag":
+        payload.update(decision_required=True, error_pattern="operation_cancelled")
+    elif override == "decision_pattern":
+        payload.update(decision_required=False, error_pattern="decision_required")
+
+    def post_cancelled(callback_info, command, *args):
+        assert (command, args) == ("MergeBuild", ("prefer_source",))
+        operation_id = json.loads(callback_info)["operation_id"]
+        # Exercise the callback's JSON transport, including escaped decision text.
+        callback = json.loads(json.dumps({"operation_id": operation_id, **payload}))
+        assert manager.route_callback(operation_id, callback)
+        return {"async": True, "timeout_ms": 1000}
+
+    reset_access_gate()
+    reset_interruptions()
+    monkeypatch.setattr(tools, "_ensure_env_loaded", AsyncMock())
+    monkeypatch.setattr(tools, "load_config", lambda: {})
+    monkeypatch.setenv("ACCESS_VCS_ENABLE_LOGGING", "false")
+    monkeypatch.setenv("ACCESS_VCS_DIAGNOSTIC_LOG_DIR", str(tmp_path / "diag"))
+    try:
+        with _patch_import_tool(tmp_path) as (db, src, addin, _ops):
+            monkeypatch.setattr(tools, "_get_operation_manager", lambda: manager)
+            addin.call_async.side_effect = post_cancelled
+            result = asyncio.run(tools.vcs_import_objects(db, str(src), decision_policy="prefer_source"))
+            addin.merge_build.assert_not_called()
+        assert manager.pending_count() == 0
+        assert result["success"] is False
+        assert result["cancelled"] is True
+        assert result["error"] == payload["message"]
+        assert result["log_path"] == str(log_path)
+        assert result["log_excerpt"] == "Resolved Form1 using source\nMerge cancelled"
+        if journal_format == "absent":
+            assert "decisions" not in result
+        else:
+            assert result["decisions"] == journal
+        if override in {"decision_flag", "decision_pattern"}:
+            assert result["decision_required"] is True
+            assert result["error_pattern"] == "decision_required"
+        elif override == "other_pattern":
+            assert result["error_pattern"] == "operation_cancelled"
+            assert not result.get("decision_required")
+        else:
+            assert "error_pattern" not in result
+            assert not result.get("decision_required")
+    finally:
+        reset_interruptions()
+        reset_access_gate()
+
+
 def test_async_completion_success_flag_cannot_hide_decision(tmp_path):
     payload = {**BLOCKED, "success": True}
     with _patch_import_tool(tmp_path, async_result={"async": True, "timeout_ms": 1000}) as (
