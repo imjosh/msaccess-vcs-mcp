@@ -179,7 +179,7 @@ def test_compile_error_dismissed_by_recovery_also_records():
 
     def recover():
         recover_windows(
-            [compile_err], DB, policy="safe", pid=10, responsive=True, backend=backend
+            [compile_err], DB, policy="end_runtime_error", pid=10, responsive=True, backend=backend
         )
 
     result = _run_held({"success": True}, recover)

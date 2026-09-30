@@ -146,13 +146,14 @@ matches no signature, including a custom-caption box with two or more buttons
 or a single non-OK button, is `kind: "unknown"`. Both are reported with title,
 text and buttons and are blocking.
 
-`policy="safe"` clicks OK only on an OK-only dialog of a known kind
-(`access_dialog`, `vba_compile_error`, `vba_msgbox`) whose text is not a save,
-discard, delete, or overwrite confirmation. A single-button `vba_msgbox` is
-closed because Access cannot continue until it is, and the closed dialog is
-listed in `closed` with its `kind`, `title` and `message`. A `vba_msgbox` with
-destructive words stays open and is listed in `skipped`. `unknown` is never
-clicked automatically; dismiss it explicitly with
+`policy="safe"` clicks OK only on a `vba_msgbox` (an OK-only standard dialog)
+whose text is not a save, discard, delete, or overwrite confirmation. Access
+error and warning dialogs (`access_dialog`) are report-only, and compile errors
+belong to `end_runtime_error`, so `safe` leaves both open. A single-button
+`vba_msgbox` is closed because Access cannot continue until it is, and the
+closed dialog is listed in `closed` with its `kind`, `title` and `message`. A
+`vba_msgbox` with destructive words stays open and is listed in `skipped`.
+`unknown` is never clicked automatically; dismiss it explicitly with
 `vcs_dismiss_dialog(..., button=...)`. Everything skipped is returned in
 `skipped` with its buttons. Debug, save and discard are never clicked, and the
 click is a button message, never a keystroke or coordinate click.
@@ -161,8 +162,11 @@ click is a button message, never a keystroke or coordinate click.
 click: they poll until the dialogs they clicked have closed (dialogs the call
 did not act on never extend the wait) or the timeout elapses, then inspect
 once for the report. A dialog they clicked that is still open at the deadline
-is `dismiss_uncertain`, for both tools. `end_runtime_error` adds End on a
-runtime-error dialog and still never clicks Debug.
+is `dismiss_uncertain`, for both tools. `end_runtime_error` does everything
+`safe` does, and adds End on a runtime-error dialog and OK on an OK-only compile
+error. It still never clicks Debug. The destructive-text check guards OK clicks
+only: End on a runtime-error dialog does not depend on it, so a runtime error
+whose text mentions "deleted" is still ended, and `safe` clicks nothing on it.
 
 If two Access windows match the database, the tools return
 `ambiguous_instance` and click nothing. Pass `pid`. If `create_time` does not

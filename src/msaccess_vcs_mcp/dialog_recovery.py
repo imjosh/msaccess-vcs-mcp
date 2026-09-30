@@ -55,8 +55,10 @@ BLOCKING_KINDS = {
     UNKNOWN_KIND,
     VBA_BREAK_KIND,
 }
-# Kinds whose OK-only form the ``safe`` policy may acknowledge.
-SAFE_OK_KINDS = {VBA_COMPILE_ERROR_KIND, ACCESS_DIALOG_KIND, MSGBOX_KIND}
+# Kinds whose OK-only form the ``safe`` policy may acknowledge. Access error and
+# warning dialogs are report-only, and compile errors belong to
+# ``end_runtime_error``.
+SAFE_OK_KINDS = {MSGBOX_KIND}
 POLL_INTERVAL_SEC = 0.05
 DIALOG_ID_PREFIX = "hwnd:"
 _DESTRUCTIVE_TEXT = (
@@ -348,21 +350,23 @@ def auto_button(window: WindowInfo, kind: str, policy: str) -> str | None:
 
     Debug is never chosen. Destructive confirmations (save, discard, delete,
     overwrite) are never acknowledged automatically, including in a
-    single-button ``vba_msgbox``. End is used only for a
-    runtime-error dialog when the policy is ``end_runtime_error``. An
-    ``unknown`` dialog is never clicked.
+    single-button ``vba_msgbox``. End is used only for a runtime-error dialog
+    when the policy is ``end_runtime_error``, and does not depend on the
+    destructive-text check: that guards OK clicks, and a runtime error's own
+    text may say "deleted". ``safe`` clicks OK only on a ``vba_msgbox``;
+    ``end_runtime_error`` also clicks OK on a compile error. An
+    ``access_dialog`` or ``unknown`` dialog is never clicked.
     """
-    if policy in {"", "report"}:
-        return None
-    if kind != VBA_RUNTIME_ERROR_KIND and kind not in SAFE_OK_KINDS:
-        return None
-    if _destructive_text(window):
-        return None
     if policy not in {"safe", "end_runtime_error"}:
         return None
-    if kind == VBA_RUNTIME_ERROR_KIND and policy == "end_runtime_error":
-        if _button_named(window, "End") is not None:
+    if kind == VBA_RUNTIME_ERROR_KIND:
+        if policy == "end_runtime_error" and _button_named(window, "End") is not None:
             return "End"
+        return None
+    ok_kinds = SAFE_OK_KINDS
+    if policy == "end_runtime_error":
+        ok_kinds = SAFE_OK_KINDS | {VBA_COMPILE_ERROR_KIND}
+    if kind not in ok_kinds or _destructive_text(window):
         return None
     # OK-only, ignoring a Help button that we do not click.
     actionable = [button.text.strip() for button in _actionable_buttons(window)]

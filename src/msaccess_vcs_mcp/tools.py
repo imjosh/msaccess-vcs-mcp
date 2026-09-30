@@ -3391,10 +3391,12 @@ def vcs_recover_dialogs(
 
     ``policy``:
     - ``report`` (default): inspection only.
-    - ``safe``: click OK on a known-kind OK-only dialog that is not a
-      save, discard, delete, or overwrite confirmation. Never clicks Debug,
-      Yes, or End, and never clicks a dialog of kind ``unknown``.
-    - ``end_runtime_error``: ``safe`` plus End on a VBA End/Debug dialog.
+    - ``safe``: click OK on an OK-only ``vba_msgbox`` that is not a
+      save, discard, delete, or overwrite confirmation. Access error and
+      warning dialogs are report-only. Never clicks Debug, Yes, or End, and
+      never clicks a dialog of kind ``unknown``.
+    - ``end_runtime_error``: ``safe`` plus End on a VBA End/Debug dialog
+      (whatever its text says) and OK on a compile error.
 
     Unknown dialogs are returned in ``skipped`` with their buttons. After
     clicking, it waits until the clicked dialogs close or the dialog timeout

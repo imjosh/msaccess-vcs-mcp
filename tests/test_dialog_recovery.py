@@ -173,8 +173,9 @@ def test_create_time_mismatch_refuses_the_pid():
     assert resolved["error_pattern"] == "process_identity_mismatch"
 
 
-def test_safe_policy_acks_ok_only_and_skips_unknown_and_destructive():
-    ok_dialog = _win(hwnd=1, title="Microsoft Access", texts=("Something went wrong.",), buttons=(_button(11, "OK"),))
+def test_safe_policy_acks_msgbox_only_and_skips_access_dialog_unknown_and_destructive():
+    ok_dialog = _win(hwnd=1, title="Contoso Tool", texts=("Something happened.",), buttons=(_button(11, "OK"),))
+    access_dialog = _win(hwnd=5, title="Microsoft Access", texts=("Something went wrong.",), buttons=(_button(51, "OK"),))
     yes_no = _win(
         hwnd=2,
         title="Confirm",
@@ -193,7 +194,7 @@ def test_safe_policy_acks_ok_only_and_skips_unknown_and_destructive():
         texts=("Run-time error '11':", "Division by zero"),
         buttons=(_button(41, "End"), _button(42, "Debug"), _button(43, "Help")),
     )
-    windows = [ok_dialog, yes_no, save, runtime]
+    windows = [ok_dialog, access_dialog, yes_no, save, runtime]
     backend = FakeBackend(windows)
     result = recover_windows(
         windows,
@@ -207,6 +208,7 @@ def test_safe_policy_acks_ok_only_and_skips_unknown_and_destructive():
     assert 42 not in backend.clicked
     assert 21 not in backend.clicked
     skipped_kinds = {item["kind"] for item in result["skipped"]}
+    assert "access_dialog" in skipped_kinds
     assert "vba_runtime_error" in skipped_kinds
     assert "unknown" in skipped_kinds
     assert result["failure_dialog_dismissed"] is False
@@ -386,6 +388,24 @@ def test_auto_button_never_returns_debug_or_yes():
     assert auto_button(runtime, "vba_runtime_error", "end_runtime_error") == "End"
     confirm = _win(texts=("Overwrite?",), buttons=(_button(3, "Yes"), _button(4, "No")))
     assert auto_button(confirm, "unknown", "safe") is None
+
+
+def test_auto_button_ends_a_runtime_error_whose_text_looks_destructive():
+    runtime = _win(
+        title="Microsoft Visual Basic",
+        texts=("Run-time error '3021':", "The record was deleted; discard the edit"),
+        buttons=(_button(1, "End"), _button(2, "Debug")),
+    )
+    assert auto_button(runtime, "vba_runtime_error", "end_runtime_error") == "End"
+    assert auto_button(runtime, "vba_runtime_error", "safe") is None
+
+
+def test_auto_button_safe_clicks_only_an_ok_only_msgbox():
+    ok = (_button(1, "OK"),)
+    assert auto_button(_win(texts=("Hello",), buttons=ok), "vba_msgbox", "safe") == "OK"
+    assert auto_button(_win(texts=("Hello",), buttons=ok), "access_dialog", "safe") is None
+    assert auto_button(_win(texts=("Compile error",), buttons=ok), "vba_compile_error", "safe") is None
+    assert auto_button(_win(texts=("Delete it",), buttons=ok), "vba_msgbox", "safe") is None
 
 
 def test_dialog_tools_run_while_the_access_gate_is_held(tmp_path):
