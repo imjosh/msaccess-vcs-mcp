@@ -596,4 +596,77 @@ class TestRunTestsRuntimeError:
         assert result["success"] is False
         assert result["error"] == "Operation failed"
         assert result["runtime_error"] == RUNTIME_ERROR
+        assert result["errorNumber"] == 91
         assert result["log_path"] == r"C:\logs\Tests.log"
+
+
+class TestRunTestsRuntimeErrorThroughCallback:
+    """A callback payload travels through the real OperationManager into the result."""
+
+    def _run(self, tmp_path, payload):
+        from msaccess_vcs_mcp.operation_manager import OperationManager
+
+        mock_app, mock_conn, mock_addin = _build_mocks(tmp_path)
+        manager = OperationManager()
+
+        def _post_callback(callback_info, command, *args):
+            # The add-in posts its terminal callback while the COM call runs.
+            operation_id = json.loads(callback_info)["operation_id"]
+            manager.route_callback(operation_id, {"operation_id": operation_id, **payload})
+            return {"async": True, "timeout_ms": 5000}
+
+        mock_addin.call_async.side_effect = _post_callback
+        db_path = str(tmp_path / "test.accdb")
+        (tmp_path / "test.accdb").touch()
+
+        with (
+            patch("msaccess_vcs_mcp.tools.AccessConnection", return_value=mock_conn),
+            patch("msaccess_vcs_mcp.tools.VCSAddinIntegration", return_value=mock_addin),
+            patch("msaccess_vcs_mcp.tools.validate_database_path", return_value=tmp_path / "test.accdb"),
+            patch(
+                "msaccess_vcs_mcp.tools.get_config",
+                return_value={"ACCESS_VCS_ADDIN_PATH": str(tmp_path / "Version Control.accda")},
+            ),
+            patch("msaccess_vcs_mcp.tools.get_callback_url", return_value="http://localhost:1/cb"),
+            patch("msaccess_vcs_mcp.tools._get_operation_manager", return_value=manager),
+            patch("msaccess_vcs_mcp.tools._check_database_busy", return_value=None),
+        ):
+            from msaccess_vcs_mcp.tools import vcs_run_tests
+
+            result = asyncio.run(_unwrap(vcs_run_tests)(db_path))
+
+        mock_addin.call_sync.assert_called_once_with("SetOption", "DefaultTestFilter", "")
+        assert manager.pending_count() == 0
+        return result
+
+    def test_plain_error_callback(self, tmp_path):
+        result = self._run(tmp_path, {
+            "type": "error",
+            "message": RUNTIME_ERROR,
+            "runtime_error": RUNTIME_ERROR,
+            "errorNumber": 91,
+            "log_path": r"C:\logs\TestRun_1.log",
+        })
+
+        assert result["success"] is False
+        assert result["error"] == RUNTIME_ERROR
+        assert result["runtime_error"] == RUNTIME_ERROR
+        assert result["errorNumber"] == 91
+        assert result["log_path"] == r"C:\logs\TestRun_1.log"
+
+    def test_decision_required_callback(self, tmp_path):
+        result = self._run(tmp_path, {
+            "type": "error",
+            "message": "Decision required",
+            "decision_required": True,
+            "error_pattern": "decision_required",
+            "decisions": DECISIONS,
+            "runtime_error": RUNTIME_ERROR,
+            "errorNumber": 91,
+        })
+
+        assert result["success"] is False
+        assert result["error_pattern"] == "decision_required"
+        assert result["decisions"] == DECISIONS
+        assert result["runtime_error"] == RUNTIME_ERROR
+        assert result["errorNumber"] == 91
