@@ -222,13 +222,19 @@ def _noninteractive_policy(noninteractive: bool, decision_policy: str | None) ->
 _INTERACTION_MODE_NORMAL = 0  # add-in eInteractionMode.eimNormal
 
 
-def _select_interactive_mode(addin: Any) -> None:
+def _select_interactive_mode(addin: Any, policy: str | None) -> None:
     """Send an explicit interactive mode, so the run never inherits a stale one.
 
-    Call only outside a noninteractive scope (``policy`` is None), and before
-    the operation starts.
+    Does nothing when ``policy`` is set: a noninteractive run is scoped by the
+    add-in itself. Call before the operation starts.
     """
-    addin.call_sync("SetInteractionMode", _INTERACTION_MODE_NORMAL)
+    if not policy:
+        addin.call_sync("SetInteractionMode", _INTERACTION_MODE_NORMAL)
+
+
+def _policy_args(policy: str | None) -> tuple[str, ...]:
+    """The trailing add-in argument for a call that takes an optional policy."""
+    return (policy,) if policy else ()
 
 
 def _clear_operation_policy(addin: Any) -> str | None:
@@ -259,6 +265,11 @@ def _coerce_decisions(value: Any) -> Any:
     return value
 
 
+def _is_decision_required(payload: dict[str, Any]) -> bool:
+    """The add-in reported a prompt the decision policy did not cover."""
+    return bool(payload.get("decision_required") or payload.get("error_pattern") == "decision_required")
+
+
 def _apply_decision_result(result: dict[str, Any], completion: dict[str, Any] | None) -> dict[str, Any]:
     """Surface an unresolved add-in prompt. Never leave success true in that case."""
     if not completion:
@@ -266,7 +277,7 @@ def _apply_decision_result(result: dict[str, Any], completion: dict[str, Any] | 
     decisions = completion.get("decisions")
     if decisions is not None:
         result["decisions"] = _coerce_decisions(decisions)
-    if completion.get("decision_required") or completion.get("error_pattern") == "decision_required":
+    if _is_decision_required(completion):
         result["success"] = False
         result["decision_required"] = True
         result["error_pattern"] = "decision_required"
@@ -274,6 +285,14 @@ def _apply_decision_result(result: dict[str, Any], completion: dict[str, Any] | 
             "A required decision was not covered by the decision policy."
         )
     return result
+
+
+def _surface_own_decision(result: dict[str, Any]) -> dict[str, Any]:
+    """Apply the decision fields ``result`` already carries to itself.
+
+    For a sync add-in call, where the result and the completion are one dict.
+    """
+    return _apply_decision_result(result, result)
 
 
 def _parse_addin_payload(value: Any) -> dict[str, Any]:
@@ -354,7 +373,7 @@ def _parse_test_runner_json(result_json: Any) -> dict[str, Any]:
 
     if not isinstance(parsed, dict):
         return {"success": True, "result": parsed}
-    if parsed.get("decision_required") or parsed.get("error_pattern") == "decision_required":
+    if _is_decision_required(parsed):
         parsed["success"] = False
         parsed["decision_required"] = True
         parsed["error_pattern"] = "decision_required"
@@ -401,7 +420,7 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
     if raw not in (None, ""):
         return _parse_test_runner_json(raw)
 
-    if completion.get("decision_required") or completion.get("error_pattern") == "decision_required":
+    if _is_decision_required(completion):
         return _apply_decision_result(
             {
                 "success": False,
@@ -891,14 +910,11 @@ def vcs_tool(name: str):
                     claimed["call_id"] = current.call_id
                 begin_gated_call(str(database) if database is not None else None)
 
-            if is_async_body:
-                async def body(*a, **kw):
-                    _claim_call()
-                    return await logged(*a, **kw)
-            else:
-                def body(*a, **kw):
-                    _claim_call()
-                    return logged(*a, **kw)
+            def body(*a, **kw):
+                # One closure for both kinds: for an async tool this returns
+                # the coroutine, which the gate awaits (``is_async_body``).
+                _claim_call()
+                return logged(*a, **kw)
 
             try:
                 result = await gate.run_exclusive(
@@ -1429,8 +1445,7 @@ async def vcs_import_objects(
                     )
                     if policy_result.get("success") is False:
                         return policy_result
-                else:
-                    _select_interactive_mode(addin)
+                _select_interactive_mode(addin, policy)
                 op_error: Exception | None = None
                 try:
                     result = _addin_json_result(
@@ -1449,11 +1464,10 @@ async def vcs_import_objects(
                 if op_error is None:
                     if result.get("success") and "imported_count" not in result:
                         result["imported_count"] = "See log for details"
-                    result = _apply_decision_result(result, result)
+                    result = _surface_own_decision(result)
                 return _attach_log_context(result, src_path, "Merge")
             
-            if not policy:
-                _select_interactive_mode(addin)
+            _select_interactive_mode(addin, policy)
 
             # Every branch below ends with one payload for the normaliser.
             # The add-in's sync return is a start result, never a final one.
@@ -1477,10 +1491,9 @@ async def vcs_import_objects(
                 )
 
                 try:
-                    if policy:
-                        async_result = addin.call_async(callback_info, "MergeBuild", policy)
-                    else:
-                        async_result = addin.call_async(callback_info, "MergeBuild")
+                    async_result = addin.call_async(
+                        callback_info, "MergeBuild", *_policy_args(policy)
+                    )
 
                     if async_result.get("async"):
                         # Started: the callback carries the final result.
@@ -3209,7 +3222,7 @@ async def vcs_run_tests(
     timeout_seconds: float | None = None,
     noninteractive: bool = True,
     decision_policy: str = "block",
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """
     Run VBA tests in the database using the VCS add-in's built-in test runner.
@@ -3299,8 +3312,7 @@ async def vcs_run_tests(
             # The add-in scopes noninteractive mode inside RunFilteredTests and
             # restores it when the run ends. Do not set a process-wide mode
             # here; only an interactive run selects its mode explicitly.
-            if not policy:
-                _select_interactive_mode(addin)
+            _select_interactive_mode(addin, policy)
 
             # Set the filter option (session-scoped, does not modify user's vcs-options.json)
             addin.call_sync("SetOption", "DefaultTestFilter", filter or "")
@@ -3318,12 +3330,9 @@ async def vcs_run_tests(
                     operation_id, callback_url, "cursor"
                 )
                 try:
-                    if policy:
-                        async_result = addin.call_async(
-                            callback_info, "RunFilteredTests", policy
-                        )
-                    else:
-                        async_result = addin.call_async(callback_info, "RunFilteredTests")
+                    async_result = addin.call_async(
+                        callback_info, "RunFilteredTests", *_policy_args(policy)
+                    )
                     if async_result.get("sync"):
                         op_manager.unregister_operation(operation_id)
                         return _parse_test_runner_json(async_result.get("result"))
@@ -3344,9 +3353,9 @@ async def vcs_run_tests(
                 except Exception:
                     op_manager.unregister_operation(operation_id)
 
-            if policy:
-                return _parse_test_runner_json(addin.call_sync("RunFilteredTests", policy))
-            return _parse_test_runner_json(addin.call_sync("RunFilteredTests"))
+            return _parse_test_runner_json(
+                addin.call_sync("RunFilteredTests", *_policy_args(policy))
+            )
 
     except InvalidDecisionPolicy as e:
         return _invalid_policy_result(e)
