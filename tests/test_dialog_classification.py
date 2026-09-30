@@ -171,12 +171,48 @@ def test_report_policy_never_clicks_a_single_button_msgbox():
     assert backend.clicked == []
 
 
-def test_safe_policy_clicks_a_recognised_ok_only_dialog():
-    known = _dialog(2, "Microsoft Access", "Something went wrong.")
+@pytest.mark.parametrize(
+    ("kind", "title", "text"),
+    [
+        ("access_dialog", "Microsoft Access", "Something went wrong."),
+        ("vba_compile_error", "Microsoft Visual Basic for Applications", "Compile error: Syntax error"),
+    ],
+)
+def test_safe_policy_does_not_click_an_ok_only_access_dialog_or_compile_error(kind, title, text):
+    known = _dialog(2, title, text)
     backend = SlowCloseBackend([_main(), known])
+    listed = _call(tools.vcs_list_dialogs, backend)
+    assert next(d for d in listed["dialogs"] if d["dialog_id"] == "hwnd:2")["kind"] == kind
     result = _call(tools.vcs_recover_dialogs, backend, policy="safe", pid=10)
+    assert backend.clicked == []
+    assert [item["kind"] for item in result["skipped"]] == [kind]
+
+
+def test_end_runtime_error_policy_clicks_ok_on_a_compile_error_but_not_an_access_dialog():
+    compile_err = _dialog(
+        2, "Microsoft Visual Basic for Applications", "Compile error: Syntax error"
+    )
+    access = _dialog(3, "Microsoft Access", "Something went wrong.")
+    backend = SlowCloseBackend([_main(), compile_err, access])
+    _call(tools.vcs_recover_dialogs, backend, policy="end_runtime_error", pid=10)
     assert backend.clicked == [20]
-    assert result["success"] is True
+
+
+def test_runtime_error_with_destructive_text_gets_end_under_end_runtime_error_and_nothing_under_safe():
+    runtime = _dialog(
+        2,
+        "Microsoft Visual Basic",
+        "Run-time error '3021': the record was deleted; discard the edit",
+        ("End", "Debug", "Help"),
+    )
+    safe_backend = SlowCloseBackend([_main(), runtime])
+    _call(tools.vcs_recover_dialogs, safe_backend, policy="safe", pid=10)
+    assert safe_backend.clicked == []
+
+    end_backend = SlowCloseBackend([_main(), runtime])
+    result = _call(tools.vcs_recover_dialogs, end_backend, policy="end_runtime_error", pid=10)
+    assert end_backend.clicked == [20]  # End, never Debug
+    assert result["interrupted"] is True
 
 
 def test_safe_policy_skips_a_recognised_dialog_with_destructive_text():
@@ -207,7 +243,7 @@ def test_debug_is_never_clicked_by_either_tool():
 
 @pytest.mark.parametrize("tool_name", ["dismiss", "recover"])
 def test_slow_close_is_waited_for_not_reported_as_still_open(tool_name):
-    known = _dialog(2, "Microsoft Access", "Something went wrong.")
+    known = _dialog(2, "Contoso Tool", "Something went wrong.")
     backend = SlowCloseBackend([_main(), known], close_after=4)
     if tool_name == "dismiss":
         result = _call(tools.vcs_dismiss_dialog, backend, "hwnd:2", button="OK", pid=10)
@@ -220,7 +256,7 @@ def test_slow_close_is_waited_for_not_reported_as_still_open(tool_name):
 
 @pytest.mark.parametrize("tool_name", ["dismiss", "recover"])
 def test_dialog_still_open_at_the_deadline_is_dismiss_uncertain(tool_name):
-    known = _dialog(2, "Microsoft Access", "Something went wrong.")
+    known = _dialog(2, "Contoso Tool", "Something went wrong.")
     backend = SlowCloseBackend([_main(), known], close_after=None)
     started = time.monotonic()
     if tool_name == "dismiss":
@@ -238,7 +274,7 @@ def test_dialog_still_open_at_the_deadline_is_dismiss_uncertain(tool_name):
 
 
 def test_recover_stops_early_when_only_uncovered_dialogs_remain():
-    known = _dialog(2, "Microsoft Access", "Something went wrong.")
+    known = _dialog(2, "Contoso Tool", "Something went wrong.")
     odd = _dialog(3, "Contoso Tool", "Hello", ("Alpha", "Beta"))
     backend = SlowCloseBackend([_main(), known, odd], close_after=0)
     started = time.monotonic()
