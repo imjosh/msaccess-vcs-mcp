@@ -233,3 +233,54 @@ def test_noninteractive_never_sends_interactive_mode(tmp_path):
         _run((db, src), object_types=["forms"])
     commands = [c.args[0] for c in addin.call_sync.call_args_list]
     assert "SetInteractionMode" not in commands
+
+
+def test_cleanup_failure_reaches_usage_log_and_keeps_operation_error(tmp_path, monkeypatch):
+    import msaccess_vcs_mcp.usage_logging as usage_logging
+
+    log_dir = tmp_path / "usage"
+    monkeypatch.setenv("ACCESS_VCS_ENABLE_LOGGING", "true")
+    monkeypatch.setenv("ACCESS_VCS_LOG_DIR", str(log_dir))
+    monkeypatch.setenv("ACCESS_VCS_DIAGNOSTIC_LOG_DIR", str(tmp_path / "diag"))
+    usage_logging.reset_logging()
+    try:
+        with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+            addin.call_sync.side_effect = _scripted_sync(
+                {"success": False, "error": "merge failed"},
+                clear_error=RuntimeError("clear exploded"),
+            )
+            result = _run((db, src), object_types=["forms"])
+    finally:
+        usage_logging.reset_logging()
+
+    assert result["success"] is False
+    assert result["error"] == "merge failed"
+    assert result["policy_cleanup_error"] == "clear exploded"
+    entries = [
+        json.loads(line)
+        for line in (log_dir / "vcs-mcp-usage.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    cleanup = [e for e in entries if e.get("event") == "policy_cleanup_failed"]
+    assert len(cleanup) == 1
+    assert cleanup[0]["error"] == "clear exploded"
+
+
+INTERACTION_REFUSAL = {"success": False, "error": "A noninteractive scope is open"}
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_refused_interactive_mode_is_the_result_and_nothing_starts(tmp_path, scoped):
+    kwargs = {"noninteractive": False}
+    if scoped:
+        kwargs["object_types"] = ["forms"]
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_sync.side_effect = lambda c, *a: (
+            json.dumps(INTERACTION_REFUSAL) if c == "SetInteractionMode" else json.dumps({"success": True})
+        )
+        result = _run((db, src), **kwargs)
+    assert result["success"] is False
+    assert result["error"] == "A noninteractive scope is open"
+    commands = [c.args[0] for c in addin.call_sync.call_args_list]
+    assert commands == ["SetInteractionMode"]
+    addin.call_async.assert_not_called()
+    addin.merge_build.assert_not_called()

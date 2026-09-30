@@ -1327,7 +1327,9 @@ async def vcs_import_objects(
                     )
                     if policy_result.get("success") is False:
                         return policy_result
-                select_interactive_mode(addin, policy)
+                mode_refusal = select_interactive_mode(addin, policy)
+                if mode_refusal:
+                    return mode_refusal
                 op_error: Exception | None = None
                 try:
                     result = _addin_json_result(
@@ -1349,7 +1351,9 @@ async def vcs_import_objects(
                     result = surface_own_decision(result)
                 return _attach_log_context(result, src_path, "Merge")
             
-            select_interactive_mode(addin, policy)
+            mode_refusal = select_interactive_mode(addin, policy)
+            if mode_refusal:
+                return mode_refusal
 
             # Every branch below ends with one payload for the normaliser.
             # The add-in's sync return is a start result, never a final one.
@@ -3194,7 +3198,9 @@ async def vcs_run_tests(
             # The add-in scopes noninteractive mode inside RunFilteredTests and
             # restores it when the run ends. Do not set a process-wide mode
             # here; only an interactive run selects its mode explicitly.
-            select_interactive_mode(addin, policy)
+            mode_refusal = select_interactive_mode(addin, policy)
+            if mode_refusal:
+                return mode_refusal
 
             # Set the filter option (session-scoped, does not modify user's vcs-options.json)
             addin.call_sync("SetOption", "DefaultTestFilter", filter or "")

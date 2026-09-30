@@ -147,7 +147,9 @@ def _unwrap(tool_fn):
     return fn
 
 
-def _call_run_tests(tmp_path, call_sync_return, filter_value=None):
+def _call_run_tests(
+    tmp_path, call_sync_return, filter_value=None, call_sync_side_effect=None, **tool_kwargs
+):
     """Call vcs_run_tests with fully mocked COM layer (sync fallback).
 
     Patches AccessConnection, VCSAddinIntegration, validate_database_path,
@@ -157,6 +159,8 @@ def _call_run_tests(tmp_path, call_sync_return, filter_value=None):
     mock_app, mock_conn, mock_addin = _build_mocks(
         tmp_path, call_sync_return=call_sync_return
     )
+    if call_sync_side_effect is not None:
+        mock_addin.call_sync.side_effect = call_sync_side_effect
 
     db_path = str(tmp_path / "test.accdb")
     (tmp_path / "test.accdb").touch()
@@ -183,7 +187,9 @@ def _call_run_tests(tmp_path, call_sync_return, filter_value=None):
     ):
         from msaccess_vcs_mcp.tools import vcs_run_tests
 
-        result = asyncio.run(_unwrap(vcs_run_tests)(db_path, filter=filter_value))
+        result = asyncio.run(
+            _unwrap(vcs_run_tests)(db_path, filter=filter_value, **tool_kwargs)
+        )
 
     return result, mock_app, mock_addin
 
@@ -348,6 +354,23 @@ class TestRunTestsCallOrder:
         assert calls[1] == call("RunFilteredTests", "block")
 
         mock_addin.load_addin.assert_called_once()
+
+    def test_refused_interactive_mode_is_the_result_and_tests_do_not_run(self, tmp_path):
+        refusal = {"success": False, "error": "A noninteractive scope is open"}
+        result, _, mock_addin = _call_run_tests(
+            tmp_path,
+            call_sync_return=None,
+            call_sync_side_effect=lambda c, *a: (
+                json.dumps(refusal) if c == "SetInteractionMode"
+                else json.dumps(SAMPLE_RESULTS_ALL_PASS)
+            ),
+            noninteractive=False,
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "A noninteractive scope is open"
+        assert mock_addin.call_sync.call_args_list == [call("SetInteractionMode", 0)]
+        mock_addin.call_async.assert_not_called()
 
 
 def _call_run_tests_async(tmp_path, *, completion, filter_value=None, results=None):
