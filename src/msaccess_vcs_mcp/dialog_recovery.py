@@ -17,7 +17,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Iterable, Protocol
+from typing import Any, Callable, Iterable, Protocol
 
 from .access_com.instance_registry import list_owned, process_create_time
 from .access_gate import get_access_gate
@@ -395,6 +395,12 @@ def auto_button(window: WindowInfo, kind: str, policy: str) -> str | None:
     return None
 
 
+def _policy_button(window: WindowInfo, kind: str, policy: str) -> ButtonInfo | None:
+    """The button ``policy`` would click on ``window``, or None."""
+    caption = auto_button(window, kind, policy)
+    return None if caption is None else _button_named(window, caption)
+
+
 def _filename_tokens(database_path: str) -> set[str]:
     base = os.path.basename(database_path)
     stem, _ext = os.path.splitext(base)
@@ -547,24 +553,82 @@ def _identity_refusal(report: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _still_same_target(
-    backend: WindowBackend,
-    report: dict[str, Any],
-    dialog_hwnd: int,
-    button: ButtonInfo | None = None,
-) -> bool:
-    """Re-list windows right before acting: same process, same dialog, same button."""
+def _signature(window: WindowInfo) -> tuple[Any, ...]:
+    """What must not change between inspection and action.
+
+    The kind alone is not enough: "Hello" and "Delete all records?" are both an
+    OK-only ``vba_msgbox``.
+    """
+    return (window.class_name, window.title, window.texts, classify_window(window), window.buttons)
+
+
+def _reverify(
+    backend: WindowBackend, report: dict[str, Any], inspected: WindowInfo
+) -> tuple[WindowInfo, str] | None:
+    """Re-list windows right before acting. The fresh window and its kind, or None.
+
+    None on any mismatch: the process identity changed, the handle is gone or
+    belongs to another PID, or the window's signature differs from the inspected
+    one. Windows reuses a closed box's handle, so a different box can sit behind
+    the same handle and button handles. Only ``_press_fresh`` and
+    ``_close_fresh`` call it, and they act only on the window it returns.
+    """
     pid = int(report["pid"])
     ident = backend.process_identity(pid)
     if not ident.confirmed or ident.create_time != report.get("create_time"):
-        return False
+        return None
     for window in backend.list_windows():
-        if window.hwnd != dialog_hwnd:
+        if window.hwnd != inspected.hwnd:
             continue
-        if window.pid != pid:
-            return False
-        return button is None or button in window.buttons
-    return False
+        if window.pid != pid or _signature(window) != _signature(inspected):
+            return None
+        return window, classify_window(window)
+    return None
+
+
+def _press_fresh(
+    backend: WindowBackend,
+    report: dict[str, Any],
+    inspected: WindowInfo,
+    choose: Callable[[WindowInfo, str], ButtonInfo | None],
+    click_timeout_sec: float | None,
+) -> tuple[str, dict[str, Any] | None, ButtonInfo | None]:
+    """Re-verify, choose the button on the fresh window, and click that button.
+
+    The only place a dialog button is clicked. Returns ``(status, record,
+    button)``: ``dialog_changed`` when re-verification fails or ``choose`` picks
+    nothing on the fresh window (nothing was clicked), ``dismiss_uncertain`` when
+    the click was not delivered, otherwise ``clicked``. ``record`` describes the
+    fresh window, so a result never reports text from a box other than the one
+    clicked.
+    """
+    fresh = _reverify(backend, report, inspected)
+    if fresh is None:
+        return "dialog_changed", None, None
+    window, kind = fresh
+    button = choose(window, kind)
+    if button is None:
+        return "dialog_changed", None, None
+    record = _dialog_record(window, kind)
+    if not backend.click(
+        button,
+        expected_pid=int(report["pid"]),
+        timeout_ms=int(dialog_timeout_sec(click_timeout_sec) * 1000),
+    ):
+        return "dismiss_uncertain", record, button
+    return "clicked", record, button
+
+
+def _close_fresh(
+    backend: WindowBackend, report: dict[str, Any], inspected: WindowInfo
+) -> dict[str, Any] | None:
+    """Re-verify, then close the fresh window. Its record, or None when it changed."""
+    fresh = _reverify(backend, report, inspected)
+    if fresh is None:
+        return None
+    window, kind = fresh
+    backend.close(window.hwnd)
+    return _dialog_record(window, kind)
 
 
 def _dialog_changed(report: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
@@ -573,7 +637,10 @@ def _dialog_changed(report: dict[str, Any], item: dict[str, Any]) -> dict[str, A
         "success": False,
         "dismissed": False,
         "error_pattern": "dialog_changed",
-        "error": "The dialog or its process changed since it was inspected. Nothing was clicked. Re-inspect and decide again.",
+        "error": (
+            "The dialog, its content, or its process changed since it was inspected. "
+            "Nothing was clicked. Re-inspect and decide again."
+        ),
         "dialog_id": item.get("dialog_id"),
     }
 
@@ -804,8 +871,8 @@ def dismiss_dialog_in_windows(
 
     kind = item["kind"]
     action_l = (action or "close").strip().lower()
-    by_hwnd = _windows_for_pid(windows, int(before["pid"]))
-    window = by_hwnd.get(int(item["hwnd"]))
+    # The item was read from these windows, so its window is always here.
+    window = _windows_for_pid(windows, int(before["pid"]))[int(item["hwnd"])]
     closed: list[dict[str, Any]] = []
     interrupted = False
     failure_dialog = kind in FAILURE_KINDS
@@ -819,7 +886,7 @@ def dismiss_dialog_in_windows(
                 "error": "Debug is never selected. Pass button=End to stop a failed VBA call.",
                 "dismissed": False,
             }
-        if window is None or _button_named(window, button) is None:
+        if _button_named(window, button) is None:
             return {
                 **before,
                 "success": False,
@@ -828,20 +895,22 @@ def dismiss_dialog_in_windows(
                 "buttons": item.get("buttons"),
                 "dismissed": False,
             }
-        target_button = _button_named(window, button)
-        assert target_button is not None
-        if not _still_same_target(backend, before, int(item["hwnd"]), target_button):
+        status, record, pressed = _press_fresh(
+            backend,
+            before,
+            window,
+            lambda fresh, _kind: _button_named(fresh, button),
+            click_timeout_sec,
+        )
+        if status == "dialog_changed":
             return _dialog_changed(before, item)
-        if not backend.click(
-            target_button,
-            expected_pid=int(before["pid"]),
-            timeout_ms=int(dialog_timeout_sec(click_timeout_sec) * 1000),
-        ):
-            return _uncertain_click(before, item)
-        closed.append({**item, "button": target_button.text, "how": "click"})
-        if _interrupts_execution(kind, target_button.text):
+        assert record is not None and pressed is not None
+        if status == "dismiss_uncertain":
+            return _uncertain_click(before, record)
+        closed.append({**record, "button": pressed.text, "how": "click"})
+        if _interrupts_execution(record["kind"], pressed.text):
             interrupted = True
-            _record_dialog_interruption(before, database_path, item, target_button.text)
+            _record_dialog_interruption(before, database_path, record, pressed.text)
     elif action_l == "cancel":
         if kind != "addin_window":
             return {
@@ -851,13 +920,13 @@ def dismiss_dialog_in_windows(
                 "error": "cancel closes an add-in progress window. For a VBA dialog pass button.",
                 "dismissed": False,
             }
-        if not _still_same_target(backend, before, int(item["hwnd"])):
+        record = _close_fresh(backend, before, window)
+        if record is None:
             return _dialog_changed(before, item)
-        backend.close(int(item["hwnd"]))
-        closed.append({**item, "how": "cancel"})
+        closed.append({**record, "how": "cancel"})
         interrupted = True
         _record_dialog_interruption(
-            before, database_path, item, None, "Add-in window close requested as cancellation."
+            before, database_path, record, None, "Add-in window close requested as cancellation."
         )
     elif action_l == "close":
         if kind == "addin_window" and (before.get("operation") or {}).get("same_database"):
@@ -890,10 +959,10 @@ def dismiss_dialog_in_windows(
                 "buttons": item.get("buttons"),
                 "dismissed": False,
             }
-        if not _still_same_target(backend, before, int(item["hwnd"])):
+        record = _close_fresh(backend, before, window)
+        if record is None:
             return _dialog_changed(before, item)
-        backend.close(int(item["hwnd"]))
-        closed.append({**item, "how": "close"})
+        closed.append({**record, "how": "close"})
     else:
         return {
             **before,
@@ -967,6 +1036,7 @@ def recover_windows(
     closed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     uncertain = False
+    changed = False
     by_hwnd = _windows_for_pid(windows, int(report["pid"]))
     handled = 0
     for item in list(report["dialogs"]):
@@ -984,27 +1054,31 @@ def recover_windows(
                 "actions": item.get("buttons") or [],
             })
             continue
-        button = _button_named(window, caption)
-        if button is None:
+        if _button_named(window, caption) is None:
             skipped.append({**item, "reason": "button_missing"})
             continue
-        if not _still_same_target(backend, report, int(item["hwnd"]), button):
+        # The policy runs again on the fresh window; its choice is what gets clicked.
+        status, record, pressed = _press_fresh(
+            backend,
+            report,
+            window,
+            lambda fresh, kind: _policy_button(fresh, kind, policy_l),
+            click_timeout_sec,
+        )
+        if status == "dialog_changed":
+            changed = True
             skipped.append({**item, "reason": "dialog_changed"})
             continue
-        if not backend.click(
-            button,
-            expected_pid=int(report["pid"]),
-            timeout_ms=int(dialog_timeout_sec(click_timeout_sec) * 1000),
-        ):
+        assert record is not None and pressed is not None
+        if status == "dismiss_uncertain":
             # Never retry an undelivered click, and stop touching this instance.
-            skipped.append({**item, "reason": "dismiss_uncertain"})
+            skipped.append({**record, "reason": "dismiss_uncertain"})
             uncertain = True
             break
         handled += 1
-        record = {**item, "button": button.text, "how": "auto"}
-        closed.append(record)
-        if _interrupts_execution(item["kind"], button.text):
-            _record_dialog_interruption(report, database_path, item, button.text)
+        closed.append({**record, "button": pressed.text, "how": "auto"})
+        if _interrupts_execution(record["kind"], pressed.text):
+            _record_dialog_interruption(report, database_path, record, pressed.text)
 
     result = {
         "success": True,
@@ -1025,6 +1099,8 @@ def recover_windows(
     if uncertain:
         result["uncertain"] = True
         result["error_pattern"] = "dismiss_uncertain"
+    elif changed:
+        result["error_pattern"] = "dialog_changed"
     return result
 
 
@@ -1391,6 +1467,13 @@ def recover_dialogs(
         follow["error"] = (
             "A click was not delivered, or a clicked dialog was still open when the "
             "timeout elapsed. Nothing was retried."
+        )
+    elif result.get("error_pattern") == "dialog_changed":
+        follow["success"] = False
+        follow["error_pattern"] = "dialog_changed"
+        follow["error"] = (
+            "A dialog changed after it was inspected and was not clicked. "
+            "Re-inspect and decide again."
         )
     follow.update({
         "policy": result.get("policy"),

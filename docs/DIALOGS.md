@@ -232,6 +232,18 @@ If two Access windows match the database, the tools return
 match that process, the tools return `process_identity_mismatch` and click
 nothing.
 
+Right before each click or close, the tools list windows again. The dialog
+must still belong to the same process (PID and creation time), and its class,
+title, full text, kind and buttons must match what the call inspected. Windows
+reuses the handle of a closed box, so a different box can appear behind the
+same handle and button handles. Any difference returns `dialog_changed` with
+`success: false`, and nothing is clicked. `vcs_recover_dialogs` also runs its
+policy again on the fresh window and clicks the button read from it, so `safe`
+does not acknowledge a box whose text has become a delete or discard
+confirmation by the time of that check. It still handles the other dialogs, and
+lists the changed one in `skipped` with `reason: "dialog_changed"`. `closed`
+always describes the box that was clicked.
+
 ## Limits
 
 - Works on the interactive desktop session of the user running the MCP server.
@@ -244,6 +256,12 @@ nothing.
 - Break mode has no button. Report it and reset it from the VBE, or stop the
   server-owned Access process with the existing ownership rules. Do not send
   keys.
+- The check before a click narrows the gap between inspection and click, but
+  cannot close it from outside Access. A box that is replaced after the last
+  listing and before the button message arrives is still clicked.
+  `vcs_dismiss_dialog` compares against its own inspection at the start of the
+  call, not the `vcs_list_dialogs` result you read earlier; check `closed` to
+  see which box was clicked.
 - The default dialog wait is 5 seconds (`ACCESS_VCS_DIALOG_TIMEOUT_SEC`,
   capped at 30). If the window is still open, the result is
   `dismiss_uncertain` and the mutation is not retried.

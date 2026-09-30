@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import patch
 
+from msaccess_vcs_mcp import dialog_recovery
+
 import pytest
 
 from msaccess_vcs_mcp import tools
@@ -31,6 +33,7 @@ class ScriptedBackend:
         self._window_script = [list(windows)]
         self._identity_script = {pid: [ident] for pid, ident in (identities or {}).items()}
         self.clicked: list[int] = []
+        self.pressed: list[ButtonInfo] = []
         self.closed: list[int] = []
 
     def script_windows(self, *snapshots):
@@ -53,6 +56,7 @@ class ScriptedBackend:
 
     def click(self, button, *, expected_pid=None, timeout_ms=5000):
         self.clicked.append(button.hwnd)
+        self.pressed.append(button)
         return True
 
     def close(self, hwnd):
@@ -66,13 +70,13 @@ def _main(hwnd=1, pid=10, title="Northwind : Database"):
     return WindowInfo(hwnd=hwnd, pid=pid, title=title, class_name="OMain")
 
 
-def _msgbox(hwnd=2, pid=10, button_hwnd=21, title="VCS Probe"):
+def _msgbox(hwnd=2, pid=10, button_hwnd=21, title="VCS Probe", text="Hello", class_name="#32770"):
     return WindowInfo(
         hwnd=hwnd,
         pid=pid,
         title=title,
-        class_name="#32770",
-        texts=("Hello",),
+        class_name=class_name,
+        texts=(text,),
         buttons=(ButtonInfo(button_hwnd, "OK"),),
     )
 
@@ -258,3 +262,76 @@ def test_only_match_has_unreadable_process_name_is_unconfirmed_not_missing():
     result = _dismiss(backend)
     assert result["error_pattern"] == "identity_unconfirmed"
     assert backend.clicked == []
+
+
+# A closed box's handle can be reused by a different box. Only the box that was
+# inspected may be clicked, so its content is compared again before the click.
+
+
+def _replaced(backend, **changes):
+    """The dialog inspected as ``_msgbox()`` is a different box by the pre-click listing."""
+    backend.script_windows([_main(), _msgbox()], [_main(), _msgbox(**changes)])
+    return backend
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"text": "Goodbye"},
+        {"title": "Other Tool"},
+        {"class_name": "NUIDialog"},
+    ],
+    ids=["text", "title", "class"],
+)
+def test_same_handles_with_different_content_is_dialog_changed_and_not_clicked(changes):
+    backend = _replaced(ScriptedBackend([_main(), _msgbox()]), **changes)
+    result = _dismiss(backend, pid=10)
+    assert result["success"] is False
+    assert result["error_pattern"] == "dialog_changed"
+    assert backend.clicked == []
+
+
+def test_safe_does_not_click_a_box_whose_text_turned_destructive():
+    backend = _replaced(ScriptedBackend([_main(), _msgbox()]), text="Delete all records?")
+    result = _call(tools.vcs_recover_dialogs, backend, DB, policy="safe", pid=10)
+    assert result["success"] is False
+    assert result["error_pattern"] == "dialog_changed"
+    assert backend.clicked == []
+    assert result["closed"] == []
+    assert [item["message"] for item in result["skipped"]] == ["Hello"]
+
+
+def test_policy_reselection_alone_refuses_a_box_whose_text_turned_destructive():
+    # With the signature check disabled, running the policy on the fresh window
+    # is still enough to refuse the click.
+    backend = _replaced(ScriptedBackend([_main(), _msgbox()]), text="Delete all records?")
+    with patch.object(dialog_recovery, "_signature", lambda _window: ()):
+        result = _call(tools.vcs_recover_dialogs, backend, DB, policy="safe", pid=10)
+    assert result["error_pattern"] == "dialog_changed"
+    assert backend.clicked == []
+
+
+@pytest.mark.parametrize("tool", ["dismiss", "recover"])
+def test_the_click_uses_the_button_read_from_the_fresh_window(tool):
+    inspected, fresh = _msgbox(), _msgbox()
+    backend = ScriptedBackend([_main(), inspected])
+    backend.script_windows([_main(), inspected], [_main(), fresh], [_main()])
+    if tool == "dismiss":
+        result = _dismiss(backend, pid=10)
+    else:
+        result = _call(tools.vcs_recover_dialogs, backend, DB, policy="safe", pid=10)
+    assert result["success"] is True
+    assert len(backend.pressed) == 1
+    assert backend.pressed[0] is fresh.buttons[0]
+    assert backend.pressed[0] is not inspected.buttons[0]
+
+
+@pytest.mark.parametrize("action", ["close", "cancel"])
+def test_close_and_cancel_refuse_an_addin_window_whose_title_changed(action):
+    addin = WindowInfo(hwnd=2, pid=10, title="MSAccessVCS", class_name="OForm")
+    other = WindowInfo(hwnd=2, pid=10, title="MSAccessVCS - Export", class_name="OForm")
+    backend = ScriptedBackend([_main(), addin])
+    backend.script_windows([_main(), addin], [_main(), other])
+    result = _dismiss(backend, pid=10, button=None, action=action)
+    assert result["error_pattern"] == "dialog_changed"
+    assert backend.closed == []
