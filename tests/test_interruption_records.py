@@ -33,7 +33,7 @@ class FakeBackend:
     def list_windows(self):
         return list(self.windows)
 
-    def click(self, hwnd, *, expected_pid=None, timeout_ms=5000):
+    def click(self, button, *, expected_pid=None, timeout_ms=5000):
         return True
 
     def close(self, hwnd):

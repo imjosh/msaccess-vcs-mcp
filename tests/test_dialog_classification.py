@@ -35,6 +35,7 @@ class SlowCloseBackend:
         self.windows = list(windows)
         self.close_after = close_after
         self.clicked: list[int] = []
+        self.pressed: list[ButtonInfo] = []
         self.closed: list[int] = []
         self._pending_close: dict[int, int] = {}
 
@@ -50,9 +51,10 @@ class SlowCloseBackend:
                 self._pending_close[hwnd] -= 1
         return list(self.windows)
 
-    def click(self, hwnd, *, expected_pid=None, timeout_ms=5000):
-        self.clicked.append(hwnd)
-        owner = next((w for w in self.windows if any(b.hwnd == hwnd for b in w.buttons)), None)
+    def click(self, button, *, expected_pid=None, timeout_ms=5000):
+        self.clicked.append(button.hwnd)
+        self.pressed.append(button)
+        owner = next((w for w in self.windows if button in w.buttons), None)
         if owner is not None and self.close_after is not None:
             self._pending_close[owner.hwnd] = self.close_after
         return True
@@ -295,3 +297,119 @@ def test_dialog_ids_from_listing_are_accepted_and_malformed_ids_are_not_found():
     assert backend.clicked == []
     ok = _call(tools.vcs_dismiss_dialog, backend, dialog_id, button="OK", pid=10)
     assert ok["success"] is True
+
+
+# Recorded from Microsoft 365 Access (2026-09-30). ``MsgBox`` with the ``@`` bold
+# form (the add-in's ``MsgBox2``) and Access's own error dialogs are a top-level
+# ``NUIDialog`` with one ``NetUIHWND`` child and no Win32 buttons. MSAA lists the
+# caption as the first static text, then the message lines, then the visible push
+# buttons; each button is addressed by its host window and child-index path.
+NETUI_HOST = 77
+
+
+def _netui(hwnd, title, texts, buttons, first_path=9):
+    return WindowInfo(
+        hwnd=hwnd,
+        pid=10,
+        title=title,
+        class_name="NUIDialog",
+        texts=(title, *texts),
+        buttons=tuple(
+            ButtonInfo(NETUI_HOST, name, (0, first_path + index))
+            for index, name in enumerate(buttons)
+        ),
+    )
+
+
+def _msgbox2_ok(first_path=9):
+    return _netui(
+        2,
+        "Version Control Add-in",
+        ("Bold part", "line one here\n\nline two"),
+        ("OK",),
+        first_path,
+    )
+
+
+def test_netui_ok_only_msgbox_is_listed_as_a_blocking_vba_msgbox():
+    result = _call(tools.vcs_list_dialogs, SlowCloseBackend([_main(), _msgbox2_ok()]))
+    item = next(d for d in result["dialogs"] if d["dialog_id"] == "hwnd:2")
+    assert item["kind"] == "vba_msgbox"
+    assert item["class_name"] == "NUIDialog"
+    assert item["title"] == "Version Control Add-in"
+    assert item["message"] == "Bold part\nline one here\n\nline two"
+    assert item["buttons"] == ["OK"]
+    assert result["blocking_dialog"] is True
+    assert result["ready"] is False
+
+
+def test_safe_policy_presses_ok_on_a_netui_ok_only_msgbox():
+    backend = SlowCloseBackend([_main(), _msgbox2_ok()])
+    result = _call(tools.vcs_recover_dialogs, backend, policy="safe", pid=10)
+    assert backend.pressed == [ButtonInfo(NETUI_HOST, "OK", (0, 9))]
+    assert result["success"] is True
+    assert [item["kind"] for item in result["closed"]] == ["vba_msgbox"]
+    assert result["dialogs"] == []
+
+
+def test_dismiss_presses_ok_on_a_netui_msgbox():
+    backend = SlowCloseBackend([_main(), _msgbox2_ok()])
+    result = _call(tools.vcs_dismiss_dialog, backend, "hwnd:2", button="OK", pid=10)
+    assert result["success"] is True
+    assert result["dismissed"] is True
+    assert backend.pressed == [ButtonInfo(NETUI_HOST, "OK", (0, 9))]
+
+
+def test_netui_yes_no_box_is_unknown_not_clicked_by_safe_and_can_be_answered_explicitly():
+    box = _netui(2, "Version Control Add-in", ("Keep it?",), ("Yes", "No"))
+    backend = SlowCloseBackend([_main(), box])
+    listed = _call(tools.vcs_list_dialogs, backend)
+    assert next(d for d in listed["dialogs"] if d["dialog_id"] == "hwnd:2")["kind"] == "unknown"
+    safe = _call(tools.vcs_recover_dialogs, backend, policy="safe", pid=10)
+    assert backend.pressed == []
+    assert [item["kind"] for item in safe["skipped"]] == ["unknown"]
+    answered = _call(tools.vcs_dismiss_dialog, backend, "hwnd:2", button="No", pid=10)
+    assert answered["success"] is True
+    assert backend.pressed == [ButtonInfo(NETUI_HOST, "No", (0, 10))]
+
+
+def test_netui_access_error_is_an_access_dialog_and_safe_does_not_click_it():
+    error = _netui(
+        2,
+        "Microsoft Access",
+        ("The form name 'NoSuchForm' is misspelled or refers to a form that doesn't exist.",),
+        ("OK",),
+    )
+    backend = SlowCloseBackend([_main(), error])
+    listed = _call(tools.vcs_list_dialogs, backend)
+    assert next(d for d in listed["dialogs"] if d["dialog_id"] == "hwnd:2")["kind"] == "access_dialog"
+    _call(tools.vcs_recover_dialogs, backend, policy="safe", pid=10)
+    assert backend.pressed == []
+
+
+def test_netui_ok_only_msgbox_with_destructive_text_is_not_clicked_by_safe():
+    box = _netui(2, "Version Control Add-in", ("This will delete all rows.",), ("OK",))
+    backend = SlowCloseBackend([_main(), box])
+    _call(tools.vcs_recover_dialogs, backend, policy="safe", pid=10)
+    assert backend.pressed == []
+
+
+class MovedButtonBackend(SlowCloseBackend):
+    """From the second listing on, the OK button is at a different MSAA path."""
+
+    def __init__(self, windows):
+        super().__init__(windows)
+        self.listings = 0
+
+    def list_windows(self):
+        self.listings += 1
+        if self.listings == 2:
+            self.windows = [_msgbox2_ok(first_path=12) if w.hwnd == 2 else w for w in self.windows]
+        return super().list_windows()
+
+
+def test_netui_press_is_refused_when_the_button_moved_since_inspection():
+    backend = MovedButtonBackend([_main(), _msgbox2_ok()])
+    result = _call(tools.vcs_dismiss_dialog, backend, "hwnd:2", button="OK", pid=10)
+    assert result["error_pattern"] == "dialog_changed"
+    assert backend.pressed == []

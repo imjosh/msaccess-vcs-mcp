@@ -74,6 +74,25 @@ contradictory guidance.
 
 ---
 
+## 2026-09-30 — NetUI dialogs are read and pressed through MSAA with raw ctypes
+
+**Trigger**: M19. The add-in's `MsgBox2` (the `@`-separated bold `MsgBox` form) and Access's own error dialogs appear as a top-level `NUIDialog` whose only child is a `NetUIHWND`. There are no Win32 `Static` or `Button` children, so the inspector dropped the window as ordinary: `vcs_list_dialogs` said `ready: true` while a box blocked the call, and `vcs_dismiss_dialog` returned `dialog_not_found`. A plain `MsgBox` (VBA or `Eval`) is still `#32770`.
+
+**Options explored**:
+- **`WM_CLOSE` on the `NUIDialog`**. It closes the box, but gives no text or buttons to classify, and on a Yes/No box it picks an answer nobody chose. Rejected.
+- **Keystrokes (Enter, Alt+letter)**. The module's rule is no keystrokes or coordinate clicks; focus is not guaranteed. Rejected.
+- **UI Automation via `comtypes` or `pywinauto`**. It works, but adds a dependency for about a dozen calls. Rejected for now.
+- **MSAA through pywin32 late binding** (`ObjectFromLresult` to `IDispatch`, then `Invoke`). NetUI's `IDispatch::Invoke` returns `E_NOTIMPL`, so this fails on every property.
+- **MSAA through direct `IAccessible` vtable calls with ctypes (chosen)**. `oleacc` and `oleaut32` ship with Windows. The object is fetched with `SendMessageTimeout(WM_GETOBJECT, SMTO_ABORTIFHUNG)` so a hung window is skipped. Visible static texts (role 41) and push buttons (role 43) are read, and `STATE_INVISIBLE` placeholders are skipped. A button is pressed with `accDoDefaultAction`.
+
+**Decision**: `msaa.py` holds the ctypes `IAccessible` reader and `press`. `ButtonInfo` gains `path`: for a NetUI button, `hwnd` is the `NetUIHWND` host and `path` is the child-index path from its client object. `WindowBackend.click` takes the `ButtonInfo`, not a bare hwnd. The pre-click re-verify compares the whole `ButtonInfo`, and `press` checks again that the control at that path is a visible, enabled push button with the same name. `NUIDialog` gets the same classification rules as `#32770`. Only `NUIDialog` windows of an `MSACCESS.EXE` process are read, so other Office apps' dialogs are not touched.
+
+**What this rules out**: The live backend now makes cross-process COM calls into Access's UI thread for NetUI dialogs. Each call is bounded only by the worker-thread ceiling of the gate-exempt tools, not per call; the `WM_GETOBJECT` fetch and a `responsive` probe before a press are the per-call guards. If Office changes the NetUI tree shape, or drops MSAA in favour of UIA only, revisit with a UIA backend.
+
+**Relevant files**: `src/msaccess_vcs_mcp/msaa.py`, `src/msaccess_vcs_mcp/dialog_recovery.py` (`ButtonInfo`, `classify_window`, `Win32Backend.list_windows`/`click`, `_netui_contents`), `tests/test_dialog_classification.py`, `tests/test_dialog_live.py`, `docs/DIALOGS.md`.
+
+---
+
 ## 2026-09-30 — MCP never calls the add-in's dialog APIs; Win32 only
 
 **Trigger**: The add-in exposes `ListAddinDialogs` and `DismissAddinDialog` (`modDialogInspect`, on `VCS.API`). Using them for add-in windows looked cheaper than a second classifier.
@@ -83,6 +102,8 @@ contradictory guidance.
 - *Try the add-in API first, fall back to Win32*: rejected. Two classifiers for one window, and the first attempt can hang.
 
 **Decision**: The dialog tools use Win32 enumeration and window messages only, off the Access gate, keyed on process identity. Add-in windows are classified by caption like any other. The add-in APIs stay for callers that are inside Access.
+
+> **⚠ Partially superseded** (2026-09-30): "Win32 only" meant "never through the add-in", and that still holds. Office NetUI boxes (`NUIDialog`) have no Win32 buttons, so the inspector also reads and presses them through MSAA, from outside Access and off the gate. See "NetUI dialogs are read and pressed through MSAA with raw ctypes" above.
 
 **What this rules out**: A gate-exempt tool that calls `VCS.API`. Revisit only if the add-in can answer without the COM thread.
 

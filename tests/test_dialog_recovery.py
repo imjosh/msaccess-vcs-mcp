@@ -36,7 +36,8 @@ class FakeBackend:
     def list_windows(self):
         return list(self.windows)
 
-    def click(self, hwnd: int, *, expected_pid=None, timeout_ms=5000) -> bool:
+    def click(self, button: ButtonInfo, *, expected_pid=None, timeout_ms=5000) -> bool:
+        hwnd = button.hwnd
         self.clicked.append(hwnd)
         self.windows = [window for window in self.windows if window.hwnd != hwnd and not any(
             button.hwnd == hwnd for button in window.buttons
@@ -447,8 +448,8 @@ def test_dialog_tools_run_while_the_access_gate_is_held(tmp_path):
 class HungClickBackend(FakeBackend):
     """Click is never delivered (target thread hung); the dialog stays open."""
 
-    def click(self, hwnd: int, *, expected_pid=None, timeout_ms=5000) -> bool:
-        self.clicked.append(hwnd)
+    def click(self, button: ButtonInfo, *, expected_pid=None, timeout_ms=5000) -> bool:
+        self.clicked.append(button.hwnd)
         return False
 
 

@@ -192,6 +192,15 @@ matches no signature, including a custom-caption box with two or more buttons
 or a single non-OK button, is `kind: "unknown"`. Both are reported with title,
 text and buttons and are blocking.
 
+A standard dialog box is a Win32 `#32770` window or an Office NetUI
+`NUIDialog`. Access draws a `MsgBox` with the `@`-separated bold form (which is
+what the add-in's `MsgBox2` shows when a person is watching) and its own error
+dialogs as `NUIDialog`. That window has no Win32 buttons, so the inspector reads
+its text and buttons through Microsoft Active Accessibility and presses a button
+with its default action, after checking again that the same button is at the
+same place. Only `NUIDialog` windows of an Access process are read. Both classes
+get the same classification rules.
+
 `policy="safe"` clicks OK only on a `vba_msgbox` (an OK-only standard dialog)
 whose text is not a save, discard, delete, or overwrite confirmation. Access
 error and warning dialogs (`access_dialog`) are report-only, and compile errors
@@ -202,7 +211,8 @@ closed dialog is listed in `closed` with its `kind`, `title` and `message`. A
 `unknown` is never clicked automatically; dismiss it explicitly with
 `vcs_dismiss_dialog(..., button=...)`. Everything skipped is returned in
 `skipped` with its buttons. Debug, save and discard are never clicked, and the
-click is a button message, never a keystroke or coordinate click.
+click is a button message (or, on a `NUIDialog`, the button's accessible
+default action), never a keystroke or coordinate click.
 
 `vcs_dismiss_dialog` and `vcs_recover_dialogs` wait the same way after a
 click: they poll until the dialogs they clicked have closed (dialogs the call

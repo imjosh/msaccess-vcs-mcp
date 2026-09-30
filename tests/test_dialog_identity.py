@@ -51,8 +51,8 @@ class ScriptedBackend:
             return script.pop(0)
         return script[0]
 
-    def click(self, hwnd, *, expected_pid=None, timeout_ms=5000):
-        self.clicked.append(hwnd)
+    def click(self, button, *, expected_pid=None, timeout_ms=5000):
+        self.clicked.append(button.hwnd)
         return True
 
     def close(self, hwnd):
