@@ -194,6 +194,11 @@ _TEST_NO_RESULTS_ERROR = (
 )
 
 
+_TEST_RESULTS_UNSAVED_ERROR = (
+    "The test run finished, but its results file was not written: {detail}"
+)
+
+
 _MERGE_COMPLETION_UNCONFIRMED_ERROR = (
     "The merge started, but no completion callback exists on this path to "
     "report its outcome. It may have succeeded or failed. Read log_path, or "
@@ -323,6 +328,25 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
         return _parse_test_runner_json(raw)
 
     runtime_error = completion.get("runtime_error")
+    results_error = completion.get("results_error")
+    if results_error and not is_decision_required(completion):
+        # The runner ran and posted its callback, but SaveResults could not write
+        # the file. Say so, with the error the add-in logged, instead of blaming
+        # a missing modTestAssert.
+        unsaved: dict[str, Any] = {
+            "success": False,
+            "error": _TEST_RESULTS_UNSAVED_ERROR.format(detail=results_error),
+            "results_error": results_error,
+        }
+        if completion.get("cancelled"):
+            unsaved["cancelled"] = True
+        if runtime_error:
+            unsaved["runtime_error"] = runtime_error
+            _copy_error_number(unsaved, completion)
+        if completion.get("log_path"):
+            unsaved["log_path"] = completion["log_path"]
+        return unsaved
+
     if is_decision_required(completion):
         decision: dict[str, Any] = {
             "success": False,

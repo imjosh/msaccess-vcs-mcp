@@ -264,6 +264,11 @@ Failed tests finish as `eorFailed` (type `error`) but still write the
 "Operation failed" as a lost result. A run that ends before it saves results
 has no `results_path`.
 
+A run that finishes but cannot write its results file (for example, a file sits where
+the `logs\` folder should be) adds `results_error`, the error the add-in logged, in
+place of `results_path`. `vcs_run_tests` returns it as `success: false` with
+`results_error` and an `error` that names the write failure.
+
 A root that ended on a runtime error adds `runtime_error` (the description) and
 `errorNumber` to its terminal callback. On a plain `error` the message is the
 error text; on `decision_required` both ride alongside `decisions`.

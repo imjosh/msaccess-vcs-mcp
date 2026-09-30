@@ -447,6 +447,7 @@ class OperationManager:
                             "result": callback.get("result"),
                             "log_path": callback.get("log_path"),
                             "results_path": callback.get("results_path"),
+                            "results_error": callback.get("results_error"),
                             "log_messages": log_messages if log_messages else None,
                             "decisions": callback.get("decisions"),
                             "decision_required": callback.get("decision_required"),
@@ -464,6 +465,7 @@ class OperationManager:
                             "code": callback.get("code"),
                             "log_path": callback.get("log_path"),
                             "results_path": callback.get("results_path"),
+                            "results_error": callback.get("results_error"),
                             "result": callback.get("result"),
                             "decisions": callback.get("decisions"),
                             "decision_required": callback.get("decision_required"),
@@ -480,6 +482,7 @@ class OperationManager:
                             "message": message or "Operation cancelled",
                             "log_path": callback.get("log_path"),
                             "results_path": callback.get("results_path"),
+                            "results_error": callback.get("results_error"),
                             "result": callback.get("result"),
                             **_runtime_error_fields(callback),
                         }

@@ -670,3 +670,45 @@ class TestRunTestsRuntimeErrorThroughCallback:
         assert result["decisions"] == DECISIONS
         assert result["runtime_error"] == RUNTIME_ERROR
         assert result["errorNumber"] == 91
+
+
+    def test_results_file_not_written(self, tmp_path):
+        detail = r"Error writing file: C:\src\logs\TestResults_1.json (Write to file failed.)"
+        result = self._run(tmp_path, {
+            "type": "complete",
+            "message": "Operation completed successfully",
+            "results_error": detail,
+            "log_path": r"C:\logs\TestRun_1.log",
+        })
+
+        assert result["success"] is False
+        assert detail in result["error"]
+        assert "modTestAssert" not in result["error"]
+        assert result["results_error"] == detail
+        assert result["log_path"] == r"C:\logs\TestRun_1.log"
+
+    def test_results_error_does_not_hide_decision_required(self, tmp_path):
+        result = self._run(tmp_path, {
+            "type": "error",
+            "message": "Decision required",
+            "decision_required": True,
+            "error_pattern": "decision_required",
+            "decisions": DECISIONS,
+            "results_error": "Error writing file",
+        })
+
+        assert result["error_pattern"] == "decision_required"
+        assert result["decisions"] == DECISIONS
+
+    def test_saved_results_win_over_a_stale_results_error(self, tmp_path):
+        results = tmp_path / "TestResults_1.json"
+        results.write_text(json.dumps({"summary": {"passed": 1, "failed": 0, "errored": 0, "subs": 1}}))
+        result = self._run(tmp_path, {
+            "type": "complete",
+            "message": "Operation completed successfully",
+            "results_path": str(results),
+            "results_error": "left over",
+        })
+
+        assert result["success"] is True
+        assert "results_error" not in result
