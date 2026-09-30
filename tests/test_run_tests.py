@@ -6,6 +6,7 @@ import os
 from unittest.mock import Mock, MagicMock, patch, call
 
 import pytest
+from tests.interaction_mode_contract import INTERACTIVE_REFUSED
 
 
 SAMPLE_RESULTS_ALL_PASS = {
@@ -356,7 +357,7 @@ class TestRunTestsCallOrder:
         mock_addin.load_addin.assert_called_once()
 
     def test_refused_interactive_mode_is_the_result_and_tests_do_not_run(self, tmp_path):
-        refusal = {"success": False, "error": "A noninteractive scope is open"}
+        refusal = INTERACTIVE_REFUSED
         result, _, mock_addin = _call_run_tests(
             tmp_path,
             call_sync_return=None,
@@ -368,7 +369,7 @@ class TestRunTestsCallOrder:
         )
 
         assert result["success"] is False
-        assert result["error"] == "A noninteractive scope is open"
+        assert result == refusal
         assert mock_addin.call_sync.call_args_list == [call("SetInteractionMode", 0)]
         mock_addin.call_async.assert_not_called()
 

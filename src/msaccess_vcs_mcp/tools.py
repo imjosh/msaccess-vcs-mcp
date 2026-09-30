@@ -561,7 +561,8 @@ mcp = FastMCP(
         "`noninteractive=True` with `decision_policy=\"block\"`: the add-in shows no message box, "
         "and a prompt the policy does not cover returns `error_pattern: decision_required` with "
         "`decisions` instead of a dialog. Pass `noninteractive=False` for the add-in's normal "
-        "prompts. A dialog the add-in cannot prevent (VBA MsgBox, Access errors, runtime and "
+        "prompts; an A24 or later add-in must confirm interactive mode before anything starts. "
+        "A dialog the add-in cannot prevent (VBA MsgBox, Access errors, runtime and "
         "compile errors) is handled with the four dialog tools above, which stay callable while "
         "another call is blocked. Do not retry a mutation until vcs_automation_status reports "
         "`ready: true`.\n\n"
@@ -3202,7 +3203,9 @@ async def vcs_run_tests(
     visible. ``noninteractive`` defaults to True and is scoped to the run:
     the add-in restores its interaction mode when the run finishes,
     fails, or is cancelled. Pass ``noninteractive=False`` to select interactive
-    mode explicitly and get the ribbon-style console. ``decision_policy`` (default ``block``) answers confirmations;
+    mode explicitly and get the ribbon-style console. This requires an A24 or
+    later add-in to confirm interactive mode; refused or unconfirmed selection
+    starts nothing. ``decision_policy`` (default ``block``) answers confirmations;
     an uncovered prompt returns ``error_pattern: decision_required`` instead
     of a dialog.
 

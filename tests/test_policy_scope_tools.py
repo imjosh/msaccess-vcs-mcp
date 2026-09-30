@@ -10,6 +10,7 @@ from msaccess_vcs_mcp import tools
 from msaccess_vcs_mcp.access_gate import reset_access_gate
 from msaccess_vcs_mcp.usage_logging import reset_logging
 from tests.test_scoped_sync import _patch_import_tool
+from tests.interaction_mode_contract import INTERACTIVE_REFUSED
 
 
 @pytest.fixture(autouse=True)
@@ -85,7 +86,10 @@ def test_cleanup_failure_keeps_operation_outcome(tmp_path, public_tool, operatio
 @pytest.mark.parametrize("noninteractive", [True, False])
 def test_setup_refusal_prevents_operation_and_cleanup(tmp_path, public_tool, noninteractive):
     run, command = public_tool
-    refusal = {"success": False, "error": "scope already open", "decisions": []}
+    refusal = (
+        {"success": False, "error": "scope already open", "decisions": []}
+        if noninteractive else INTERACTIVE_REFUSED
+    )
     with _patch_import_tool(tmp_path) as (db, src, addin, ops):
         addin.call_sync.return_value = json.dumps(refusal)
         result = run(db, src, noninteractive=noninteractive)

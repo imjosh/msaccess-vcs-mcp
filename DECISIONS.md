@@ -74,6 +74,37 @@ contradictory guidance.
 
 ---
 
+## 2026-09-30 — Require confirmed interactive mode before dispatch
+
+**Trigger**: M32. `SetInteractionMode` previously returned VBA Empty even when
+an enclosing caller-owned policy prevented interactive selection. MCP treated
+any response other than an explicit refusal as acceptance and started work.
+
+**Options explored**:
+- Accept Empty for older add-ins: preserves compatibility but cannot establish
+  the requested mode, so the operation could run under a stale policy.
+- Clear an enclosing policy before selection: violates the scope owner's lease,
+  including a policy retained after failed cleanup.
+- Require the A24 response capability (chosen): rejects unsupported builds
+  without relying on a release number that rebuilding does not increment.
+
+**Decision**: Every explicit interactive tool path uses `select_interactive_mode`
+before dispatch or callback registration. Only `success: true` with numeric
+`effective_mode: 0` permits work. Add-in refusals pass through unchanged; Empty,
+missing, malformed, or otherwise unconfirmed responses produce
+`interaction_mode_unconfirmed`. These requests never clear an enclosing policy.
+The minimum is an A24 build or later, as documented in the add-in's
+`docs/noninteractive-dialogs.md` and its A24 decision entry.
+
+**What this rules out**: Interactive requests against older add-ins that cannot
+confirm acceptance, and implicit recovery by weakening another caller's scope.
+Noninteractive operation setup and cleanup retain their existing contracts.
+
+**Relevant files**: `decision_policy.py`, `docs/DIALOGS.md`,
+`tests/test_interactive_mode.py`, `tests/test_interactive_mode_live.py`.
+
+---
+
 ## 2026-09-30 — Gate-exempt tools get bounded worker threads of their own; the gate waits without a thread
 
 **Trigger**: M24 (review finding 2, follow-up to M01). `_run_exempt_in_worker` ran each sync gate-exempt tool through `asyncio.to_thread` under `wait_for`. Cancelling the await does not stop the thread, so a dialog call into a hung Access UI thread (an MSAA call on a `NUIDialog` is bounded only by that ceiling) stayed in the default executor. `AccessGate.run_exclusive` waited for its slot through `asyncio.to_thread(self._slot.acquire, True, wait_sec)` in the same executor. With the executor full, the slot wait queued before its timeout started, and gated calls neither ran nor returned `server_busy`. Reproduced with a one-thread executor.
