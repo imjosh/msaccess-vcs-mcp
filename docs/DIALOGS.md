@@ -40,6 +40,15 @@ finishes, fails, or is cancelled. A blocked prompt is `success: false` with
 `error_pattern: decision_required` and a `decisions` array. It is not a
 successful merge or a successful test run.
 
+The add-in's return from `MergeBuild` is a start result, not the outcome:
+the outcome arrives on the completion callback. When MCP had to start the
+merge without one (callbacks unavailable, or the async start failed and MCP
+fell back to a sync call), `vcs_import_objects` cannot confirm the outcome.
+It returns `success: false` with `started: true` and
+`completion_unconfirmed: true`. The merge may have finished either way, so
+do not retry it blindly. Read `log_path`, or call `vcs_get_recent_calls()`
+and `vcs_get_log(log_type="Merge")`.
+
 From VBA, the same switch is the optional policy argument:
 
 ```vba

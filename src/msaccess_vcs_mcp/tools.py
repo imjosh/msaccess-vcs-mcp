@@ -194,6 +194,13 @@ _TEST_NO_RESULTS_ERROR = (
 )
 
 
+_MERGE_COMPLETION_UNCONFIRMED_ERROR = (
+    "The merge started, but no completion callback exists on this path to "
+    "report its outcome. It may have succeeded or failed. Read log_path, or "
+    "call vcs_get_recent_calls() and vcs_get_log(log_type=\"Merge\")."
+)
+
+
 def _normalize_import_result(
     payload: dict[str, Any],
     *,
@@ -205,23 +212,28 @@ def _normalize_import_result(
     ``payload`` is the last add-in result: a completion callback, the inline
     ``sync`` result, a sync-fallback merge result, or a start refusal.
     ``decision_required`` beats ``success``; ``decisions`` and any
-    ``error_pattern`` the add-in reported pass through unchanged.
+    ``error_pattern`` the add-in reported pass through unchanged. A start
+    marked ``completion_unconfirmed`` is never a success: it keeps
+    ``started`` and says where to find the outcome.
     """
-    success = payload.get("success") is True
+    unconfirmed = bool(payload.get("completion_unconfirmed"))
+    success = payload.get("success") is True and not unconfirmed
     result: dict[str, Any] = {
         "success": success,
-        "imported_count": "See log for details" if success else 0,
+        "imported_count": "See log for details" if success or unconfirmed else 0,
         "database_path": str(db_path),
         "source_dir": str(src_path),
     }
-    if not success:
+    if unconfirmed:
+        result["started"] = True
+        result["completion_unconfirmed"] = True
+        result["error"] = _MERGE_COMPLETION_UNCONFIRMED_ERROR
+    elif not success:
         result["error"] = payload.get("error") or payload.get("message") or "Import failed"
     if payload.get("error_pattern"):
         result["error_pattern"] = payload["error_pattern"]
     if payload.get("runtime_error"):
         result["runtime_error"] = payload["runtime_error"]
-    if payload.get("completion_unconfirmed"):
-        result["completion_unconfirmed"] = True
     result = apply_decision_result(result, payload)
     return _attach_log_context(result, src_path, "Merge", payload)
 
@@ -1269,6 +1281,10 @@ async def vcs_import_objects(
     Returns:
         Dictionary with import results and any errors, plus ``log_path`` for
         this run's log and ``log_excerpt`` (tail of the log) on failure.
+        A full merge with no completion callback returns ``success: false``,
+        ``started: true`` and ``completion_unconfirmed: true``: the merge
+        started, but its outcome is unknown. It is not a failure to retry.
+        Read ``log_path`` or call vcs_get_recent_calls() to find the outcome.
     
     The add-in gitignores its ``logs`` folder, so Glob/Grep will not find
     these files. Open ``log_path`` directly, or call vcs_get_log("Merge").

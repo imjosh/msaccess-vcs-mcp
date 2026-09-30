@@ -284,3 +284,59 @@ def test_refused_interactive_mode_is_the_result_and_nothing_starts(tmp_path, sco
     assert commands == ["SetInteractionMode"]
     addin.call_async.assert_not_called()
     addin.merge_build.assert_not_called()
+
+
+STARTED = {"success": True, "started": True, "operation_id": "op-9"}
+
+
+def _assert_unconfirmed(result):
+    assert result["success"] is not True
+    assert result["started"] is True
+    assert result["completion_unconfirmed"] is True
+    assert "vcs_get_recent_calls" in result["error"]
+
+
+def test_started_marker_on_sync_fallback_is_not_success(tmp_path):
+    with _patch_import_tool(tmp_path, async_result={"unexpected": True}) as (db, src, addin, ops):
+        addin.merge_build.return_value = dict(STARTED)
+        _assert_unconfirmed(_run((db, src)))
+
+
+def test_started_marker_on_async_exception_fallback_is_not_success(tmp_path):
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_async.side_effect = RuntimeError("boom")
+        addin.merge_build.return_value = dict(STARTED)
+        _assert_unconfirmed(_run((db, src)))
+
+
+def test_started_marker_without_callback_is_not_success(tmp_path):
+    from unittest.mock import patch
+
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.merge_build.return_value = dict(STARTED)
+        with patch("msaccess_vcs_mcp.tools.get_callback_url", return_value=None):
+            _assert_unconfirmed(_run((db, src)))
+        addin.call_async.assert_not_called()
+
+
+def test_inline_sync_success_still_normalises_as_success(tmp_path):
+    with _patch_import_tool(
+        tmp_path, async_result={"sync": True, "result": json.dumps({"success": True})}
+    ) as (db, src, addin, ops):
+        result = _run((db, src))
+    assert result["success"] is True
+    assert result["imported_count"] == "See log for details"
+    assert "completion_unconfirmed" not in result
+    assert "error" not in result
+
+
+def test_callback_success_still_normalises_as_success(tmp_path):
+    with _patch_import_tool(tmp_path, async_result={"async": True, "timeout_ms": 1000}) as (
+        db, src, addin, ops,
+    ):
+        ops.wait_for_completion = _wait_returning({"success": True, "log_path": None})
+        result = _run((db, src))
+    assert result["success"] is True
+    assert result["imported_count"] == "See log for details"
+    assert "completion_unconfirmed" not in result
+    assert "error" not in result
