@@ -74,6 +74,25 @@ contradictory guidance.
 
 ---
 
+## 2026-09-30 — An interrupted call is finalized inside the logging layer; the log takes the result's own outcome
+
+**Trigger**: M28. `with_logging` recorded the handler's result, then the gated wrapper applied the interruption record. A handler that returned success after its runtime error was ended logged `success: true`, and `vcs_get_recent_calls` showed that. Separately, a `decision_required` result that was also interrupted dropped the interruption: the flag was never added.
+
+**Options explored**:
+- *Wrap the whole gated run (gate wait, handler, finalize) in `with_logging`*: rejected. The logged time would include the gate wait, and `server_busy` answers, which never ran, would start producing `tool_call` entries.
+- *Re-log after the gate*: rejected. Two entries per call, and recent-call history would show both.
+- *Apply the record inside the logging layer* (chosen): `vcs_tool` wraps the handler with `finish_gated_call` and logs that, so one entry records the final result and its timing covers the handler and the finalization.
+- *Let the post-gate cleanup keep applying late records to the result*: rejected. The client and the log would disagree again. A record attached after the handler returned did not interrupt it, so the cleanup in `finally` only uses it up.
+- *Keep guessing the logged `error_pattern` from the error text*: rejected for results that carry their own. The guess turned `execution_interrupted` into whatever the text matched (for example `file_not_found`), and a `success: false` result without `error` was logged as a success.
+
+**Decision**: `finish_gated_call` sets `success: false` and `execution_interrupted: true` on any matching interrupted result, then applies precedence to `error_pattern` only: `decision_required` stays primary (by flag or by pattern), otherwise `execution_interrupted`. `log_tool_call` treats `success: false` as a failure, uses the result's own `error_pattern` when it has one (the text guess is the fallback), and copies `execution_interrupted` and `policy_cleanup_error` into the entry.
+
+**What this rules out**: Logging a gated handler's provisional result. Reading an interruption off a later call. Revisit the late-record rule with M23, which reserves the interruption before the dialog action releases the call.
+
+**Relevant files**: `tools.py` (`vcs_tool`, `_then`), `dialog_recovery.py` (`finish_gated_call`), `usage_logging.py` (`log_tool_call`), `tests/test_interruption_records.py`, `docs/DIALOGS.md`.
+
+---
+
 ## 2026-09-30 — Re-verify dialog content and re-run the policy before a click
 
 **Trigger**: M22. The pre-click check compared process identity, the dialog handle, its PID and the inspected `ButtonInfo`, but not title, class or text. A modal box cannot change its own text, but it can be replaced: the inspected box closes, another opens, and Windows reuses the handles. Reproduced: an inspected "Hello" box became "Delete all records?" with the same handles, `recover_dialogs(policy="safe")` clicked OK, and the result reported "Hello".
@@ -180,6 +199,8 @@ contradictory guidance.
 ---
 
 ## 2026-09-29 — Dialog recovery rules: identity, positive signature, interruptions, off-event-loop
+
+> **⚠ Partially superseded** (2026-09-30): in rule 3, an interrupted `decision_required` result keeps `error_pattern: decision_required` but also gets `success: false` and `execution_interrupted: true`. See "An interrupted call is finalized inside the logging layer; the log takes the result's own outcome" above.
 
 > **⚠ Partially superseded** (2026-09-29): rule 2 has one exception. A dialog with a single OK button and any other caption is kind `vba_msgbox` and is clicked by `safe`. See "Click OK-only VBA MsgBox of any caption (`vba_msgbox`)" above.
 
