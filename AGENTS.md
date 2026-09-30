@@ -132,7 +132,7 @@ One MCP server process is shared across all Cursor windows. Sync tools run in a 
 
 ### Dialogs and noninteractive runs
 
-`vcs_run_tests` and `vcs_import_objects` default to `noninteractive=True` with `decision_policy="block"`. The add-in suppresses its own message boxes and results window for that call and restores the previous mode when the operation finishes, fails, or is cancelled. A confirmation or merge conflict that the policy does not cover returns `error_pattern: decision_required` and does not open a dialog. Pass `decision_policy="prefer_source"` to overwrite conflicting objects from source. Pass `noninteractive=False` for the previous interactive behavior.
+`vcs_run_tests`, `vcs_import_objects`, `vcs_import_object` and `vcs_export_object` default to `noninteractive=True` with `decision_policy="block"`. The add-in suppresses its own message boxes and results window for that call and restores the previous mode when the operation finishes, fails, or is cancelled. A confirmation or merge conflict that the policy does not cover returns `error_pattern: decision_required` and does not open a dialog. Pass `decision_policy="prefer_source"` to overwrite conflicting objects from source. Pass `noninteractive=False` for the previous interactive behavior.
 
 `DoCmd.SetWarnings` is not used as a blanket suppressor. See [docs/DIALOGS.md](docs/DIALOGS.md) for which dialogs the add-in can prevent and which need the Win32 inspector.
 

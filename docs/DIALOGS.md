@@ -18,10 +18,16 @@ vcs_import_objects(
     r"C:\db.src",
     decision_policy="prefer_source",
 )
+
+vcs_import_object(r"C:\db.accdb", "module", "modHelpers")
+vcs_export_object(r"C:\db.accdb", "form", "frmMain")
 ```
 
-`noninteractive` defaults to true on both tools. `decision_policy` defaults
-to `block`.
+`noninteractive` defaults to true on all four tools. `decision_policy`
+defaults to `block`. On `vcs_import_object` and `vcs_export_object` an
+add-in error that would have been a message box (for example "Merging not
+supported for add-in forms") comes back as `success: false` with the
+message in `error` and the run's `log_path`.
 
 | Policy | Confirmations | Merge conflicts |
 | --- | --- | --- |

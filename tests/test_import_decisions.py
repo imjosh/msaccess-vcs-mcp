@@ -340,3 +340,155 @@ def test_callback_success_still_normalises_as_success(tmp_path):
     assert result["imported_count"] == "See log for details"
     assert "completion_unconfirmed" not in result
     assert "error" not in result
+
+
+# vcs_import_object and vcs_export_object run under the same policy set and clear as
+# the category-scoped merge (X04).
+
+SINGLE_OBJECT_TOOLS = [
+    ("vcs_import_object", "ImportObject"),
+    ("vcs_export_object", "ExportObject"),
+]
+
+MERGE_REFUSED = {
+    "success": False,
+    "error": "Import completed with errors: ERROR: Merging not supported for add-in forms.",
+}
+
+
+def _single_object_tool(tool_name):
+    import msaccess_vcs_mcp.tools as tools
+
+    return _unwrap_sync(getattr(tools, tool_name))
+
+
+def _single_object_sync(command, result, *, set_result=None, clear_error=None, events=None):
+    """call_sync stand-in for a single-object call; records each command in ``events``."""
+    def _call(name, *args):
+        if events is not None:
+            events.append((name, *args))
+        if name == "SetOperationPolicy":
+            return json.dumps(set_result or {"success": True})
+        if name == command:
+            if isinstance(result, Exception):
+                raise result
+            return json.dumps(result)
+        if name == "ClearOperationPolicy":
+            if clear_error:
+                raise clear_error
+            return json.dumps({"success": True})
+        return None
+    return _call
+
+
+@pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
+def test_single_object_sets_block_policy_and_clears_it(tmp_path, tool_name, command):
+    events = []
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_sync.side_effect = _single_object_sync(command, {"success": True}, events=events)
+        result = _single_object_tool(tool_name)(db, "form", "frmVCSMain")
+    assert result["success"] is True
+    assert events == [
+        ("SetOperationPolicy", "block"),
+        (command, "form", "frmVCSMain"),
+        ("ClearOperationPolicy",),
+    ]
+
+
+@pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
+def test_single_object_passes_decision_policy(tmp_path, tool_name, command):
+    events = []
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_sync.side_effect = _single_object_sync(command, {"success": True}, events=events)
+        _single_object_tool(tool_name)(db, "query", "qryFoo", decision_policy="prefer_source")
+    assert events[0] == ("SetOperationPolicy", "prefer_source")
+
+
+@pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
+def test_single_object_failure_is_returned_and_policy_cleared(tmp_path, tool_name, command):
+    events = []
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_sync.side_effect = _single_object_sync(command, MERGE_REFUSED, events=events)
+        result = _single_object_tool(tool_name)(db, "form", "frmVCSMain")
+    assert result["success"] is False
+    assert "Merging not supported for add-in forms" in result["error"]
+    assert events[-1] == ("ClearOperationPolicy",)
+
+
+@pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
+def test_single_object_clears_policy_when_the_call_raises(tmp_path, tool_name, command):
+    events = []
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_sync.side_effect = _single_object_sync(
+            command, RuntimeError("call exploded"), events=events
+        )
+        result = _single_object_tool(tool_name)(db, "form", "frmVCSMain")
+    assert result["success"] is False
+    assert result["error"] == "call exploded"
+    assert events[-1] == ("ClearOperationPolicy",)
+
+
+@pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
+def test_single_object_call_and_cleanup_both_raise_returns_original_error(
+    tmp_path, tool_name, command,
+):
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_sync.side_effect = _single_object_sync(
+            command, RuntimeError("call exploded"), clear_error=RuntimeError("clear exploded")
+        )
+        result = _single_object_tool(tool_name)(db, "form", "frmVCSMain")
+    assert result["success"] is False
+    assert result["error"] == "call exploded"
+    assert result["policy_cleanup_error"] == "clear exploded"
+
+
+@pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
+def test_single_object_policy_set_refusal_is_the_result(tmp_path, tool_name, command):
+    events = []
+    refusal = {"success": False, "error_pattern": "operation_already_running", "error": "busy"}
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_sync.side_effect = _single_object_sync(
+            command, {"success": True}, set_result=refusal, events=events
+        )
+        result = _single_object_tool(tool_name)(db, "form", "frmVCSMain")
+    assert result["error_pattern"] == "operation_already_running"
+    assert command not in [e[0] for e in events]
+
+
+@pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
+def test_single_object_decision_required_is_surfaced(tmp_path, tool_name, command):
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_sync.side_effect = _single_object_sync(command, {**BLOCKED, "success": True})
+        result = _single_object_tool(tool_name)(db, "form", "frmVCSMain")
+    _assert_decision(result)
+
+
+@pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
+def test_single_object_interactive_sends_explicit_mode_and_no_policy(tmp_path, tool_name, command):
+    events = []
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_sync.side_effect = _single_object_sync(command, {"success": True}, events=events)
+        _single_object_tool(tool_name)(db, "form", "frmVCSMain", noninteractive=False)
+    assert events == [("SetInteractionMode", 0), (command, "form", "frmVCSMain")]
+
+
+@pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
+def test_single_object_refused_interactive_mode_is_the_result(tmp_path, tool_name, command):
+    events = []
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        def _call(name, *args):
+            events.append(name)
+            return json.dumps(INTERACTION_REFUSAL if name == "SetInteractionMode" else {"success": True})
+        addin.call_sync.side_effect = _call
+        result = _single_object_tool(tool_name)(db, "form", "frmVCSMain", noninteractive=False)
+    assert result["error"] == "A noninteractive scope is open"
+    assert events == ["SetInteractionMode"]
+
+
+@pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
+def test_single_object_invalid_policy_refused_before_access(tmp_path, tool_name, command):
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        result = _single_object_tool(tool_name)(db, "form", "frmVCSMain", decision_policy="bogus")
+    assert result["success"] is False
+    assert result["error_pattern"] == "invalid_decision_policy"
+    addin.call_sync.assert_not_called()
