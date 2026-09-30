@@ -393,6 +393,46 @@ def _scoped_types_arg(object_types: list[str]) -> str | list[str]:
     return cleaned
 
 
+def _call_under_policy(
+    addin: VCSAddinIntegration, policy: str | None, command: str, *args: Any
+) -> tuple[dict[str, Any], str]:
+    """
+    Run one sync add-in call under ``policy``, or in explicit interactive mode.
+
+    Sets the policy through ``SetOperationPolicy`` first and clears it in
+    ``finally``, so the call is covered whether or not the add-in keeps a
+    session policy past ``Finish``. A cleanup failure is attached as
+    ``policy_cleanup_error`` and never replaces the call's result.
+
+    Returns the result and how the call went: ``"refused"`` when the policy
+    set or the interactive-mode request was refused (the refusal is the
+    result and the call never started), ``"raised"`` when the call raised
+    (the result is a plain failure with the exception text), otherwise
+    ``"completed"`` with the add-in's parsed result.
+    """
+    if policy:
+        # A refusal here (for example operation_already_running)
+        # is a normal result, not an error.
+        policy_result = _addin_json_result(addin.call_sync("SetOperationPolicy", policy))
+        if policy_result.get("success") is False:
+            return policy_result, "refused"
+    mode_refusal = select_interactive_mode(addin, policy)
+    if mode_refusal:
+        return mode_refusal, "refused"
+    state = "completed"
+    try:
+        result = _addin_json_result(addin.call_sync(command, *args))
+    except Exception as e:
+        state = "raised"
+        result = {"success": False, "error": str(e)}
+    finally:
+        cleanup_error = clear_operation_policy(addin) if policy else None
+    if cleanup_error:
+        # Secondary information: never replaces the operation's result.
+        result["policy_cleanup_error"] = cleanup_error
+    return result, state
+
+
 def _get_operation_manager():
     """Get the operation manager instance if available."""
     try:
@@ -1342,33 +1382,16 @@ async def vcs_import_objects(
                         "error": "object_types was empty after stripping blanks",
                         "imported_count": 0,
                     }
-                if policy:
-                    # A refusal here (for example operation_already_running)
-                    # is a normal result, not an error.
-                    policy_result = _addin_json_result(
-                        addin.call_sync("SetOperationPolicy", policy)
-                    )
-                    if policy_result.get("success") is False:
-                        return policy_result
-                mode_refusal = select_interactive_mode(addin, policy)
-                if mode_refusal:
-                    return mode_refusal
-                op_error: Exception | None = None
-                try:
-                    result = _addin_json_result(
-                        addin.call_sync("ImportByType", types_arg, full_import)
-                    )
-                except Exception as e:
-                    op_error = e
-                    result = {"success": False, "error": str(e), "imported_count": 0}
-                finally:
-                    cleanup_error = clear_operation_policy(addin) if policy else None
-                if cleanup_error:
-                    # Secondary information: never replaces the operation's result.
-                    result["policy_cleanup_error"] = cleanup_error
+                result, state = _call_under_policy(
+                    addin, policy, "ImportByType", types_arg, full_import
+                )
+                if state == "refused":
+                    return result
                 result.setdefault("database_path", str(db_path))
                 result.setdefault("source_dir", str(src_path))
-                if op_error is None:
+                if state == "raised":
+                    result["imported_count"] = 0
+                else:
                     if result.get("success") and "imported_count" not in result:
                         result["imported_count"] = "See log for details"
                     result = surface_own_decision(result)
@@ -2224,13 +2247,19 @@ def vcs_compile_vba(
 def vcs_export_object(
     database_path: str,
     object_type: str,
-    object_name: str = ""
+    object_name: str = "",
+    noninteractive: bool = True,
+    decision_policy: str = "block",
 ) -> dict[str, Any]:
     """
     Export a single database object or component type to source files.
     
     Exports one object to its source file representation. Much faster than a
     full database export when you only need to refresh one object.
+    
+    Runs noninteractive by default, like ``vcs_import_objects``: an add-in
+    error is returned in the result instead of a message box that would hold
+    Access until someone clicks OK.
     
     Accepts singular or plural type names. For single-file component types
     (like vbe_project or db_property), the object_name is ignored.
@@ -2254,6 +2283,14 @@ def vcs_export_object(
             Plural forms and common aliases are also accepted.
         object_name: Name of the object to export. Required for multi-file
             types, ignored for single-file types.
+        noninteractive: When True (default), suppress add-in message boxes
+            for this call. A confirmation the policy does not cover returns
+            ``error_pattern: decision_required`` instead of a dialog. Pass
+            False to select interactive mode explicitly, with the add-in's
+            normal prompts.
+        decision_policy: Used when ``noninteractive`` is True. ``block``
+            (default), ``prefer_source``, ``prefer_database``, ``skip``, or
+            ``decline``, as for ``vcs_import_objects``.
     
     Returns:
         Dictionary with success status, file path, and any errors, plus
@@ -2263,6 +2300,7 @@ def vcs_export_object(
     these files. Open ``log_path`` directly, or call vcs_get_log("Export").
     """
     try:
+        policy = noninteractive_policy(noninteractive, decision_policy)
         db_path = validate_database_path(database_path)
         
         with AccessConnection(str(db_path)) as conn:
@@ -2272,10 +2310,13 @@ def vcs_export_object(
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
             addin.load_addin(app, db_path=str(db_path))
             
-            result_json = addin.call_sync("ExportObject", object_type, object_name)
-            
-            return _addin_json_result(result_json)
+            result, state = _call_under_policy(
+                addin, policy, "ExportObject", object_type, object_name
+            )
+            return surface_own_decision(result) if state == "completed" else result
     
+    except InvalidDecisionPolicy as e:
+        return invalid_policy_result(e)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -2284,13 +2325,20 @@ def vcs_export_object(
 def vcs_import_object(
     database_path: str,
     object_type: str,
-    object_name: str = ""
+    object_name: str = "",
+    noninteractive: bool = True,
+    decision_policy: str = "block",
 ) -> dict[str, Any]:
     """
     Import a single object or component type from source files into the database.
     
     Loads one object from its source file back into the Access database.
     The source file must exist in the project's export folder.
+    
+    Runs noninteractive by default, like ``vcs_import_objects``: an add-in
+    error (for example "Merging not supported for add-in forms") is returned
+    in the result instead of a message box that would hold Access until
+    someone clicks OK.
     
     Accepts singular or plural type names. For single-file component types
     (like vbe_project or db_property), the object_name is ignored.
@@ -2313,6 +2361,14 @@ def vcs_import_object(
             Plural forms and common aliases are also accepted.
         object_name: Name of the object to import. Required for multi-file
             types, ignored for single-file types.
+        noninteractive: When True (default), suppress add-in message boxes
+            for this call. A confirmation the policy does not cover returns
+            ``error_pattern: decision_required`` instead of a dialog. Pass
+            False to select interactive mode explicitly, with the add-in's
+            normal prompts.
+        decision_policy: Used when ``noninteractive`` is True. ``block``
+            (default), ``prefer_source``, ``prefer_database``, ``skip``, or
+            ``decline``, as for ``vcs_import_objects``.
     
     Returns:
         Dictionary with success status and any errors, plus ``log_path`` for
@@ -2322,6 +2378,7 @@ def vcs_import_object(
     these files. Open ``log_path`` directly, or call vcs_get_log("Merge").
     """
     try:
+        policy = noninteractive_policy(noninteractive, decision_policy)
         config = get_config()
         check_write_permission(config)
         
@@ -2333,10 +2390,13 @@ def vcs_import_object(
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
             addin.load_addin(app, db_path=str(db_path))
             
-            result_json = addin.call_sync("ImportObject", object_type, object_name)
-            
-            return _addin_json_result(result_json)
+            result, state = _call_under_policy(
+                addin, policy, "ImportObject", object_type, object_name
+            )
+            return surface_own_decision(result) if state == "completed" else result
     
+    except InvalidDecisionPolicy as e:
+        return invalid_policy_result(e)
     except PermissionError as e:
         return {"success": False, "error": str(e)}
     except Exception as e:

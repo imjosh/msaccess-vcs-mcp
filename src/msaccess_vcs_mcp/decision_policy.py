@@ -1,12 +1,13 @@
 """Decision policy and add-in decision results for the tools that run a noninteractive operation.
 
-``vcs_import_objects`` and ``vcs_run_tests`` pick a ``decision_policy``, hand it to
-the add-in, and turn an uncovered prompt into ``error_pattern: decision_required``.
+``vcs_import_objects``, ``vcs_import_object``, ``vcs_export_object`` and
+``vcs_run_tests`` pick a ``decision_policy``, hand it to the add-in, and turn an
+uncovered prompt into ``error_pattern: decision_required``.
 Everything about that lives here: validating the policy, the interactive-mode and
 policy-clear calls, normalising the ``decisions`` an add-in result carries, and
 reading the start result of an async call. ``tools.py`` keeps the tool handlers and
-calls in. Setting the policy stays in ``vcs_import_objects``, which returns the
-add-in's refusal as its own result.
+calls in. Setting the policy stays in ``tools._call_under_policy``, which returns
+the add-in's refusal as the tool's result.
 """
 
 from __future__ import annotations
