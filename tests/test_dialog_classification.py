@@ -15,6 +15,7 @@ import pytest
 from msaccess_vcs_mcp import tools
 from msaccess_vcs_mcp.access_gate import reset_access_gate
 from msaccess_vcs_mcp.dialog_recovery import (
+    CLICK_DELIVERED,
     ButtonInfo,
     ProcessIdentity,
     WindowInfo,
@@ -57,7 +58,7 @@ class SlowCloseBackend:
         owner = next((w for w in self.windows if button in w.buttons), None)
         if owner is not None and self.close_after is not None:
             self._pending_close[owner.hwnd] = self.close_after
-        return True
+        return CLICK_DELIVERED
 
     def close(self, hwnd):
         self.closed.append(hwnd)

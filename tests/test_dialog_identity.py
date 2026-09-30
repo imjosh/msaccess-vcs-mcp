@@ -16,6 +16,7 @@ import pytest
 from msaccess_vcs_mcp import tools
 from msaccess_vcs_mcp.access_gate import reset_access_gate
 from msaccess_vcs_mcp.dialog_recovery import (
+    CLICK_DELIVERED,
     ButtonInfo,
     ProcessIdentity,
     WindowInfo,
@@ -57,7 +58,7 @@ class ScriptedBackend:
     def click(self, button, *, expected_pid=None, timeout_ms=5000):
         self.clicked.append(button.hwnd)
         self.pressed.append(button)
-        return True
+        return CLICK_DELIVERED
 
     def close(self, hwnd):
         self.closed.append(hwnd)

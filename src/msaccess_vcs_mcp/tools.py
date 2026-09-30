@@ -841,11 +841,15 @@ async def _run_exempt_in_worker(name: str, logged, args: tuple, kwargs: dict) ->
 
 
 def _then(func, finish):
-    """``func`` with ``finish`` applied to its result. Keeps the signature and sync or async kind."""
+    """``func`` with ``finish`` applied to its result. Keeps the signature and sync or async kind.
+
+    For an async ``func``, ``finish`` runs in a worker thread: it may block while a
+    dialog click reserved against the call is still being delivered.
+    """
     if inspect.iscoroutinefunction(func):
         @functools.wraps(func)
         async def run_async(*args, **kwargs):
-            return finish(await func(*args, **kwargs))
+            return await asyncio.to_thread(finish, await func(*args, **kwargs))
 
         return run_async
 
@@ -923,7 +927,9 @@ def vcs_tool(name: str):
                 current = gate.current_in_flight()
                 if current is not None:
                     claimed["call_id"] = current.call_id
-                begin_gated_call(str(database) if database is not None else None)
+                begin_gated_call(
+                    str(database) if database is not None else None, claimed.get("call_id")
+                )
 
             # The interruption is applied inside the logging layer, so the
             # usage entry records the result the client gets.
@@ -947,7 +953,7 @@ def vcs_tool(name: str):
                     **kwargs,
                 )
             finally:
-                # Uses up the records of a call that raised, and any attached
+                # Uses up the records of a call that raised, and any reserved
                 # after the handler returned: those did not interrupt it. A
                 # busy answer never ran the body, so nothing was claimed.
                 finish_gated_call(claimed.get("call_id"), None)

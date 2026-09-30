@@ -74,7 +74,27 @@ contradictory guidance.
 
 ---
 
+## 2026-09-30 — Reserve an interruption before the click; the finished call waits for the click to settle
+
+**Trigger**: M23. The interruption was recorded after `backend.click` returned. Ending a runtime-error dialog lets Access resume, so the blocked call could return and finish (no record yet: success) before the click returned. The record then found the gate free and became a free `last_interruption` with `busy_with: None`, or was dropped by the gate's cleanup. The existing tests released the call only after the dismissal finished, which hid the ordering.
+
+**Options explored**:
+- *Record before the click, as a confirmed interruption*: rejected. A click that was never sent would mark a call that nothing interrupted.
+- *Keep recording after the click and have the finished call poll briefly*: rejected. No bound fits every delivery time, and a record arriving after the poll still lands on a free gate or a later call.
+- *Reserve before the click, settle after, and make the finished call wait for a pending reservation up to its deadline* (chosen).
+- *Keep `WindowBackend.click` a bool*: rejected. False covered both "nothing was sent" (wrong owner, unresponsive window, button refused the action) and "sent but not confirmed" (a timed-out `SendMessageTimeout`). The first must leave the call alone; the second must not leave a success.
+
+**Decision**: `_press_fresh` reserves the interruption against the in-flight call on the same database after `_reverify` and the chooser, right before `backend.click`, when `_interrupts_execution` holds for the fresh kind and chosen button. `_close_fresh` does the same for a cancel. `WindowBackend.click` returns `CLICK_DELIVERED`, `CLICK_NOT_SENT` or `CLICK_UNCERTAIN`, and the reservation settles to `confirmed`, gone, or `uncertain` (a free reservation is dropped rather than kept uncertain). Records are keyed by reservation token and carry the process identity, so a second reservation never overwrites a confirmed one. `finish_gated_call(call_id, result)` waits on a condition for that call's pending reservations, bounded by each one's deadline (twice the click timeout plus `CLICK_SETTLE_MARGIN_SEC`: the Win32 click may spend one timeout on the responsiveness probe and one on the press). Confirmed wins: `execution_interrupted` as before. Otherwise any uncertain or unsettled reservation gives `success: false` and `interruption_uncertain: true`, with `error_pattern: interruption_uncertain` only when the result was a success and not `decision_required`. Precedence: `decision_required` > `execution_interrupted` > plain error > `interruption_uncertain`. For an async handler `_then` runs the finalization in a worker thread so the wait never blocks the event loop. `finish_gated_call(call_id, None)` in the gate cleanup still uses records up without waiting. `begin_gated_call` drops every record on its database that is not the starting call's: besides free records, that clears a reservation that read an earlier call as in flight just before the gate released it and landed after that call's cleanup. The public `vcs_dismiss_dialog` and `vcs_recover_dialogs` results are unchanged: any undelivered click is still `dismiss_uncertain`.
+
+**What this rules out**: Recording an interruption after the action that causes it. Treating a click that was never sent as an interruption, or an unconfirmed one as a success. A late settle reaching a later call: a reservation belongs to one `call_id` and is gone once that call finishes. Revisit the deadline with M24 if a hung click is moved out of the worker that holds it.
+
+**Relevant files**: `dialog_recovery.py` (`_reserve_interruption`, `_settle_interruption`, `begin_gated_call`, `finish_gated_call`, `_press_fresh`, `_close_fresh`, `Win32Backend.click`), `tools.py` (`_then`), `usage_logging.py` (`log_tool_call`), `tests/test_interruption_records.py`, `docs/DIALOGS.md`.
+
+---
+
 ## 2026-09-30 — An interrupted call is finalized inside the logging layer; the log takes the result's own outcome
+
+> **⚠ Partially superseded** (2026-09-30): the record is now reserved before the click, and the finished call waits for a click still in flight before it is finalized; the late-record rule is unchanged for reservations made after the handler returned. See "Reserve an interruption before the click; the finished call waits for the click to settle" above.
 
 **Trigger**: M28. `with_logging` recorded the handler's result, then the gated wrapper applied the interruption record. A handler that returned success after its runtime error was ended logged `success: true`, and `vcs_get_recent_calls` showed that. Separately, a `decision_required` result that was also interrupted dropped the interruption: the flag was never added.
 
@@ -199,6 +219,8 @@ contradictory guidance.
 ---
 
 ## 2026-09-29 — Dialog recovery rules: identity, positive signature, interruptions, off-event-loop
+
+> **⚠ Partially superseded** (2026-09-30): in rule 3, the interruption is reserved before the click and counts only once delivery is confirmed; an unconfirmed delivery gives `interruption_uncertain`, not `execution_interrupted`. Records are kept per reservation, with the PID and creation time on each. See "Reserve an interruption before the click; the finished call waits for the click to settle" above.
 
 > **⚠ Partially superseded** (2026-09-30): in rule 3, an interrupted `decision_required` result keeps `error_pattern: decision_required` but also gets `success: false` and `execution_interrupted: true`. See "An interrupted call is finalized inside the logging layer; the log takes the result's own outcome" above.
 

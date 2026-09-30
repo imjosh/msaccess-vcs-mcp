@@ -509,6 +509,8 @@ def log_tool_call(
             entry["error_pattern"] = result["error_pattern"]
         if result.get("execution_interrupted"):
             entry["execution_interrupted"] = True
+        if result.get("interruption_uncertain"):
+            entry["interruption_uncertain"] = True
         if result.get("policy_cleanup_error"):
             entry["policy_cleanup_error"] = _truncate_string(
                 str(result["policy_cleanup_error"]), max_length=500

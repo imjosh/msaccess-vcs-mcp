@@ -8,6 +8,8 @@ from unittest.mock import patch
 import pytest
 
 from msaccess_vcs_mcp.dialog_recovery import (
+    CLICK_DELIVERED,
+    CLICK_UNCERTAIN,
     ButtonInfo,
     ProcessIdentity,
     WindowInfo,
@@ -36,7 +38,7 @@ class FakeBackend:
     def list_windows(self):
         return list(self.windows)
 
-    def click(self, button: ButtonInfo, *, expected_pid=None, timeout_ms=5000) -> bool:
+    def click(self, button: ButtonInfo, *, expected_pid=None, timeout_ms=5000) -> str:
         hwnd = button.hwnd
         self.clicked.append(hwnd)
         self.windows = [window for window in self.windows if window.hwnd != hwnd and not any(
@@ -48,7 +50,7 @@ class FakeBackend:
             for window in self.windows
             if not any(button.hwnd == hwnd for button in window.buttons)
         ]
-        return True
+        return CLICK_DELIVERED
 
     def close(self, hwnd: int) -> None:
         self.closed.append(hwnd)
@@ -448,9 +450,9 @@ def test_dialog_tools_run_while_the_access_gate_is_held(tmp_path):
 class HungClickBackend(FakeBackend):
     """Click is never delivered (target thread hung); the dialog stays open."""
 
-    def click(self, button: ButtonInfo, *, expected_pid=None, timeout_ms=5000) -> bool:
+    def click(self, button: ButtonInfo, *, expected_pid=None, timeout_ms=5000) -> str:
         self.clicked.append(button.hwnd)
-        return False
+        return CLICK_UNCERTAIN
 
 
 def test_undelivered_click_is_dismiss_uncertain_and_not_retried():
