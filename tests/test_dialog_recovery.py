@@ -14,7 +14,7 @@ from msaccess_vcs_mcp.dialog_recovery import (
     auto_button,
     classify_window,
     dismiss_dialog,
-    dismiss_one,
+    dismiss_dialog_in_windows,
     inspect_windows,
     recover_windows,
     reset_interruptions,
@@ -140,7 +140,7 @@ def test_two_instances_only_the_named_pid_is_touched():
         ),
     ]
     backend = FakeBackend(windows)
-    result = dismiss_one(
+    result = dismiss_dialog_in_windows(
         windows,
         r"C:\data\Northwind.accdb",
         "hwnd:1",
@@ -261,7 +261,7 @@ def test_accelerator_captions_match_end_no_and_debug():
     )
     assert backend.clicked == [42]
     assert result["interrupted"] is True
-    refused = dismiss_one(
+    refused = dismiss_dialog_in_windows(
         [runtime],
         r"C:\data\Northwind.accdb",
         "hwnd:4",
@@ -278,7 +278,7 @@ def test_accelerator_captions_match_end_no_and_debug():
         buttons=(_button(51, "&Yes"), _button(52, "&No")),
     )
     chooser = FakeBackend([yes_no])
-    dismissed = dismiss_one(
+    dismissed = dismiss_dialog_in_windows(
         [yes_no],
         r"C:\data\Northwind.accdb",
         "hwnd:5",
@@ -299,7 +299,7 @@ def test_explicit_debug_is_refused():
         buttons=(_button(41, "End"), _button(42, "Debug")),
     )
     backend = FakeBackend([runtime])
-    result = dismiss_one(
+    result = dismiss_dialog_in_windows(
         [runtime],
         r"C:\data\Northwind.accdb",
         "hwnd:4",
@@ -316,7 +316,7 @@ def test_close_finished_addin_window_does_not_cancel_while_gate_busy_on_same_dat
     addin = _win(hwnd=7, title="MSAccessVCS", class_name="OForm", texts=("Running",))
     backend = FakeBackend([addin])
     with patch("msaccess_vcs_mcp.dialog_recovery._gate_snapshot", return_value={"gate_busy": True, "operation": {"tool": "vcs_run_tests", "same_database": True}}):
-        blocked = dismiss_one(
+        blocked = dismiss_dialog_in_windows(
             [addin],
             r"C:\data\Northwind.accdb",
             "hwnd:7",
@@ -330,7 +330,7 @@ def test_close_finished_addin_window_does_not_cancel_while_gate_busy_on_same_dat
 
     other = {"gate_busy": True, "operation": {"tool": "vcs_run_tests", "same_database": False}}
     with patch("msaccess_vcs_mcp.dialog_recovery._gate_snapshot", return_value=other):
-        closed = dismiss_one(
+        closed = dismiss_dialog_in_windows(
             [addin],
             r"C:\data\Northwind.accdb",
             "hwnd:7",
@@ -347,7 +347,7 @@ def test_close_finished_addin_window_does_not_cancel_while_gate_busy_on_same_dat
 def test_cancel_addin_window_is_an_interruption():
     addin = _win(hwnd=7, title="MSAccessVCS", class_name="OForm")
     backend = FakeBackend([addin])
-    result = dismiss_one(
+    result = dismiss_dialog_in_windows(
         [addin],
         r"C:\data\Northwind.accdb",
         "hwnd:7",
@@ -363,7 +363,7 @@ def test_cancel_addin_window_is_an_interruption():
 def test_unresponsive_process_is_not_clicked():
     dialog = _win(hwnd=1, title="VCS Probe", texts=("Hi",), buttons=(_button(11, "OK"),))
     backend = FakeBackend([dialog])
-    result = dismiss_one(
+    result = dismiss_dialog_in_windows(
         [dialog],
         r"C:\data\Northwind.accdb",
         "hwnd:1",

@@ -193,7 +193,7 @@ def test_cleanup_failure_is_attached_and_logged_on_success(tmp_path):
         addin.call_sync.side_effect = _scripted_sync(
             {"success": True}, clear_error=RuntimeError("clear exploded")
         )
-        with patch("msaccess_vcs_mcp.tools.log_diagnostic_event") as log:
+        with patch("msaccess_vcs_mcp.decision_policy.log_diagnostic_event") as log:
             result = _run((db, src), object_types=["forms"])
     assert result["success"] is True
     assert result["policy_cleanup_error"] == "clear exploded"

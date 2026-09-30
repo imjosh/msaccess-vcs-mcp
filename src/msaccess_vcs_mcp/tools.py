@@ -60,6 +60,20 @@ from .dialog_recovery import (
     list_dialogs,
     recover_dialogs,
 )
+from .decision_policy import (
+    InvalidDecisionPolicy,
+    apply_decision_result,
+    clear_operation_policy,
+    coerce_decisions,
+    invalid_policy_result,
+    is_decision_required,
+    is_start_refusal,
+    noninteractive_policy,
+    parse_addin_payload,
+    policy_args,
+    select_interactive_mode,
+    surface_own_decision,
+)
 from .config import (
     get_config,
     get_callback_url,
@@ -180,116 +194,6 @@ _TEST_NO_RESULTS_ERROR = (
 )
 
 
-_DECISION_POLICIES = frozenset({
-    "block",
-    "prefer_source",
-    "prefer_database",
-    "skip",
-    "decline",
-})
-
-
-class InvalidDecisionPolicy(ValueError):
-    """An unknown ``decision_policy``; refused before Access is called."""
-
-    error_pattern = "invalid_decision_policy"
-
-
-def _invalid_policy_result(exc: InvalidDecisionPolicy, **extra: Any) -> dict[str, Any]:
-    return {"success": False, "error": str(exc), "error_pattern": exc.error_pattern, **extra}
-
-
-def _noninteractive_policy(noninteractive: bool, decision_policy: str | None) -> str | None:
-    """Return the add-in policy name, or None to keep interactive behavior.
-
-    Raises InvalidDecisionPolicy for an unknown policy. The tool wrappers turn
-    that into ``success: false`` with ``error_pattern: invalid_decision_policy``
-    without calling Access.
-    """
-    if not noninteractive:
-        return None
-    policy = (decision_policy or "block").strip().lower()
-    if policy not in _DECISION_POLICIES:
-        raise InvalidDecisionPolicy(
-            "Unknown decision_policy. Use block, prefer_source, prefer_database, skip, or decline."
-        )
-    return policy
-
-
-_INTERACTION_MODE_NORMAL = 0  # add-in eInteractionMode.eimNormal
-
-
-def _select_interactive_mode(addin: Any) -> None:
-    """Send an explicit interactive mode, so the run never inherits a stale one.
-
-    Call only outside a noninteractive scope (``policy`` is None), and before
-    the operation starts.
-    """
-    addin.call_sync("SetInteractionMode", _INTERACTION_MODE_NORMAL)
-
-
-def _clear_operation_policy(addin: Any) -> str | None:
-    """Clear the add-in operation policy. Never raises; returns a failure message.
-
-    ``ClearOperationPolicy`` is idempotent, so this is safe after the add-in's
-    ``Finish`` has already restored the mode. A failure is usage-logged so a
-    policy left set in the add-in is visible.
-    """
-    try:
-        cleared = _addin_json_result(addin.call_sync("ClearOperationPolicy"))
-        if cleared.get("success") is False:
-            message = str(cleared.get("error") or cleared.get("message") or "ClearOperationPolicy refused")
-        else:
-            return None
-    except Exception as e:
-        message = str(e) or type(e).__name__
-    log_diagnostic_event("policy_cleanup_failed", error=message)
-    return message
-
-
-def _coerce_decisions(value: Any) -> Any:
-    if isinstance(value, str):
-        try:
-            return json.loads(value)
-        except json.JSONDecodeError:
-            return value
-    return value
-
-
-def _apply_decision_result(result: dict[str, Any], completion: dict[str, Any] | None) -> dict[str, Any]:
-    """Surface an unresolved add-in prompt. Never leave success true in that case."""
-    if not completion:
-        return result
-    decisions = completion.get("decisions")
-    if decisions is not None:
-        result["decisions"] = _coerce_decisions(decisions)
-    if completion.get("decision_required") or completion.get("error_pattern") == "decision_required":
-        result["success"] = False
-        result["decision_required"] = True
-        result["error_pattern"] = "decision_required"
-        result["error"] = completion.get("error") or completion.get("message") or (
-            "A required decision was not covered by the decision policy."
-        )
-    return result
-
-
-def _parse_addin_payload(value: Any) -> dict[str, Any]:
-    """Parse an add-in result (JSON string or dict) into a dict, never raising."""
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            return {"success": False, "error": f"Unparseable add-in result: {value[:200]}"}
-    if isinstance(value, dict):
-        return value
-    return {"success": False, "error": "Add-in returned no result"}
-
-
-def _is_start_refusal(payload: dict[str, Any]) -> bool:
-    """A sync start result that refused (or declined) the operation."""
-    return payload.get("success") is False and not payload.get("async") and not payload.get("sync")
-
-
 def _normalize_import_result(
     payload: dict[str, Any],
     *,
@@ -318,7 +222,7 @@ def _normalize_import_result(
         result["runtime_error"] = payload["runtime_error"]
     if payload.get("completion_unconfirmed"):
         result["completion_unconfirmed"] = True
-    result = _apply_decision_result(result, payload)
+    result = apply_decision_result(result, payload)
     return _attach_log_context(result, src_path, "Merge", payload)
 
 
@@ -351,12 +255,12 @@ def _parse_test_runner_json(result_json: Any) -> dict[str, Any]:
 
     if not isinstance(parsed, dict):
         return {"success": True, "result": parsed}
-    if parsed.get("decision_required") or parsed.get("error_pattern") == "decision_required":
+    if is_decision_required(parsed):
         parsed["success"] = False
         parsed["decision_required"] = True
         parsed["error_pattern"] = "decision_required"
         if "decisions" in parsed:
-            parsed["decisions"] = _coerce_decisions(parsed.get("decisions"))
+            parsed["decisions"] = coerce_decisions(parsed.get("decisions"))
         return parsed
     if "summary" not in parsed and "tests" not in parsed:
         return parsed if "success" in parsed else {"success": True, "result": parsed}
@@ -387,7 +291,7 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
         if completion.get("cancelled"):
             parsed["cancelled"] = True
             parsed["success"] = False
-        parsed = _apply_decision_result(parsed, completion)
+        parsed = apply_decision_result(parsed, completion)
         log_path = completion.get("log_path")
         if log_path:
             parsed.setdefault("log_path", log_path)
@@ -398,8 +302,8 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
     if raw not in (None, ""):
         return _parse_test_runner_json(raw)
 
-    if completion.get("decision_required") or completion.get("error_pattern") == "decision_required":
-        return _apply_decision_result(
+    if is_decision_required(completion):
+        return apply_decision_result(
             {
                 "success": False,
                 "error": completion.get("error") or completion.get("message"),
@@ -888,14 +792,11 @@ def vcs_tool(name: str):
                     claimed["call_id"] = current.call_id
                 begin_gated_call(str(database) if database is not None else None)
 
-            if is_async_body:
-                async def body(*a, **kw):
-                    _claim_call()
-                    return await logged(*a, **kw)
-            else:
-                def body(*a, **kw):
-                    _claim_call()
-                    return logged(*a, **kw)
+            def body(*a, **kw):
+                # One closure for both kinds: for an async tool this returns
+                # the coroutine, which the gate awaits (``is_async_body``).
+                _claim_call()
+                return logged(*a, **kw)
 
             try:
                 result = await gate.run_exclusive(
@@ -1377,7 +1278,7 @@ async def vcs_import_objects(
     op_manager = _get_operation_manager()
     
     try:
-        policy = _noninteractive_policy(noninteractive, decision_policy)
+        policy = noninteractive_policy(noninteractive, decision_policy)
         # Check if writes are disabled
         check_write_permission(config)
         
@@ -1426,8 +1327,7 @@ async def vcs_import_objects(
                     )
                     if policy_result.get("success") is False:
                         return policy_result
-                else:
-                    _select_interactive_mode(addin)
+                select_interactive_mode(addin, policy)
                 op_error: Exception | None = None
                 try:
                     result = _addin_json_result(
@@ -1437,7 +1337,7 @@ async def vcs_import_objects(
                     op_error = e
                     result = {"success": False, "error": str(e), "imported_count": 0}
                 finally:
-                    cleanup_error = _clear_operation_policy(addin) if policy else None
+                    cleanup_error = clear_operation_policy(addin) if policy else None
                 if cleanup_error:
                     # Secondary information: never replaces the operation's result.
                     result["policy_cleanup_error"] = cleanup_error
@@ -1446,11 +1346,10 @@ async def vcs_import_objects(
                 if op_error is None:
                     if result.get("success") and "imported_count" not in result:
                         result["imported_count"] = "See log for details"
-                    result = _apply_decision_result(result, result)
+                    result = surface_own_decision(result)
                 return _attach_log_context(result, src_path, "Merge")
             
-            if not policy:
-                _select_interactive_mode(addin)
+            select_interactive_mode(addin, policy)
 
             # Every branch below ends with one payload for the normaliser.
             # The add-in's sync return is a start result, never a final one.
@@ -1474,10 +1373,9 @@ async def vcs_import_objects(
                 )
 
                 try:
-                    if policy:
-                        async_result = addin.call_async(callback_info, "MergeBuild", policy)
-                    else:
-                        async_result = addin.call_async(callback_info, "MergeBuild")
+                    async_result = addin.call_async(
+                        callback_info, "MergeBuild", *policy_args(policy)
+                    )
 
                     if async_result.get("async"):
                         # Started: the callback carries the final result.
@@ -1491,8 +1389,8 @@ async def vcs_import_objects(
                         # The add-in already ran the merge inline; re-running it
                         # here would merge twice. Its inline result is final.
                         op_manager.unregister_operation(operation_id)
-                        final = _parse_addin_payload(async_result.get("result"))
-                    elif _is_start_refusal(async_result):
+                        final = parse_addin_payload(async_result.get("result"))
+                    elif is_start_refusal(async_result):
                         # Refusals are also posted to the callback. Unregistering
                         # makes the first arrival win; the duplicate is dropped.
                         op_manager.unregister_operation(operation_id)
@@ -1513,7 +1411,7 @@ async def vcs_import_objects(
             return _normalize_import_result(final, db_path=db_path, src_path=src_path)
 
     except InvalidDecisionPolicy as e:
-        return _invalid_policy_result(e, imported_count=0)
+        return invalid_policy_result(e, imported_count=0)
     except PermissionError as e:
         return {
             "success": False,
@@ -3206,7 +3104,7 @@ async def vcs_run_tests(
     timeout_seconds: float | None = None,
     noninteractive: bool = True,
     decision_policy: str = "block",
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """
     Run VBA tests in the database using the VCS add-in's built-in test runner.
@@ -3279,7 +3177,7 @@ async def vcs_run_tests(
         and other fields from the test runner JSON output.
     """
     try:
-        policy = _noninteractive_policy(noninteractive, decision_policy)
+        policy = noninteractive_policy(noninteractive, decision_policy)
         db_path = validate_database_path(database_path)
 
         busy_error = _check_database_busy(str(db_path))
@@ -3296,8 +3194,7 @@ async def vcs_run_tests(
             # The add-in scopes noninteractive mode inside RunFilteredTests and
             # restores it when the run ends. Do not set a process-wide mode
             # here; only an interactive run selects its mode explicitly.
-            if not policy:
-                _select_interactive_mode(addin)
+            select_interactive_mode(addin, policy)
 
             # Set the filter option (session-scoped, does not modify user's vcs-options.json)
             addin.call_sync("SetOption", "DefaultTestFilter", filter or "")
@@ -3315,12 +3212,9 @@ async def vcs_run_tests(
                     operation_id, callback_url, "cursor"
                 )
                 try:
-                    if policy:
-                        async_result = addin.call_async(
-                            callback_info, "RunFilteredTests", policy
-                        )
-                    else:
-                        async_result = addin.call_async(callback_info, "RunFilteredTests")
+                    async_result = addin.call_async(
+                        callback_info, "RunFilteredTests", *policy_args(policy)
+                    )
                     if async_result.get("sync"):
                         op_manager.unregister_operation(operation_id)
                         return _parse_test_runner_json(async_result.get("result"))
@@ -3341,12 +3235,12 @@ async def vcs_run_tests(
                 except Exception:
                     op_manager.unregister_operation(operation_id)
 
-            if policy:
-                return _parse_test_runner_json(addin.call_sync("RunFilteredTests", policy))
-            return _parse_test_runner_json(addin.call_sync("RunFilteredTests"))
+            return _parse_test_runner_json(
+                addin.call_sync("RunFilteredTests", *policy_args(policy))
+            )
 
     except InvalidDecisionPolicy as e:
-        return _invalid_policy_result(e)
+        return invalid_policy_result(e)
     except Exception as e:
         return {"success": False, "error": str(e)}
 

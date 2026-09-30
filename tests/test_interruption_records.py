@@ -12,7 +12,7 @@ from msaccess_vcs_mcp.dialog_recovery import (
     ButtonInfo,
     ProcessIdentity,
     WindowInfo,
-    dismiss_one,
+    dismiss_dialog_in_windows,
     inspect_windows,
     recover_windows,
     reset_interruptions,
@@ -55,7 +55,7 @@ def _runtime_error(pid=10):
 
 
 def _end_runtime_error(backend):
-    return dismiss_one(
+    return dismiss_dialog_in_windows(
         backend.list_windows(), DB, "hwnd:4", button="End", pid=10, responsive=True, backend=backend
     )
 
@@ -224,3 +224,59 @@ def test_free_record_survives_gated_call_on_another_database():
     asyncio.run(_register(body)(r"C:\other.accdb"))
     kept = inspect_windows([], DB, backend=backend, pid=10, responsive=True)
     assert kept["execution_interrupted"] is True
+
+
+def _compile_error():
+    return WindowInfo(
+        hwnd=5,
+        pid=10,
+        title="Microsoft Visual Basic for Applications",
+        class_name="#32770",
+        texts=("Compile error:", "Syntax error"),
+        buttons=(ButtonInfo(51, "OK"),),
+    )
+
+
+def _access_dialog_mentioning_error():
+    return WindowInfo(
+        hwnd=6,
+        pid=10,
+        title="Microsoft Access",
+        class_name="#32770",
+        texts=("The record could not be saved because of an error.",),
+        buttons=(ButtonInfo(61, "OK"),),
+    )
+
+
+def _dismiss_explicitly(window, button):
+    backend = FakeBackend([window])
+    return dismiss_dialog_in_windows(
+        [window], DB, f"hwnd:{window.hwnd}", button=button, pid=10, responsive=True, backend=backend
+    ), backend
+
+
+def _dismiss_by_recovery(window, _button):
+    backend = FakeBackend([window])
+    return recover_windows(
+        [window], DB, policy="end_runtime_error", pid=10, responsive=True, backend=backend
+    ), backend
+
+
+@pytest.mark.parametrize("dismiss", [_dismiss_explicitly, _dismiss_by_recovery])
+@pytest.mark.parametrize(
+    "window, button, is_failure",
+    [
+        (_runtime_error(), "End", True),
+        (_compile_error(), "OK", True),
+        # Wording is not a failure signature: only runtime or compile errors and End are.
+        (_access_dialog_mentioning_error(), "OK", False),
+    ],
+    ids=["runtime_error", "compile_error", "access_dialog_saying_error"],
+)
+def test_both_dismissal_paths_share_one_failure_rule(dismiss, window, button, is_failure):
+    result, backend = dismiss(window, button)
+    assert result["success"] is True
+    assert result["failure_dialog_dismissed"] is is_failure
+    assert result["interrupted"] is is_failure
+    follow = inspect_windows([], DB, backend=backend, pid=10, responsive=True)
+    assert follow["execution_interrupted"] is is_failure
