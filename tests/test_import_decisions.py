@@ -529,3 +529,89 @@ def test_single_object_invalid_policy_refused_before_access(tmp_path, tool_name,
     assert result["success"] is False
     assert result["error_pattern"] == "invalid_decision_policy"
     addin.call_sync.assert_not_called()
+
+
+@pytest.mark.parametrize("path", ["async", "inline", "fallback", "exception", "no_callback"])
+@pytest.mark.parametrize("outcome", ["success", "decision", "refusal", "started"])
+def test_public_import_result_contract(tmp_path, monkeypatch, path, outcome):
+    """Exercise the gate/config/logging wrapper as well as all merge result paths."""
+    from unittest.mock import AsyncMock
+
+    from msaccess_vcs_mcp import tools
+    from msaccess_vcs_mcp.access_gate import reset_access_gate
+    from msaccess_vcs_mcp.dialog_recovery import reset_interruptions
+
+    reset_access_gate()
+    reset_interruptions()
+    monkeypatch.setattr(tools, "_ensure_env_loaded", AsyncMock())
+    monkeypatch.setattr(tools, "load_config", lambda: {})
+    monkeypatch.setenv("ACCESS_VCS_ENABLE_LOGGING", "false")
+    monkeypatch.setenv("ACCESS_VCS_DIAGNOSTIC_LOG_DIR", str(tmp_path / "diag"))
+    log_path = tmp_path / "Merge.log"
+    log_path.write_text("merge details\n", encoding="utf-8")
+    payload = {
+        "success": True,
+        "decisions": json.dumps(DECISIONS),
+        "log_path": str(log_path),
+    }
+    if outcome == "decision":
+        payload.update(BLOCKED, success=True, decisions=json.dumps(DECISIONS))
+        payload["runtime_error"] = "Original error"
+    elif outcome == "refusal":
+        payload.update(success=False, error_pattern="merge_not_available", error="refused")
+    elif outcome == "started":
+        payload.update(STARTED)
+
+    start = {"async": True, "timeout_ms": 1000}
+    if path == "inline":
+        start = {"sync": True, "result": json.dumps(payload)}
+    elif path == "fallback":
+        start = {"unexpected": True}
+    # A refusal at the async start must never be retried.
+    if path == "async" and outcome == "refusal":
+        start = dict(payload)
+    try:
+        with _patch_import_tool(tmp_path, async_result=start) as (db, src, addin, ops):
+            ops.wait_for_completion = _wait_returning(dict(payload))
+            addin.merge_build.return_value = dict(payload)
+            if path == "exception":
+                addin.call_async.side_effect = RuntimeError("async unavailable")
+            elif path == "no_callback":
+                monkeypatch.setattr(tools, "get_callback_url", lambda: None)
+            result = asyncio.run(tools.vcs_import_objects(db, str(src)))
+            unconfirmed = outcome == "started" and path in {"fallback", "exception", "no_callback"}
+            expected = {
+                "success": outcome not in {"decision", "refusal"} and not unconfirmed,
+                "imported_count": 0 if outcome == "refusal" else "See log for details",
+                "database_path": db,
+                "source_dir": str(src),
+                "decisions": DECISIONS,
+                "log_path": str(log_path),
+                "log_path": str(log_path),
+            }
+            if outcome == "decision":
+                expected.update(
+                    decision_required=True, error_pattern="decision_required",
+                    error=BLOCKED["error"], runtime_error="Original error",
+                    log_excerpt="merge details",
+                )
+            elif outcome == "refusal":
+                expected.update(error_pattern="merge_not_available", error="refused", log_excerpt="merge details")
+            elif unconfirmed:
+                _assert_unconfirmed(result)
+                expected.update(
+                    started=True, completion_unconfirmed=True,
+                    error=result["error"], log_excerpt="merge details",
+                )
+            assert result == expected
+            if path in {"async", "inline"}:
+                addin.merge_build.assert_not_called()
+            else:
+                addin.merge_build.assert_called_once_with(db, str(src), "block")
+            if path == "async" and outcome != "refusal":
+                ops.unregister_operation.assert_not_called()
+            elif path != "no_callback":
+                ops.unregister_operation.assert_called_once_with("op-1")
+    finally:
+        reset_interruptions()
+        reset_access_gate()

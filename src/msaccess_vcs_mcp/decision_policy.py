@@ -216,3 +216,71 @@ def parse_addin_payload(value: Any) -> dict[str, Any]:
 def is_start_refusal(payload: dict[str, Any]) -> bool:
     """A sync start result that refused (or declined) the operation."""
     return payload.get("success") is False and not payload.get("async") and not payload.get("sync")
+
+
+_MERGE_COMPLETION_UNCONFIRMED_ERROR = (
+    "The merge started, but no completion callback exists on this path to "
+    "report its outcome. It may have succeeded or failed. Read log_path, or "
+    "call vcs_get_recent_calls() and vcs_get_log(log_type=\"Merge\")."
+)
+
+
+def normalize_import_result(payload: dict[str, Any]) -> dict[str, Any]:
+    """Interpret a merge completion or refusal, leaving response formatting to the tool.
+
+    Decisions override success. An unconfirmed start retains its metadata and
+    guidance, and never reports success. Log aliases stay with the handler.
+    """
+    unconfirmed = bool(payload.get("completion_unconfirmed"))
+    success = payload.get("success") is True and not unconfirmed
+    result: dict[str, Any] = {"success": success}
+    if unconfirmed:
+        result["started"] = True
+        result["completion_unconfirmed"] = True
+        result["error"] = _MERGE_COMPLETION_UNCONFIRMED_ERROR
+    elif not success:
+        result["error"] = payload.get("error") or payload.get("message") or "Import failed"
+    if payload.get("error_pattern"):
+        result["error_pattern"] = payload["error_pattern"]
+    if payload.get("runtime_error"):
+        result["runtime_error"] = payload["runtime_error"]
+    return apply_decision_result(result, payload)
+
+
+async def run_import_merge(
+    addin: VCSAddinIntegration, database_path: str, source_dir: str, policy: str | None,
+    *, callback_info: str | None = None, op_manager: Any = None,
+    operation_id: str | None = None, ctx: Any = None,
+) -> dict[str, Any]:
+    """Resolve every full-merge start path to its last add-in payload.
+
+    The handler registers the callback operation. Here we follow async starts,
+    parse inline completions, and return refusals without retrying. Missing
+    markers or an async exception fall back to sync, whose start is unconfirmed.
+    """
+    def merge_sync() -> dict[str, Any]:
+        merged = addin.merge_build(database_path, source_dir, policy)
+        if merged.get("started") and merged.get("success"):
+            merged = {**merged, "completion_unconfirmed": True}
+        return merged
+
+    if op_manager is None:
+        return merge_sync()
+    try:
+        started = addin.call_async(callback_info, "MergeBuild", *policy_args(policy))
+        if started.get("async"):
+            return await op_manager.wait_for_completion(
+                operation_id, ctx=ctx,
+                timeout_seconds=started.get("timeout_ms", 300000) / 1000,
+            )
+        op_manager.unregister_operation(operation_id)
+        if started.get("sync"):
+            # Already completed inline: never merge twice.
+            return parse_addin_payload(started.get("result"))
+        if is_start_refusal(started):
+            # Drop the duplicate refusal delivered by callback.
+            return started
+        return merge_sync()
+    except Exception:
+        op_manager.unregister_operation(operation_id)
+        return merge_sync()
