@@ -82,7 +82,8 @@ and on the callback; MCP returns it once.
 `RunFilteredTests` is different: it runs the tests before it returns, and its
 return is the final results JSON (or a refusal). `vcs_run_tests` returns a
 refusal once, normalised, and does not call `RunFilteredTests` a second time.
-A `runtime_error` in the results is kept on the result.
+A `runtime_error` in the results, or on the completion callback when the
+run went async, is kept on the result with its `errorNumber`.
 
 From VBA, the same switch is the optional policy argument:
 

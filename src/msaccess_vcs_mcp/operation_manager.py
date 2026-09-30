@@ -17,6 +17,19 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
+def _runtime_error_fields(callback: dict) -> dict[str, Any]:
+    """The add-in's ``runtime_error`` and ``errorNumber``, when the callback has them.
+
+    The error text is otherwise only in the add-in's sync return, which the
+    async path never reads.
+    """
+    return {
+        key: callback[key]
+        for key in ("runtime_error", "errorNumber")
+        if callback.get(key) is not None
+    }
+
+
 class MonotonicProgressReporter:
     """Emit MCP ``notifications/progress`` with a strictly increasing sequence.
 
@@ -438,8 +451,9 @@ class OperationManager:
                             "decisions": callback.get("decisions"),
                             "decision_required": callback.get("decision_required"),
                             "error_pattern": callback.get("error_pattern"),
+                            **_runtime_error_fields(callback),
                         }
-                        
+
                     elif msg_type == "error":
                         # Operation failed. Test runs still attach results_path
                         # here: failed assertions complete as eorFailed.
@@ -454,8 +468,9 @@ class OperationManager:
                             "decisions": callback.get("decisions"),
                             "decision_required": callback.get("decision_required"),
                             "error_pattern": callback.get("error_pattern"),
+                            **_runtime_error_fields(callback),
                         }
-                    
+
                     elif msg_type == "cancelled":
                         # Operation was cancelled
                         logger.info(f"Operation {operation_id} cancelled: {message}")
@@ -466,8 +481,9 @@ class OperationManager:
                             "log_path": callback.get("log_path"),
                             "results_path": callback.get("results_path"),
                             "result": callback.get("result"),
+                            **_runtime_error_fields(callback),
                         }
-                    
+
                     else:
                         logger.warning(f"Unknown callback type: {msg_type}")
                         

@@ -308,6 +308,7 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
         runtime_error = completion.get("runtime_error")
         if runtime_error:
             parsed["runtime_error"] = runtime_error
+            _copy_error_number(parsed, completion)
             parsed["success"] = False
             parsed.setdefault("error", completion.get("error") or runtime_error)
         parsed = apply_decision_result(parsed, completion)
@@ -329,6 +330,7 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
         }
         if runtime_error:
             decision["runtime_error"] = runtime_error
+            _copy_error_number(decision, completion)
         return apply_decision_result(decision, completion)
 
     if completion.get("cancelled"):
@@ -349,9 +351,16 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
     }
     if runtime_error:
         result["runtime_error"] = runtime_error
+        _copy_error_number(result, completion)
     if completion.get("log_path"):
         result["log_path"] = completion["log_path"]
     return result
+
+
+def _copy_error_number(result: dict[str, Any], completion: dict[str, Any]) -> None:
+    """Keep the add-in's ``errorNumber`` next to its ``runtime_error``."""
+    if completion.get("errorNumber") is not None:
+        result["errorNumber"] = completion["errorNumber"]
 
 
 def _attach_log_context(

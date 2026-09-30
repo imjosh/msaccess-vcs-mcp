@@ -261,7 +261,12 @@ Supported levels: `debug`, `info`, `warning`, `error`
 Test runs attach `log_path` and `results_path` on **complete, error, and cancelled**.
 Failed tests finish as `eorFailed` (type `error`) but still write the
 `TestResults_*.json` file; MCP loads that path rather than treating
-"Operation failed" as a lost result.
+"Operation failed" as a lost result. A run that ends before it saves results
+has no `results_path`.
+
+A root that ended on a runtime error adds `runtime_error` (the description) and
+`errorNumber` to its terminal callback. On a plain `error` the message is the
+error text; on `decision_required` both ride alongside `decisions`.
 
 ### Error Callback
 
