@@ -463,6 +463,43 @@ def test_single_object_decision_required_is_surfaced(tmp_path, tool_name, comman
     _assert_decision(result)
 
 
+# The shape ImportObject and ExportObject return for a blocked prompt (X05), with the
+# error from a raised call alongside it.
+ADDIN_SINGLE_OBJECT_BLOCKED = {
+    "success": False,
+    "error_pattern": "decision_required",
+    "decision_required": True,
+    "error": "A required decision was not covered by the decision policy.",
+    "decisions": [{
+        "kind": "decision_required",
+        "title": "Confirm",
+        "message": "Overwrite?",
+        "resolution": "decision_required",
+    }],
+    "runtime_error": "Object variable not set",
+    "errorNumber": 91,
+    "logPath": r"C:\src\logs\Merge_1.log",
+}
+
+
+@pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
+def test_single_object_addin_decision_result_is_kept_whole(tmp_path, tool_name, command):
+    events = []
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_sync.side_effect = _single_object_sync(
+            command, ADDIN_SINGLE_OBJECT_BLOCKED, events=events
+        )
+        result = _single_object_tool(tool_name)(db, "module", "modFoo")
+    assert result["success"] is False
+    assert result["decision_required"] is True
+    assert result["error_pattern"] == "decision_required"
+    assert result["decisions"] == ADDIN_SINGLE_OBJECT_BLOCKED["decisions"]
+    assert result["runtime_error"] == "Object variable not set"
+    assert result["errorNumber"] == 91
+    assert result["log_path"] == r"C:\src\logs\Merge_1.log"
+    assert events[-1] == ("ClearOperationPolicy",)
+
+
 @pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
 def test_single_object_interactive_sends_explicit_mode_and_no_policy(tmp_path, tool_name, command):
     events = []
