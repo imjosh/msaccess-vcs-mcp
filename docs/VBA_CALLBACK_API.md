@@ -267,7 +267,9 @@ has no `results_path`.
 A run that finishes but cannot write its results file (for example, a file sits where
 the `logs\` folder should be) adds `results_error`, the error the add-in logged, in
 place of `results_path`. `vcs_run_tests` returns it as `success: false` with
-`results_error` and an `error` that names the write failure.
+`results_error` and an `error` that names the write failure. If the run was also
+cancelled, the cancel takes precedence: `error` reports the cancellation, and
+`cancelled` and `results_error` are both kept.
 
 A root that ended on a runtime error adds `runtime_error` (the description) and
 `errorNumber` to its terminal callback. On a plain `error` the message is the
