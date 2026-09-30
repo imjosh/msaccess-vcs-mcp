@@ -79,7 +79,7 @@ contradictory guidance.
 **Trigger**: After the classification work, a VBA `MsgBox` with a custom caption was kind `unknown` and never clicked, so an unattended run stalled on a dialog Access cannot continue past.
 
 **Options explored**:
-- *Caption allow-list only*: the user must guess every caption in advance. Kept as a possible later widening (ticket M10), not the fix.
+- *Caption allow-list only*: the user must guess every caption in advance. Not the fix. The single-OK signature below covers OK-only dialogs of any caption.
 - *Click any OK-only dialog by button count alone*: rejected as a bare rule. The signature is a `#32770` dialog whose actionable buttons are exactly one OK (a Help button is ignored), and destructive text still blocks the click.
 - *Click multi-button custom dialogs (OK/Cancel, Yes/No)*: rejected. Picking a button is a decision the tool cannot make.
 
@@ -92,6 +92,8 @@ contradictory guidance.
 ---
 
 ## 2026-09-29 — Dialog recovery rules: identity, positive signature, interruptions, off-event-loop
+
+> **⚠ Partially superseded** (2026-09-29): rule 2 has one exception. A dialog with a single OK button and any other caption is kind `vba_msgbox` and is clicked by `safe`. See "Click OK-only VBA MsgBox of any caption (`vba_msgbox`)" above.
 
 **Trigger**: Two-axis review of commit `e982918` found the dialog-recovery code did not meet the entry below. This records the four rules the fixes (M01 to M05) implement. `specs/dialog-recovery-review-fixes.md` holds the detail.
 
@@ -114,6 +116,8 @@ contradictory guidance.
 ---
 
 ## 2026-09-29 — Noninteractive add-in runs, Win32 dialog recovery off the Access gate
+
+> **⚠ Partially superseded** (2026-09-29): "clicks only recognized OK-only dialogs" now also covers an OK-only MsgBox with any caption (`vba_msgbox`). See "Click OK-only VBA MsgBox of any caption (`vba_msgbox`)" above.
 
 **Trigger**: An agent driving Access gets stuck when the add-in or VBA opens a modal dialog, and a second MCP call cannot inspect that dialog because it waits on the same Access COM gate.
 
