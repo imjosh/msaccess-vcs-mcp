@@ -7,6 +7,7 @@ import pytest
 
 from msaccess_vcs_mcp.tools import vcs_import_objects
 from tests.test_scoped_sync import _patch_import_tool, _unwrap_sync
+from tests.interaction_mode_contract import INTERACTIVE_CONFIRMED, INTERACTIVE_REFUSED
 
 DECISIONS = [{"object": "Form1", "type": "conflict"}]
 BLOCKED = {
@@ -297,11 +298,14 @@ def test_interactive_sends_explicit_mode_before_operation(tmp_path, scoped):
         db, src, addin, ops,
     ):
         events = []
-        addin.call_sync.side_effect = lambda c, *a: events.append(c) or json.dumps({"success": True})
+        addin.call_sync.side_effect = lambda c, *a: events.append(c) or json.dumps(
+            INTERACTIVE_CONFIRMED if c == "SetInteractionMode" else {"success": True}
+        )
         addin.call_async.side_effect = lambda *a: events.append("async") or {"async": True}
         addin.merge_build.side_effect = lambda *a: events.append("merge") or {"success": True}
         _run((db, src), **kwargs)
     assert events[0] == "SetInteractionMode"
+    assert len(events) > 1
     assert "SetOperationPolicy" not in events
     addin.call_sync.assert_any_call("SetInteractionMode", 0)
 
@@ -344,7 +348,7 @@ def test_cleanup_failure_reaches_usage_log_and_keeps_operation_error(tmp_path, m
     assert cleanup[0]["error"] == "clear exploded"
 
 
-INTERACTION_REFUSAL = {"success": False, "error": "A noninteractive scope is open"}
+INTERACTION_REFUSAL = INTERACTIVE_REFUSED
 
 
 @pytest.mark.parametrize("scoped", [False, True])
@@ -358,7 +362,7 @@ def test_refused_interactive_mode_is_the_result_and_nothing_starts(tmp_path, sco
         )
         result = _run((db, src), **kwargs)
     assert result["success"] is False
-    assert result["error"] == "A noninteractive scope is open"
+    assert result == INTERACTIVE_REFUSED
     commands = [c.args[0] for c in addin.call_sync.call_args_list]
     assert commands == ["SetInteractionMode"]
     addin.call_async.assert_not_called()
@@ -448,6 +452,8 @@ def _single_object_sync(command, result, *, set_result=None, clear_error=None, e
             events.append((name, *args))
         if name == "SetOperationPolicy":
             return json.dumps(set_result or {"success": True})
+        if name == "SetInteractionMode":
+            return json.dumps(INTERACTIVE_CONFIRMED)
         if name == command:
             if isinstance(result, Exception):
                 raise result
@@ -597,7 +603,7 @@ def test_single_object_refused_interactive_mode_is_the_result(tmp_path, tool_nam
             return json.dumps(INTERACTION_REFUSAL if name == "SetInteractionMode" else {"success": True})
         addin.call_sync.side_effect = _call
         result = _single_object_tool(tool_name)(db, "form", "frmVCSMain", noninteractive=False)
-    assert result["error"] == "A noninteractive scope is open"
+    assert result == INTERACTIVE_REFUSED
     assert events == ["SetInteractionMode"]
 
 

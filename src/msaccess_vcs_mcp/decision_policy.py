@@ -67,13 +67,29 @@ def select_interactive_mode(addin: Any, policy: str | None) -> dict[str, Any] | 
     Does nothing when ``policy`` is set: a noninteractive run is scoped by the
     add-in itself. Call before the operation starts. Returns the add-in's
     refusal (for example from an enclosing noninteractive scope) as the tool
-    result, or None; on a refusal the operation must not start.
+    result, or None on confirmed acceptance. A24 or later must report success
+    and effective mode 0; older Empty returns cannot confirm interactive mode.
+    Never clear a caller-owned policy to make this selection succeed.
     """
     if policy:
         return None
     selected = _as_dict(addin.call_sync("SetInteractionMode", _INTERACTION_MODE_NORMAL))
-    if selected.get("success") is not False:
+    if (
+        selected.get("success") is True
+        and type(selected.get("effective_mode")) is int
+        and selected["effective_mode"] == _INTERACTION_MODE_NORMAL
+    ):
         return None
+    if selected.get("success") is not False:
+        return {
+            "success": False,
+            "error_pattern": "interaction_mode_unconfirmed",
+            "error": (
+                "SetInteractionMode did not confirm interactive mode; no operation started. "
+                "An A24 or later add-in build is required. Upgrade the add-in if its response "
+                "is empty or unsupported; an enclosing policy must be cleared by its owner."
+            ),
+        }
     return {
         **selected,
         "error": str(selected.get("error") or selected.get("message") or "SetInteractionMode refused"),
@@ -86,7 +102,7 @@ def policy_args(policy: str | None) -> tuple[str, ...]:
 
 
 def _as_dict(raw: Any) -> dict[str, Any]:
-    """An add-in return as a dict; anything that is not a JSON object counts as no refusal."""
+    """An add-in return as a dict; anything that is not a JSON object becomes empty."""
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)

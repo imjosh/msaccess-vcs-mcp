@@ -39,7 +39,30 @@ message in `error` and the run's `log_path`.
 
 Pass `noninteractive=False` to select interactive mode explicitly and show
 the normal prompts. MCP sends the mode before the operation starts, so the
-run does not depend on the mode the add-in was last left in.
+run does not depend on the mode the add-in was last left in. All four tools
+require `SetInteractionMode(0)` to confirm `success: true` and numeric
+`effective_mode: 0` before dispatching any operation or registering its callback.
+The A24 add-in contract returns a JSON string:
+
+```json
+{"success":true,"requested_mode":0,"effective_mode":0}
+{"success":false,"requested_mode":0,"effective_mode":2,"error_pattern":"interaction_mode_refused","error":"..."}
+```
+
+An enclosing caller-owned noninteractive scope (including one left open after
+`policy_cleanup_error`) refuses interactive selection with
+`interaction_mode_refused`. MCP returns that refusal unchanged and starts
+nothing. It never clears or weakens the enclosing policy; its owner must clear
+it with `ClearOperationPolicy`, or finish an active root, before retrying.
+
+Explicit interactive requests require an **A24 build or later**. Earlier builds
+return VBA `Empty` (Python `None`), which cannot confirm acceptance. Empty,
+missing, malformed, or otherwise unconfirmed responses return
+`success: false, error_pattern: interaction_mode_unconfirmed` without starting
+work. Upgrade the add-in for unsupported responses. This is capability detection,
+not a numeric version gate: rebuilding does not increment the add-in version.
+The add-in documents the same contract in
+[`docs/noninteractive-dialogs.md`](../../msaccess-vcs-addin/docs/noninteractive-dialogs.md).
 
 MCP sets the policy before the call and clears it in `finally`, so the
 add-in's interaction mode is restored whether the operation finishes, fails,
@@ -68,6 +91,8 @@ an `error`:
 | `operation_already_running` | Another add-in operation is running. Setting a policy or starting a merge is refused and nothing changed. A normal refusal, not a cleanup failure. |
 | `merge_not_available` | The database has no merge to run (for example a blank database). It is not retried. Run a full build (`vcs_rebuild_database`). |
 | `decision_required` | A prompt or merge conflict the policy did not cover. Carries `decisions`. |
+| `interaction_mode_refused` | The add-in could not make interactive mode effective. Its enclosing scope or active operation must be released by its owner; nothing starts. |
+| `interaction_mode_unconfirmed` | MCP could not confirm interactive mode, including VBA Empty from an older add-in. Nothing starts; unsupported responses require an A24 or later build. |
 
 The add-in's return from `MergeBuild` is a start result, not the outcome:
 the outcome arrives on the completion callback. When MCP had to start the
