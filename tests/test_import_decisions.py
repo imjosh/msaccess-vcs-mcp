@@ -233,3 +233,110 @@ def test_noninteractive_never_sends_interactive_mode(tmp_path):
         _run((db, src), object_types=["forms"])
     commands = [c.args[0] for c in addin.call_sync.call_args_list]
     assert "SetInteractionMode" not in commands
+
+
+def test_cleanup_failure_reaches_usage_log_and_keeps_operation_error(tmp_path, monkeypatch):
+    import msaccess_vcs_mcp.usage_logging as usage_logging
+
+    log_dir = tmp_path / "usage"
+    monkeypatch.setenv("ACCESS_VCS_ENABLE_LOGGING", "true")
+    monkeypatch.setenv("ACCESS_VCS_LOG_DIR", str(log_dir))
+    monkeypatch.setenv("ACCESS_VCS_DIAGNOSTIC_LOG_DIR", str(tmp_path / "diag"))
+    usage_logging.reset_logging()
+    try:
+        with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+            addin.call_sync.side_effect = _scripted_sync(
+                {"success": False, "error": "merge failed"},
+                clear_error=RuntimeError("clear exploded"),
+            )
+            result = _run((db, src), object_types=["forms"])
+    finally:
+        usage_logging.reset_logging()
+
+    assert result["success"] is False
+    assert result["error"] == "merge failed"
+    assert result["policy_cleanup_error"] == "clear exploded"
+    entries = [
+        json.loads(line)
+        for line in (log_dir / "vcs-mcp-usage.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    cleanup = [e for e in entries if e.get("event") == "policy_cleanup_failed"]
+    assert len(cleanup) == 1
+    assert cleanup[0]["error"] == "clear exploded"
+
+
+INTERACTION_REFUSAL = {"success": False, "error": "A noninteractive scope is open"}
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_refused_interactive_mode_is_the_result_and_nothing_starts(tmp_path, scoped):
+    kwargs = {"noninteractive": False}
+    if scoped:
+        kwargs["object_types"] = ["forms"]
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_sync.side_effect = lambda c, *a: (
+            json.dumps(INTERACTION_REFUSAL) if c == "SetInteractionMode" else json.dumps({"success": True})
+        )
+        result = _run((db, src), **kwargs)
+    assert result["success"] is False
+    assert result["error"] == "A noninteractive scope is open"
+    commands = [c.args[0] for c in addin.call_sync.call_args_list]
+    assert commands == ["SetInteractionMode"]
+    addin.call_async.assert_not_called()
+    addin.merge_build.assert_not_called()
+
+
+STARTED = {"success": True, "started": True, "operation_id": "op-9"}
+
+
+def _assert_unconfirmed(result):
+    assert result["success"] is not True
+    assert result["started"] is True
+    assert result["completion_unconfirmed"] is True
+    assert "vcs_get_recent_calls" in result["error"]
+
+
+def test_started_marker_on_sync_fallback_is_not_success(tmp_path):
+    with _patch_import_tool(tmp_path, async_result={"unexpected": True}) as (db, src, addin, ops):
+        addin.merge_build.return_value = dict(STARTED)
+        _assert_unconfirmed(_run((db, src)))
+
+
+def test_started_marker_on_async_exception_fallback_is_not_success(tmp_path):
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_async.side_effect = RuntimeError("boom")
+        addin.merge_build.return_value = dict(STARTED)
+        _assert_unconfirmed(_run((db, src)))
+
+
+def test_started_marker_without_callback_is_not_success(tmp_path):
+    from unittest.mock import patch
+
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.merge_build.return_value = dict(STARTED)
+        with patch("msaccess_vcs_mcp.tools.get_callback_url", return_value=None):
+            _assert_unconfirmed(_run((db, src)))
+        addin.call_async.assert_not_called()
+
+
+def test_inline_sync_success_still_normalises_as_success(tmp_path):
+    with _patch_import_tool(
+        tmp_path, async_result={"sync": True, "result": json.dumps({"success": True})}
+    ) as (db, src, addin, ops):
+        result = _run((db, src))
+    assert result["success"] is True
+    assert result["imported_count"] == "See log for details"
+    assert "completion_unconfirmed" not in result
+    assert "error" not in result
+
+
+def test_callback_success_still_normalises_as_success(tmp_path):
+    with _patch_import_tool(tmp_path, async_result={"async": True, "timeout_ms": 1000}) as (
+        db, src, addin, ops,
+    ):
+        ops.wait_for_completion = _wait_returning({"success": True, "log_path": None})
+        result = _run((db, src))
+    assert result["success"] is True
+    assert result["imported_count"] == "See log for details"
+    assert "completion_unconfirmed" not in result
+    assert "error" not in result

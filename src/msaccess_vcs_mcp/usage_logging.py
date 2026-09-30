@@ -909,6 +909,17 @@ def log_com_recovery_event(
     _write_log_entry(entry)
 
 
+def log_policy_cleanup_failed(error: str) -> None:
+    """Log a failed ``ClearOperationPolicy``: a policy may be left set in the add-in."""
+    if not _initialize_logging():
+        return
+
+    _write_log_entry({
+        "event": "policy_cleanup_failed",
+        "error": _truncate_string(error, max_length=500),
+    })
+
+
 def get_log_file_path() -> Path | None:
     """
     Get the current log file path.

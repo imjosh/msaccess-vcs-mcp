@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .usage_logging import log_diagnostic_event
+from .usage_logging import log_diagnostic_event, log_policy_cleanup_failed
 
 DECISION_POLICIES = frozenset({
     "block",
@@ -57,14 +57,23 @@ def noninteractive_policy(noninteractive: bool, decision_policy: str | None) -> 
 _INTERACTION_MODE_NORMAL = 0  # add-in eInteractionMode.eimNormal
 
 
-def select_interactive_mode(addin: Any, policy: str | None) -> None:
+def select_interactive_mode(addin: Any, policy: str | None) -> dict[str, Any] | None:
     """Send an explicit interactive mode, so the run never inherits a stale one.
 
     Does nothing when ``policy`` is set: a noninteractive run is scoped by the
-    add-in itself. Call before the operation starts.
+    add-in itself. Call before the operation starts. Returns the add-in's
+    refusal (for example from an enclosing noninteractive scope) as the tool
+    result, or None; on a refusal the operation must not start.
     """
-    if not policy:
-        addin.call_sync("SetInteractionMode", _INTERACTION_MODE_NORMAL)
+    if policy:
+        return None
+    selected = _as_dict(addin.call_sync("SetInteractionMode", _INTERACTION_MODE_NORMAL))
+    if selected.get("success") is not False:
+        return None
+    return {
+        **selected,
+        "error": str(selected.get("error") or selected.get("message") or "SetInteractionMode refused"),
+    }
 
 
 def policy_args(policy: str | None) -> tuple[str, ...]:
@@ -86,8 +95,8 @@ def clear_operation_policy(addin: Any) -> str | None:
     """Clear the add-in operation policy. Never raises; returns a failure message.
 
     ``ClearOperationPolicy`` is idempotent, so this is safe after the add-in's
-    ``Finish`` has already restored the mode. A failure is usage-logged so a
-    policy left set in the add-in is visible.
+    ``Finish`` has already restored the mode. A failure is written to the
+    usage and diagnostic logs so a policy left set in the add-in is visible.
     """
     try:
         cleared = _as_dict(addin.call_sync("ClearOperationPolicy"))
@@ -98,6 +107,7 @@ def clear_operation_policy(addin: Any) -> str | None:
     except Exception as e:
         message = str(e) or type(e).__name__
     log_diagnostic_event("policy_cleanup_failed", error=message)
+    log_policy_cleanup_failed(message)
     return message
 
 
