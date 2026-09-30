@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -181,3 +182,43 @@ def test_wait_for_completion_omits_runtime_error_when_absent():
     result = asyncio.run(_run())
     assert "runtime_error" not in result
     assert "errorNumber" not in result
+
+
+@pytest.mark.parametrize("terminal_type", ["complete", "error", "cancelled"])
+def test_progress_delivery_failure_preserves_operation_outcome(terminal_type, caplog):
+    """Notification failures stay diagnostic and do not stop callback processing."""
+    manager = OperationManager.get_instance()
+    operation_id, _queue = manager.register_operation(timeout_ms=5000)
+    ctx = MagicMock()
+    ctx.report_progress = AsyncMock(side_effect=[RuntimeError("client disconnected"), None])
+    caplog.set_level(logging.DEBUG, logger="msaccess_vcs_mcp.operation_manager")
+
+    async def _run():
+        manager.route_callback(operation_id, {
+            "type": "progress", "progress": 28, "total": 30, "message": "queries",
+        })
+        manager.route_callback(operation_id, {"type": "log", "message": "exporting modules"})
+        manager.route_callback(operation_id, {
+            "type": terminal_type,
+            "message": "finished",
+            "log_path": r"C:\src\logs\Export_1.log",
+        })
+        return await manager.wait_for_completion(operation_id, ctx=ctx, timeout_seconds=2)
+
+    result = asyncio.run(_run())
+
+    assert result["success"] is (terminal_type == "complete")
+    assert result["log_path"] == r"C:\src\logs\Export_1.log"
+    if terminal_type == "complete":
+        assert result["log_messages"] == ["exporting modules"]
+    elif terminal_type == "error":
+        assert result["error"] == "finished"
+    else:
+        assert result["cancelled"] is True
+    assert manager.pending_count() == 0
+    assert [call.kwargs["progress"] for call in ctx.report_progress.await_args_list] == [1.0, 2.0]
+    assert all(call.kwargs["total"] is None for call in ctx.report_progress.await_args_list)
+    failure = next(record for record in caplog.records if "Failed to report progress" in record.message)
+    assert failure.levelno == logging.WARNING
+    assert failure.exc_info is not None
+    assert "Progress reported: 2.0 - exporting modules" in caplog.text

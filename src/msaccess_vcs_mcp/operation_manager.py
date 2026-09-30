@@ -89,6 +89,12 @@ class MonotonicProgressReporter:
             self._last += 1.0
             display = self.format_message(message, vba_progress, vba_total)
             if not ctx or not hasattr(ctx, "report_progress"):
+                logger.debug(
+                    "Progress not reported (ctx=%s, has_method=%s): %s",
+                    ctx is not None,
+                    hasattr(ctx, "report_progress"),
+                    display,
+                )
                 return
             try:
                 await ctx.report_progress(
@@ -96,8 +102,9 @@ class MonotonicProgressReporter:
                     total=None,
                     message=display or None,
                 )
+                logger.debug("Progress reported: %s - %s", self._last, display)
             except Exception as e:
-                logger.debug(f"Could not report progress: {e}")
+                logger.warning("Failed to report progress: %s", e, exc_info=True)
 
 
 @dataclass
@@ -406,6 +413,14 @@ class OperationManager:
         
         timeout = timeout_seconds or operation.timeout_seconds
         
+        # Log context availability for debugging
+        if ctx is None:
+            logger.info("Operation %s: No context provided - progress reporting disabled", operation_id)
+        elif hasattr(ctx, "report_progress"):
+            logger.info("Operation %s: Context available with report_progress method", operation_id)
+        else:
+            logger.warning("Operation %s: Context provided but missing report_progress method", operation_id)
+
         # Collect log messages to include in result
         log_messages: list[str] = []
         reporter = MonotonicProgressReporter()
@@ -427,7 +442,7 @@ class OperationManager:
                             vba_progress=progress,
                             vba_total=total,
                         )
-                        logger.debug(f"Progress: {progress}/{total} - {message}")
+                        logger.debug(f"Progress callback: {progress}/{total} - {message}")
                         
                     elif msg_type == "log":
                         # Log message from VBA - collect for the result and

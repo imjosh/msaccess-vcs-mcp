@@ -30,6 +30,7 @@ import functools
 import glob
 import inspect
 import json
+import logging
 import os
 import sys
 import threading
@@ -100,6 +101,8 @@ from .usage_logging import (
 from .rebuild_watcher import get_rebuild_timeout, wait_for_rebuild_status
 from .operation_manager import MonotonicProgressReporter
 from .vba_worker_manager import get_call_vba_timeout, run_vba_resilient
+
+logger = logging.getLogger(__name__)
 
 _COMPILE_FAILURE_AGENT_GUIDANCE = (
     "Compilation failed. MCP cannot report the failing module or line. "
@@ -951,6 +954,12 @@ async def vcs_export_database(
     The add-in gitignores its ``logs`` folder, so Glob/Grep will not find
     these files. Open ``log_path`` directly, or call vcs_get_log("Export").
     """
+    logger.info(
+        "vcs_export_database called with ctx=%s, ctx_type=%s, report_progress=%s",
+        ctx is not None,
+        type(ctx).__name__ if ctx is not None else "None",
+        hasattr(ctx, "report_progress"),
+    )
     try:
         # Validate paths
         db_path = validate_database_path(database_path)
@@ -1031,6 +1040,12 @@ async def vcs_export_database(
                     elif async_result.get("async"):
                         # Wait for completion with progress reporting
                         timeout_ms = async_result.get("timeout_ms", 300000)
+                        logger.info(
+                            "Starting async operation %s with ctx=%s, ctx_type=%s",
+                            operation_id,
+                            ctx is not None,
+                            type(ctx).__name__ if ctx is not None else "None",
+                        )
                         completion = await op_manager.wait_for_completion(
                             operation_id,
                             ctx=ctx,  # Pass context for progress reporting
