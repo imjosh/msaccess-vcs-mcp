@@ -74,6 +74,22 @@ contradictory guidance.
 
 ---
 
+## 2026-09-30 — A dispatcher refusal is `operation_already_running`; non-JSON from a JSON-contract method is a failure
+
+**Trigger**: Only `vcs_call_vba` recognized the add-in's `VCS_API_REFUSED: ...` return. Every hard-coded call saw the marked string as data: policy setup looked accepted, cleanup looked successful, and `vcs_check_vba_compiled` / `vcs_compile_vba` read it as truthy (interface review F9).
+
+**Decision**:
+- The refusal is detected once, at the integration boundary. `call_sync` returns the refusal as a JSON failure object (`success: false`, `error` = the text without the marker, `error_pattern: operation_already_running`, `api_refused: true`), so every existing consumer that parses JSON sees a structured failure. `call_async` does the same for a bare refusal string and for the `{success: false, error: <marked>}` envelope. The two boolean tools check for that object before reading the value.
+- `error_pattern` is `operation_already_running`. The add-in's text (`modAPI.bas` `RefuseReentrantCall`) says "another API command is still running", the same meaning as its nested-start refusal. The add-in also has a self-dispatch variant of the text (a defect, not a caller mistake); it gets the same pattern and its message says what happened.
+- A non-JSON or non-object return from a JSON-contract method (`ExportByType`, `ImportByType`, `ExportObject`, `ImportObject`, `ExecuteSQL`, `RunVBA`, `SetOption`) is `success: false` with `error_pattern: invalid_addin_response`. Raw-contract methods (`GetOption` values, `GetLogContent` text) and `vcs_call_vba` keep wrapping a plain value as success.
+- A refused `SetOperationPolicy` or `SetInteractionMode` means the object call is not dispatched. A refused `ClearOperationPolicy` becomes `policy_cleanup_error`.
+
+**What this rules out**: A live reentrant check (a second call while the gate is held hangs the MCP, X01); the table-driven unit test `tests/test_api_refusal.py` is the evidence. `vcs_call_vba` keeps its own check and result shape. M40 and M41 build on this detection.
+
+**Relevant files**: `addin_integration.py` (`api_refusal_payload`, `call_sync`, `call_async`), `tools.py` (`_addin_json_result`, `vcs_check_vba_compiled`, `vcs_compile_vba`).
+
+---
+
 ## 2026-09-30 — One test-run verdict on every transport; an all-EMPTY run is not a success
 
 **Trigger**: M33 (interface review F1, F2, F11, F10). The sync test parser

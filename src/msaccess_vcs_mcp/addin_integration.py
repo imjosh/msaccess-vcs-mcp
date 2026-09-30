@@ -22,6 +22,26 @@ except ImportError:
 
 from .usage_logging import log_addin_probe
 
+# Prefix the add-in puts on a refused (re-entrant) call. Keep in sync with
+# modAPI.API_REFUSED_PREFIX.
+API_REFUSED_PREFIX = "VCS_API_REFUSED: "
+# Same meaning as the add-in's own refusal of a nested start: another API
+# command is still running. A self-dispatch refusal uses the same pattern;
+# its text says what happened.
+API_REFUSED_PATTERN = "operation_already_running"
+
+
+def api_refusal_payload(value: Any) -> dict[str, Any] | None:
+    """The structured failure for a dispatcher refusal string, else None."""
+    if isinstance(value, str) and value.startswith(API_REFUSED_PREFIX):
+        return {
+            "success": False,
+            "error": value[len(API_REFUSED_PREFIX):],
+            "error_pattern": API_REFUSED_PATTERN,
+            "api_refused": True,
+        }
+    return None
+
 
 def get_access_info(app) -> dict[str, Any]:
     """
@@ -722,8 +742,14 @@ class VCSAddinIntegration:
             
         Raises:
             RuntimeError: If call fails
+
+        A dispatcher refusal (``VCS_API_REFUSED: ...``) is returned as a JSON
+        failure object with ``error_pattern`` ``operation_already_running``, so
+        every consumer sees ``success: false`` instead of a truthy string.
         """
-        return self._call_addin_function(command, *args)
+        result = self._call_addin_function(command, *args)
+        refusal = api_refusal_payload(result)
+        return json.dumps(refusal) if refusal else result
     
     def call_async(self, callback_info: str, command: str, *args) -> dict[str, Any]:
         """
@@ -771,9 +797,20 @@ class VCSAddinIntegration:
             if isinstance(result, tuple) and len(result) > 0:
                 result = result[0]
             
+            # A dispatcher refusal is a marked string, not JSON.
+            refusal = api_refusal_payload(result)
+            if refusal:
+                return refusal
+
             # Parse JSON response from VBA
             if isinstance(result, str):
-                return json.loads(result)
+                envelope = json.loads(result)
+                # The add-in wraps its refusal as {success: false, error: <marked>}.
+                if isinstance(envelope, dict):
+                    wrapped = api_refusal_payload(envelope.get("error"))
+                    if wrapped:
+                        return {**envelope, **wrapped}
+                return envelope
             else:
                 # Unexpected return type
                 return {"sync": True, "result": result}

@@ -95,26 +95,29 @@ class TestAddinJsonResult:
         assert result == {"success": True, "other": 1}
         assert "log_path" not in result
 
-    def test_non_json_string_uses_raw_key(self):
+    def test_non_json_string_is_a_failure_for_json_contract(self):
         result = _addin_json_result("not json at all")
 
-        assert result == {"success": True, "result": "not json at all"}
+        assert result["success"] is False
+        assert result["error_pattern"] == "invalid_addin_response"
 
     def test_non_json_string_honours_custom_raw_key(self):
         result = _addin_json_result("plain text log body", raw_key="content")
 
         assert result == {"success": True, "content": "plain text log body"}
 
-    def test_json_scalar_uses_raw_key(self):
+    def test_json_scalar_is_a_failure_for_json_contract(self):
         """A bare JSON scalar is not a result object."""
         result = _addin_json_result("42")
 
-        assert result == {"success": True, "result": "42"}
+        assert result["success"] is False
+        assert result["error_pattern"] == "invalid_addin_response"
 
-    def test_non_string_input_uses_raw_key(self):
+    def test_non_string_input_is_a_failure_for_json_contract(self):
         result = _addin_json_result(True)
 
-        assert result == {"success": True, "result": True}
+        assert result["success"] is False
+        assert result["error_pattern"] == "invalid_addin_response"
 
     def test_failure_gains_excerpt(self, tmp_path):
         log = _write_log(tmp_path, "Merge_20260807_120000_000.log", "boom\nit broke\n")

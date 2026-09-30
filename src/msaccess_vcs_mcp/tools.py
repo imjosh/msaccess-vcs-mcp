@@ -120,7 +120,30 @@ _NOT_COMPILED_AGENT_GUIDANCE = (
 )
 
 
-def _addin_json_result(result_json: Any, raw_key: str = "result") -> dict[str, Any]:
+def _refusal_from_json(value: Any) -> dict[str, Any] | None:
+    """The refusal object call_sync returned for a dispatcher refusal, else None."""
+    if isinstance(value, str) and value.startswith("{"):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(parsed, dict) and parsed.get("api_refused") is True:
+            return parsed
+    return None
+
+
+def _non_json_result(value: Any, raw_key: str | None) -> dict[str, Any]:
+    """A non-object return: raw-contract methods wrap it, JSON-contract methods fail."""
+    if raw_key is not None:
+        return {"success": True, raw_key: value}
+    return {
+        "success": False,
+        "error": f"The add-in returned a non-JSON value where a JSON object was expected: {str(value)[:200]}",
+        "error_pattern": "invalid_addin_response",
+    }
+
+
+def _addin_json_result(result_json: Any, raw_key: str | None = None) -> dict[str, Any]:
     """
     Parse a sync add-in API response into an MCP tool result.
 
@@ -131,17 +154,19 @@ def _addin_json_result(result_json: Any, raw_key: str = "result") -> dict[str, A
 
     Args:
         result_json: Raw return value from ``VCSAddinIntegration.call_sync``
-        raw_key: Key to file the value under when it is not a JSON object
+        raw_key: Key to file the value under when it is not a JSON object. None
+            (the default) is for JSON-contract methods, where a non-object is a
+            failure. Pass a key only for raw-contract methods such as log text.
     """
     result = result_json
     if isinstance(result, str):
         try:
             result = json.loads(result)
         except json.JSONDecodeError:
-            return {"success": True, raw_key: result_json}
+            return _non_json_result(result_json, raw_key)
 
     if not isinstance(result, dict):
-        return {"success": True, raw_key: result_json}
+        return _non_json_result(result_json, raw_key)
 
     # Keep the original camelCase key for one release so existing callers
     # that already read logPath keep working.
@@ -2192,6 +2217,9 @@ def vcs_check_vba_compiled(database_path: str) -> dict[str, Any]:
             
             # Call IsVBACompiled API
             is_compiled = addin.call_sync("IsVBACompiled")
+            refusal = _refusal_from_json(is_compiled)
+            if refusal:
+                return {**refusal, "compiled": False}
             
             result: dict[str, Any] = {
                 "success": True,
@@ -2266,6 +2294,9 @@ def vcs_compile_vba(
             
             # Call CompileVBA API with suppress_warnings parameter
             compile_result = addin.call_sync("CompileVBA", suppress_warnings)
+            refusal = _refusal_from_json(compile_result)
+            if refusal:
+                return refusal
             
             if compile_result:
                 return {"success": True}
@@ -2485,13 +2516,7 @@ def vcs_execute_sql(
             
             result_json = addin.call_sync("ExecuteSQL", sql, max_rows)
             
-            if isinstance(result_json, str):
-                try:
-                    return json.loads(result_json)
-                except json.JSONDecodeError:
-                    return {"success": True, "result": result_json}
-            
-            return {"success": True, "result": result_json}
+            return _addin_json_result(result_json)
     
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -3037,14 +3062,7 @@ def vcs_run_vba(
         if not worker_result.get("success"):
             return worker_result
 
-        result_json = worker_result.get("result")
-        if isinstance(result_json, str):
-            try:
-                return json.loads(result_json)
-            except json.JSONDecodeError:
-                return {"success": True, "result": result_json}
-
-        return {"success": True, "result": result_json}
+        return _addin_json_result(worker_result.get("result"))
     
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -3104,13 +3122,7 @@ def vcs_set_option(
             
             result_json = addin.call_sync("SetOption", option_name, value)
             
-            if isinstance(result_json, str):
-                try:
-                    return json.loads(result_json)
-                except json.JSONDecodeError:
-                    return {"success": True, "result": result_json}
-            
-            return {"success": True, "result": result_json}
+            return _addin_json_result(result_json)
     
     except Exception as e:
         return {"success": False, "error": str(e)}
