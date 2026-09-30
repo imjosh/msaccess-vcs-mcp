@@ -6,14 +6,17 @@ uncovered prompt into ``error_pattern: decision_required``.
 Everything about that lives here: validating the policy, the interactive-mode and
 policy-clear calls, normalising the ``decisions`` an add-in result carries, and
 reading the start result of an async call. ``tools.py`` keeps the tool handlers and
-calls in. Setting the policy stays in ``tools._call_under_policy``, which returns
-the add-in's refusal as the tool's result.
+calls in. ``call_under_policy`` owns session-policy setup, execution and cleanup;
+handlers supply their result parser and keep tool-specific response formatting.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    from .addin_integration import VCSAddinIntegration
 
 from .usage_logging import log_diagnostic_event, log_policy_cleanup_failed
 
@@ -115,6 +118,48 @@ def clear_operation_policy(addin: Any) -> str | None:
     log_diagnostic_event("policy_cleanup_failed", error=message)
     log_policy_cleanup_failed(message)
     return message
+
+
+def call_under_policy(
+    addin: VCSAddinIntegration, policy: str | None, command: str, *args: Any,
+    parse_result: Callable[[Any], dict[str, Any]],
+) -> tuple[dict[str, Any], str]:
+    """
+    Run one sync add-in call under ``policy``, or in explicit interactive mode.
+
+    ``parse_result`` keeps tool-specific result formatting with the caller.
+    Sets the policy through ``SetOperationPolicy`` first and clears it in
+    ``finally``, so the call is covered whether or not the add-in keeps a
+    session policy past ``Finish``. A cleanup failure is attached as
+    ``policy_cleanup_error`` and never replaces the call's result.
+
+    Returns the result and how the call went: ``"refused"`` when the policy
+    set or the interactive-mode request was refused (the refusal is the
+    result and the call never started), ``"raised"`` when the call raised
+    (the result is a plain failure with the exception text), otherwise
+    ``"completed"`` with the add-in's parsed result.
+    """
+    if policy:
+        # A refusal here (for example operation_already_running)
+        # is a normal result, not an error.
+        policy_result = parse_result(addin.call_sync("SetOperationPolicy", policy))
+        if policy_result.get("success") is False:
+            return policy_result, "refused"
+    mode_refusal = select_interactive_mode(addin, policy)
+    if mode_refusal:
+        return mode_refusal, "refused"
+    state = "completed"
+    try:
+        result = parse_result(addin.call_sync(command, *args))
+    except Exception as e:
+        state = "raised"
+        result = {"success": False, "error": str(e)}
+    finally:
+        cleanup_error = clear_operation_policy(addin) if policy else None
+    if cleanup_error:
+        # Secondary information: never replaces the operation's result.
+        result["policy_cleanup_error"] = cleanup_error
+    return result, state
 
 
 def coerce_decisions(value: Any) -> Any:
