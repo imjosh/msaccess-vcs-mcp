@@ -295,7 +295,9 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
     """Build the tool result from an MCP complete/error/cancelled callback.
 
     Failed tests finish as ``eorFailed`` (callback type ``error``) but still
-    write ``results_path``. Prefer that file over the callback's error string.
+    write ``results_path``. Prefer that file over the callback's error string,
+    but keep a ``runtime_error``: the run failed even if every test passed.
+    ``decision_required`` still wins over it.
     """
     loaded = _load_test_results_file(completion.get("results_path"))
     if loaded is not None:
@@ -303,6 +305,11 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
         if completion.get("cancelled"):
             parsed["cancelled"] = True
             parsed["success"] = False
+        runtime_error = completion.get("runtime_error")
+        if runtime_error:
+            parsed["runtime_error"] = runtime_error
+            parsed["success"] = False
+            parsed.setdefault("error", completion.get("error") or runtime_error)
         parsed = apply_decision_result(parsed, completion)
         log_path = completion.get("log_path")
         if log_path:
@@ -3253,6 +3260,11 @@ async def vcs_run_tests(
                             timeout_seconds=wait_timeout,
                         )
                         return _test_results_from_completion(completion)
+                    if is_start_refusal(async_result):
+                        # Refusals are also posted to the callback. Unregistering
+                        # makes the first arrival win; the duplicate is dropped.
+                        op_manager.unregister_operation(operation_id)
+                        return _parse_test_runner_json(async_result)
                     op_manager.unregister_operation(operation_id)
                 except Exception:
                     op_manager.unregister_operation(operation_id)

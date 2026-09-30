@@ -373,10 +373,12 @@ class TestRunTestsCallOrder:
         mock_addin.call_async.assert_not_called()
 
 
-def _call_run_tests_async(tmp_path, *, completion, filter_value=None, results=None):
+def _call_run_tests_async(
+    tmp_path, *, completion, filter_value=None, results=None, async_result=None
+):
     """Call vcs_run_tests on the APIAsync callback path."""
     mock_app, mock_conn, mock_addin = _build_mocks(tmp_path)
-    mock_addin.call_async.return_value = {"async": True, "timeout_ms": 1000}
+    mock_addin.call_async.return_value = async_result or {"async": True, "timeout_ms": 1000}
 
     payload = dict(completion)
     if results is not None:
@@ -391,7 +393,7 @@ def _call_run_tests_async(tmp_path, *, completion, filter_value=None, results=No
     async def _wait(*_a, **_k):
         return payload
 
-    op_manager.wait_for_completion = _wait
+    op_manager.wait_for_completion = MagicMock(side_effect=_wait)
 
     db_path = str(tmp_path / "test.accdb")
     (tmp_path / "test.accdb").touch()
@@ -479,3 +481,81 @@ class TestRunTestsAsync:
         assert result["summary"]["subs"] == 5
         op_manager.unregister_operation.assert_called_once_with("op-1")
         op_manager.wait_for_completion.assert_not_called()
+
+
+RUNTIME_ERROR = "Error 91: Object variable not set"
+DECISIONS = [{"prompt": "Install TestAssert?", "type": "confirm"}]
+
+
+class TestRunTestsStartRefusal:
+    """A refused start is returned once and the run is not retried."""
+
+    @pytest.mark.parametrize(
+        "refusal, expected_decisions",
+        [
+            ({"success": False, "error_pattern": "operation_already_running", "error": "busy"}, None),
+            (
+                {
+                    "success": False,
+                    "error_pattern": "decision_required",
+                    "decision_required": True,
+                    "decisions": json.dumps(DECISIONS),
+                    "error": "busy",
+                },
+                DECISIONS,
+            ),
+        ],
+    )
+    def test_refused_start_is_returned_and_not_run_again(
+        self, tmp_path, refusal, expected_decisions
+    ):
+        result, _, mock_addin, op_manager = _call_run_tests_async(
+            tmp_path, completion={"success": True}, async_result=dict(refusal)
+        )
+
+        assert result["success"] is False
+        assert result["error_pattern"] == refusal["error_pattern"]
+        assert result["error"] == "busy"
+        assert result.get("decisions") == expected_decisions
+        mock_addin.call_async.assert_called_once()
+        commands = [c.args[0] for c in mock_addin.call_sync.call_args_list]
+        assert "RunFilteredTests" not in commands
+        # Unregistered so the same refusal arriving on the callback is dropped.
+        op_manager.unregister_operation.assert_called_once_with("op-1")
+        op_manager.wait_for_completion.assert_not_called()
+
+
+class TestRunTestsRuntimeError:
+    """runtime_error survives the results-file branch of a completion."""
+
+    def test_runtime_error_survives_results_file(self, tmp_path):
+        result, _, _, _ = _call_run_tests_async(
+            tmp_path,
+            completion={"success": False, "error": "Operation failed", "runtime_error": RUNTIME_ERROR},
+            results=SAMPLE_RESULTS_ALL_PASS,
+        )
+
+        assert result["runtime_error"] == RUNTIME_ERROR
+        assert result["success"] is False
+        assert result["summary"]["subs"] == 5
+
+    def test_decision_required_wins_over_runtime_error(self, tmp_path):
+        result, _, _, _ = _call_run_tests_async(
+            tmp_path,
+            completion={
+                "success": False,
+                "error_pattern": "decision_required",
+                "decision_required": True,
+                "decisions": DECISIONS,
+                "error": "A prompt was blocked",
+                "runtime_error": RUNTIME_ERROR,
+            },
+            results=SAMPLE_RESULTS_ALL_PASS,
+        )
+
+        assert result["success"] is False
+        assert result["decision_required"] is True
+        assert result["error_pattern"] == "decision_required"
+        assert result["error"] == "A prompt was blocked"
+        assert result["decisions"] == DECISIONS
+        assert result["runtime_error"] == RUNTIME_ERROR
