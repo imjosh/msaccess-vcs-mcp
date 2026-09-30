@@ -33,7 +33,14 @@ SMTO_ABORTIFHUNG = 0x0002
 
 ACCESS_EXE_NAMES = {"msaccess.exe", "msaccess"}
 ADDIN_CAPTIONS = {"msaccessvcs", "version control system"}
-FAILURE_KINDS = {"vba_runtime_error", "vba_compile_error"}
+VBA_RUNTIME_ERROR_KIND = "vba_runtime_error"
+VBA_COMPILE_ERROR_KIND = "vba_compile_error"
+VBA_BREAK_KIND = "vba_break"
+ACCESS_DIALOG_KIND = "access_dialog"
+ADDIN_WINDOW_KIND = "addin_window"
+# An ordinary Access window: not a dialog, never reported.
+IGNORED_KIND = "ignored"
+FAILURE_KINDS = {VBA_RUNTIME_ERROR_KIND, VBA_COMPILE_ERROR_KIND}
 # A kind other than "unknown" is assigned only by a positive signature (see
 # classify_window). Automatic recovery never clicks "unknown".
 UNKNOWN_KIND = "unknown"
@@ -41,15 +48,15 @@ UNKNOWN_KIND = "unknown"
 # MsgBox with a custom title. Positive signature is the button set alone.
 MSGBOX_KIND = "vba_msgbox"
 BLOCKING_KINDS = {
-    "vba_runtime_error",
-    "vba_compile_error",
-    "access_dialog",
+    VBA_RUNTIME_ERROR_KIND,
+    VBA_COMPILE_ERROR_KIND,
+    ACCESS_DIALOG_KIND,
     MSGBOX_KIND,
     UNKNOWN_KIND,
-    "vba_break",
+    VBA_BREAK_KIND,
 }
 # Kinds whose OK-only form the ``safe`` policy may acknowledge.
-SAFE_OK_KINDS = {"vba_compile_error", "access_dialog", MSGBOX_KIND}
+SAFE_OK_KINDS = {VBA_COMPILE_ERROR_KIND, ACCESS_DIALOG_KIND, MSGBOX_KIND}
 POLL_INTERVAL_SEC = 0.05
 DIALOG_ID_PREFIX = "hwnd:"
 _DESTRUCTIVE_TEXT = (
@@ -102,6 +109,33 @@ def _record_interruption(
         for key in [k for k in _interruptions if k[0] == int(pid) and k[1] != create_time]:
             del _interruptions[key]
         _interruptions[(int(pid), create_time)] = record
+
+
+def _interrupts_execution(kind: str, button_text: str | None) -> bool:
+    """The one rule for what makes a dismissal an interruption.
+
+    A runtime or compile error dialog, or any click on End. Both
+    ``dismiss_dialog`` and ``recover_dialogs`` use it. An ordinary Access dialog
+    is not a failure by its wording.
+    """
+    return kind in FAILURE_KINDS or _button_label(button_text or "") == "end"
+
+
+def _record_dialog_interruption(
+    report: dict[str, Any],
+    database_path: str | None,
+    item: dict[str, Any],
+    button_text: str | None,
+    message: str | None = None,
+) -> None:
+    """Record that ``item`` was dismissed from outside Access, for the target in ``report``."""
+    _record_interruption(int(report["pid"]), report.get("create_time"), database_path, {
+        "dialog_id": item["dialog_id"],
+        "kind": item["kind"],
+        "button": button_text,
+        "title": item.get("title"),
+        "message": message if message is not None else item.get("message"),
+    })
 
 
 def _interruption_for(pid: int | None, create_time: int | None) -> dict[str, Any] | None:
@@ -227,7 +261,7 @@ def dialog_timeout_sec(override: float | None = None) -> float:
 
 
 def classify_window(window: WindowInfo) -> str:
-    """Return a dialog kind, or ``ignored`` for ordinary Access windows.
+    """Return a dialog kind, or ``IGNORED_KIND`` for ordinary Access windows.
 
     A known kind comes only from a positive signature: a recognised caption,
     text, or button set. A standard dialog box that matches none is ``unknown``,
@@ -240,29 +274,29 @@ def classify_window(window: WindowInfo) -> str:
     class_name = window.class_name or ""
 
     if "[break]" in title_l:
-        return "vba_break"
+        return VBA_BREAK_KIND
     if "run-time error" in blob or "runtime error" in blob:
-        return "vba_runtime_error"
+        return VBA_RUNTIME_ERROR_KIND
     if "compile error" in blob:
-        return "vba_compile_error"
+        return VBA_COMPILE_ERROR_KIND
     if "end" in buttons and "debug" in buttons:
-        return "vba_runtime_error"
+        return VBA_RUNTIME_ERROR_KIND
 
     caption_key = title_l.strip()
     if caption_key in ADDIN_CAPTIONS or caption_key.startswith("msaccessvcs"):
-        return "addin_window"
+        return ADDIN_WINDOW_KIND
 
     if class_name == "#32770":
         if title_l.startswith("microsoft access"):
-            return "access_dialog"
+            return ACCESS_DIALOG_KIND
         if title_l.startswith("microsoft visual basic"):
-            return "access_dialog"
+            return ACCESS_DIALOG_KIND
         # Help is not a choice, so OK + Help is still a single-button box.
         actionable = {label for label in buttons if label != "help"}
         if actionable == {"ok"} and len(_actionable_buttons(window)) == 1:
             return MSGBOX_KIND
         return UNKNOWN_KIND
-    return "ignored"
+    return IGNORED_KIND
 
 
 def _actionable_buttons(window: WindowInfo) -> list[ButtonInfo]:
@@ -320,13 +354,13 @@ def auto_button(window: WindowInfo, kind: str, policy: str) -> str | None:
     """
     if policy in {"", "report"}:
         return None
-    if kind != "vba_runtime_error" and kind not in SAFE_OK_KINDS:
+    if kind != VBA_RUNTIME_ERROR_KIND and kind not in SAFE_OK_KINDS:
         return None
     if _destructive_text(window):
         return None
     if policy not in {"safe", "end_runtime_error"}:
         return None
-    if kind == "vba_runtime_error" and policy == "end_runtime_error":
+    if kind == VBA_RUNTIME_ERROR_KIND and policy == "end_runtime_error":
         if _button_named(window, "End") is not None:
             return "End"
         return None
@@ -422,9 +456,8 @@ def resolve_target(
     unconfirmed_pids = {item for item in titled if not _ident(item).name}
     owned_pids: set[int] = set()
     try:
-        wanted = os.path.normcase(os.path.abspath(database_path))
         for record in list_owned():
-            if os.path.normcase(os.path.abspath(record.database_path)) == wanted:
+            if _same_path(record.database_path, database_path):
                 owned_pids.add(record.pid)
     except Exception:
         owned_pids = set()
@@ -542,7 +575,7 @@ def _readiness(
         return False, "no_windows_to_probe"
     if responsive is False:
         return False, "access_unresponsive"
-    if any(item.get("kind") == "vba_break" for item in dialogs):
+    if any(item.get("kind") == VBA_BREAK_KIND for item in dialogs):
         return False, "vba_break"
     if any(item.get("kind") in BLOCKING_KINDS for item in dialogs):
         return False, "blocking_dialog"
@@ -565,7 +598,7 @@ def _dialog_record(window: WindowInfo, kind: str) -> dict[str, Any]:
         "dialog_id": dialog_id_for(window.hwnd),
         "hwnd": window.hwnd,
         "kind": kind,
-        "is_dialog": kind not in {"vba_break", "addin_window", "ignored"},
+        "is_dialog": kind not in {VBA_BREAK_KIND, ADDIN_WINDOW_KIND, IGNORED_KIND},
         "title": window.title,
         "message": message,
         "buttons": [button.text for button in window.buttons],
@@ -574,22 +607,57 @@ def _dialog_record(window: WindowInfo, kind: str) -> dict[str, Any]:
     }
 
 
+def _dialog_records(windows: Iterable[WindowInfo], pid: int) -> list[dict[str, Any]]:
+    """Dialog records for the windows of one process, ordinary windows left out."""
+    records = []
+    for window in windows:
+        if window.pid != pid:
+            continue
+        kind = classify_window(window)
+        if kind == IGNORED_KIND:
+            continue
+        records.append(_dialog_record(window, kind))
+    return records
+
+
+def _with_readiness(report: dict[str, Any], dialogs: list[dict[str, Any]]) -> dict[str, Any]:
+    """``report`` with ``dialogs`` and the fields derived from them and the gate.
+
+    ``report`` must already carry pid, create_time, identity_confirmed, running,
+    responsive, gate_busy and operation.
+    """
+    ready, _reason = _readiness(
+        identity_confirmed=bool(report.get("identity_confirmed")),
+        running=report.get("running"),
+        responsive=report.get("responsive"),
+        dialogs=dialogs,
+        gate_busy_here=_gate_busy_here(
+            {"gate_busy": report.get("gate_busy"), "operation": report.get("operation")}
+        ),
+    )
+    interruption = _interruption_for(report.get("pid"), report.get("create_time"))
+    return {
+        **report,
+        "dialogs": dialogs,
+        "break_mode": any(item.get("kind") == VBA_BREAK_KIND for item in dialogs),
+        "blocking_dialog": any(item.get("kind") in BLOCKING_KINDS for item in dialogs),
+        "ready": ready,
+        "execution_interrupted": interruption is not None,
+        "last_interruption": interruption,
+    }
+
+
 def _gate_snapshot(database_path: str | None) -> dict[str, Any]:
     current = get_access_gate().current_in_flight()
     if current is None:
         return {"gate_busy": False, "operation": None}
-    same = False
-    if database_path and current.database:
-        same = os.path.normcase(os.path.abspath(database_path)) == os.path.normcase(
-            os.path.abspath(current.database)
-        )
     return {
         "gate_busy": True,
         "operation": {
             "tool": current.tool,
             "database": current.database,
             "elapsed_ms": round((time.perf_counter() - current.started_at) * 1000, 2),
-            "same_database": same,
+            "same_database": _same_path(database_path, current.database),
         },
     }
 
@@ -611,51 +679,29 @@ def inspect_windows(
         return target
 
     chosen = int(target["pid"])
-    dialogs = []
-    for window in listed:
-        if window.pid != chosen:
-            continue
-        kind = classify_window(window)
-        if kind == "ignored":
-            continue
-        dialogs.append(_dialog_record(window, kind))
-
-    break_mode = any(item["kind"] == "vba_break" for item in dialogs)
-    blocking = [item for item in dialogs if item["kind"] in BLOCKING_KINDS]
     gate = _gate_snapshot(database_path)
-    ready, _reason = _readiness(
-        identity_confirmed=bool(target.get("identity_confirmed")),
-        running=target.get("running"),
-        responsive=responsive,
-        dialogs=dialogs,
-        gate_busy_here=_gate_busy_here(gate),
+    return _with_readiness(
+        {
+            "success": True,
+            "database_path": database_path,
+            "pid": chosen,
+            "create_time": target.get("create_time"),
+            "process_name": target.get("process_name") or None,
+            "identity_confirmed": target.get("identity_confirmed", False),
+            "running": target.get("running"),
+            "matched_by": target.get("matched_by"),
+            "responsive": responsive,
+            "gate_busy": gate["gate_busy"],
+            "operation": gate["operation"],
+            "note": (
+                "ready means this process is confirmed as a running, responsive Access, "
+                "is not in break mode, has no blocking dialog, and the MCP Access gate "
+                "is free for this database. Dismissing a dialog does not retry the "
+                "operation that was waiting."
+            ),
+        },
+        _dialog_records(listed, chosen),
     )
-    interruption = _interruption_for(chosen, target.get("create_time"))
-    return {
-        "success": True,
-        "database_path": database_path,
-        "pid": chosen,
-        "create_time": target.get("create_time"),
-        "process_name": target.get("process_name") or None,
-        "identity_confirmed": target.get("identity_confirmed", False),
-        "running": target.get("running"),
-        "matched_by": target.get("matched_by"),
-        "dialogs": dialogs,
-        "break_mode": break_mode,
-        "blocking_dialog": bool(blocking),
-        "responsive": responsive,
-        "gate_busy": gate["gate_busy"],
-        "operation": gate["operation"],
-        "ready": ready,
-        "execution_interrupted": interruption is not None,
-        "last_interruption": interruption,
-        "note": (
-            "ready means this process is confirmed as a running, responsive Access, "
-            "is not in break mode, has no blocking dialog, and the MCP Access gate "
-            "is free for this database. Dismissing a dialog does not retry the "
-            "operation that was waiting."
-        ),
-    }
 
 
 def _find_dialog(report: dict[str, Any], dialog_id: str) -> dict[str, Any] | None:
@@ -666,10 +712,6 @@ def _find_dialog(report: dict[str, Any], dialog_id: str) -> dict[str, Any] | Non
         if item.get("hwnd") == hwnd:
             return item
     return None
-
-
-def _click_timeout_ms(click_timeout_sec: float | None) -> int:
-    return int(dialog_timeout_sec(click_timeout_sec) * 1000)
 
 
 def _uncertain_click(before: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
@@ -742,9 +784,7 @@ def dismiss_one(
     window = by_hwnd.get(int(item["hwnd"]))
     closed: list[dict[str, Any]] = []
     interrupted = False
-    failure_dialog = kind in FAILURE_KINDS or (
-        kind == "access_dialog" and "error" in (item.get("message") or "").lower()
-    )
+    failure_dialog = kind in FAILURE_KINDS
 
     if button:
         if _button_label(button) == "debug":
@@ -771,19 +811,13 @@ def dismiss_one(
         if not backend.click(
             target_button.hwnd,
             expected_pid=int(before["pid"]),
-            timeout_ms=_click_timeout_ms(click_timeout_sec),
+            timeout_ms=int(dialog_timeout_sec(click_timeout_sec) * 1000),
         ):
             return _uncertain_click(before, item)
         closed.append({**item, "button": target_button.text, "how": "click"})
-        if _button_label(target_button.text) == "end" or failure_dialog:
+        if _interrupts_execution(kind, target_button.text):
             interrupted = True
-            _record_interruption(int(before["pid"]), before.get("create_time"), database_path, {
-                "dialog_id": dialog_id,
-                "kind": kind,
-                "button": target_button.text,
-                "title": item.get("title"),
-                "message": item.get("message"),
-            })
+            _record_dialog_interruption(before, database_path, item, target_button.text)
     elif action_l == "cancel":
         if kind != "addin_window":
             return {
@@ -798,13 +832,9 @@ def dismiss_one(
         backend.close(int(item["hwnd"]))
         closed.append({**item, "how": "cancel"})
         interrupted = True
-        _record_interruption(int(before["pid"]), before.get("create_time"), database_path, {
-            "dialog_id": dialog_id,
-            "kind": kind,
-            "button": None,
-            "title": item.get("title"),
-            "message": "Add-in window close requested as cancellation.",
-        })
+        _record_dialog_interruption(
+            before, database_path, item, None, "Add-in window close requested as cancellation."
+        )
     elif action_l == "close":
         if kind == "addin_window" and (before.get("operation") or {}).get("same_database"):
             return {
@@ -894,7 +924,7 @@ def recover_windows(
     )
     if not report.get("success"):
         return report
-    if policy_l in {"report"}:
+    if policy_l == "report":
         report["policy"] = policy_l
         report["automatic"] = False
         report["closed"] = []
@@ -940,7 +970,7 @@ def recover_windows(
         if not backend.click(
             button.hwnd,
             expected_pid=int(report["pid"]),
-            timeout_ms=_click_timeout_ms(click_timeout_sec),
+            timeout_ms=int(dialog_timeout_sec(click_timeout_sec) * 1000),
         ):
             # Never retry an undelivered click, and stop touching this instance.
             skipped.append({**item, "reason": "dismiss_uncertain"})
@@ -949,14 +979,8 @@ def recover_windows(
         handled += 1
         record = {**item, "button": button.text, "how": "auto"}
         closed.append(record)
-        if item["kind"] in FAILURE_KINDS or _button_label(button.text) == "end":
-            _record_interruption(int(report["pid"]), report.get("create_time"), database_path, {
-                "dialog_id": item["dialog_id"],
-                "kind": item["kind"],
-                "button": button.text,
-                "title": item.get("title"),
-                "message": item.get("message"),
-            })
+        if _interrupts_execution(item["kind"], button.text):
+            _record_dialog_interruption(report, database_path, item, button.text)
 
     result = {
         "success": True,
@@ -966,10 +990,7 @@ def recover_windows(
         "create_time": report.get("create_time"),
         "closed": closed,
         "skipped": skipped,
-        "interrupted": any(
-            _button_label(item.get("button") or "") == "end" or item.get("kind") in FAILURE_KINDS
-            for item in closed
-        ),
+        "interrupted": any(_interrupts_execution(item["kind"], item.get("button")) for item in closed),
         "failure_dialog_dismissed": any(item.get("kind") in FAILURE_KINDS for item in closed),
         "operation": report.get("operation"),
         "note": (
@@ -981,43 +1002,6 @@ def recover_windows(
         result["uncertain"] = True
         result["error_pattern"] = "dismiss_uncertain"
     return result
-
-
-def note_ready(report: dict[str, Any], remaining: list[dict[str, Any]]) -> dict[str, Any]:
-    """Recompute readiness after a click, using the dialogs that are still open."""
-    break_mode = any(item.get("kind") == "vba_break" for item in remaining)
-    blocking = [item for item in remaining if item.get("kind") in BLOCKING_KINDS]
-    pid = report.get("pid")
-    interruption = _interruption_for(pid, report.get("create_time"))
-    ready, _reason = _readiness(
-        identity_confirmed=bool(report.get("identity_confirmed")),
-        running=report.get("running"),
-        responsive=report.get("responsive"),
-        dialogs=remaining,
-        gate_busy_here=_gate_busy_here(
-            {"gate_busy": report.get("gate_busy"), "operation": report.get("operation")}
-        ),
-    )
-    report = dict(report)
-    report["dialogs"] = remaining
-    report["break_mode"] = break_mode
-    report["blocking_dialog"] = bool(blocking)
-    report["ready"] = ready
-    report["execution_interrupted"] = interruption is not None
-    report["last_interruption"] = interruption
-    return report
-
-
-def filter_remaining(after_windows: Iterable[WindowInfo], pid: int) -> list[dict[str, Any]]:
-    remaining = []
-    for window in after_windows:
-        if window.pid != pid:
-            continue
-        kind = classify_window(window)
-        if kind == "ignored":
-            continue
-        remaining.append(_dialog_record(window, kind))
-    return remaining
 
 
 class Win32Backend:
@@ -1161,6 +1145,7 @@ def _process_running(pid: int) -> bool | None:
 
 
 def _default_backend() -> WindowBackend:
+    # Kept as a function: tests patch it to swap the live Win32 backend for a fake.
     return Win32Backend()
 
 
@@ -1206,7 +1191,7 @@ def _settle_and_reinspect(
         create_time=preview.get("create_time"),
         responsive=_responsive_for(windows, pid, live, timeout),
     )
-    return note_ready(follow, filter_remaining(windows, pid)), pending
+    return _with_readiness(follow, _dialog_records(windows, pid)), pending
 
 
 def list_dialogs(

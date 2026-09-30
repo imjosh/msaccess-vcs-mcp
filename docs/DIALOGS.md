@@ -123,7 +123,10 @@ and `server_busy`.
 
 Interruption records are keyed by process identity (PID plus creation time), so
 a new process that reuses a PID starts clean. Dismissing a runtime or compile
-error records one, from `vcs_dismiss_dialog` or `vcs_recover_dialogs` alike.
+error records one, from `vcs_dismiss_dialog` or `vcs_recover_dialogs` alike, and
+so does clicking End on any dialog. Nothing else does: an `access_dialog` whose
+text merely mentions an error is not a failure, and neither tool records it or
+sets `failure_dialog_dismissed` for it.
 A record made while a gated call on that database was in flight belongs to that
 call: when the call finishes, its result is forced to `success: false`,
 `execution_interrupted: true`, `error_pattern: execution_interrupted` (original
