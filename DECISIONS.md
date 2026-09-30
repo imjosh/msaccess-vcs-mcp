@@ -74,6 +74,48 @@ contradictory guidance.
 
 ---
 
+## 2026-09-30 — One test-run verdict on every transport; an all-EMPTY run is not a success
+
+**Trigger**: M33 (interface review F1, F2, F11, F10). The sync test parser
+recalculated `success` from `failed == 0`, `errored == 0` and `subs > 0`. It
+ignored the add-in's `cancelled`, `results_error` and its own `success: false`,
+so a cancelled passing subset or an unsaved results file was `success: true`
+on the sync and inline-sync paths but `false` on the callback path. Both paths
+counted a run whose procedures were all EMPTY (no assertions) as a pass,
+although the add-in's `allPassed` requires at least one passed test.
+
+**Options explored**:
+- Keep recalculating from the summary and patch each missing field per path:
+  the paths had already drifted once, and they would again.
+- For an all-EMPTY run, add a new `error_pattern`: callers would have one more
+  pattern to learn for what is simply a failed run. Rejected.
+- Treat mixed passing and EMPTY tests as a failure: stricter than the add-in's
+  own verdict, and a single unfinished test would fail a working suite.
+- Follow the add-in's `allPassed` after the terminal fields (chosen).
+
+**Decision**: `_test_run_verdict` in `tools.py` is the only place that sets a
+test run's `success`. The sync parser, the inline sync marker and
+callback-loaded results all use it. Highest precedence first:
+`decision_required`; `execution_interrupted` (applied later by the gate, M28);
+`runtime_error` or an explicit add-in `success: false`; `cancelled`;
+`results_error`; then `allPassed`. An add-in older than `allPassed` falls back
+to `failed == 0`, `errored == 0` and `passed > 0`. The summary's `passed` and
+`failed` count assertions, so with no failure or error `passed > 0` means a
+test passed. An all-EMPTY run is `success: false` with an `error` naming the
+EMPTY count and no `error_pattern`. Passing tests mixed with EMPTY ones stay a
+success. An explicit `success: false` is never raised to true. The helper also
+keeps `decisions` (parsed from a JSON string) and sets both `log_path` and
+`logPath`.
+
+**What this rules out**: Transport-specific verdict code for tests. A caller
+that relied on an all-EMPTY run passing now sees `success: false`. Revisit if
+the add-in's `allPassed` rule changes.
+
+**Relevant files**: `src/msaccess_vcs_mcp/tools.py`, `docs/DIALOGS.md`,
+`tests/test_run_tests.py`.
+
+---
+
 ## 2026-09-30 — Require confirmed interactive mode before dispatch
 
 **Trigger**: M32. `SetInteractionMode` previously returned VBA Empty even when

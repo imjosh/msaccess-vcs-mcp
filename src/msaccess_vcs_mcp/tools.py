@@ -205,15 +205,75 @@ _TEST_RESULTS_UNSAVED_ERROR = (
 )
 
 
-def _apply_test_run_success(parsed: dict[str, Any]) -> dict[str, Any]:
-    """Set ``success`` from the runner summary, not from Operation.Result."""
-    summary = parsed.get("summary", {})
-    parsed["success"] = (
-        summary.get("failed", 1) == 0
-        and summary.get("errored", 1) == 0
-        and summary.get("subs", 0) > 0
+_TEST_CANCELLED_ERROR = "Test run was cancelled"
+
+
+_TEST_ALL_EMPTY_ERROR = (
+    "No test passed: all {empty} test procedures that ran were EMPTY (they "
+    "recorded no assertions). An all-EMPTY run usually means TestAssert did not "
+    "reach the runner."
+)
+
+
+def _test_run_verdict(result: dict[str, Any]) -> dict[str, Any]:
+    """Set ``success`` and ``error`` for a test run the same way on every transport.
+
+    Highest precedence first: ``decision_required``; ``runtime_error`` or the
+    add-in's own ``success: false``; ``cancelled``; ``results_error``; then the
+    add-in's ``allPassed``, which needs at least one passed test. An add-in
+    older than ``allPassed`` falls back to no failure or error and ``passed > 0``
+    (the summary counts assertions in ``passed``). ``execution_interrupted`` is
+    applied later, by the gate. Also keeps ``decisions`` and both log spellings.
+    """
+    if "decisions" in result:
+        result["decisions"] = coerce_decisions(result["decisions"])
+    log_path = result.get("log_path") or result.get("logPath")
+    if log_path:
+        result["log_path"] = result["logPath"] = log_path
+
+    if is_decision_required(result):
+        return surface_own_decision(result)
+
+    runtime_error = result.get("runtime_error")
+    if runtime_error or result.get("errorNumber") is not None:
+        result["success"] = False
+        result["error"] = result.get("error") or runtime_error or "Test run failed"
+        return result
+
+    # With results_error, the add-in's success: false and error text are its
+    # save-error overlay, so the detail below replaces that generic text.
+    results_error = result.get("results_error")
+    explicit_failure = result.get("success") is False
+    if explicit_failure and result.get("error") and not results_error:
+        return result
+    if result.get("cancelled"):
+        result["success"] = False
+        result["error"] = _TEST_CANCELLED_ERROR
+        return result
+    if results_error:
+        result["success"] = False
+        result["error"] = _TEST_RESULTS_UNSAVED_ERROR.format(detail=results_error)
+        return result
+    if explicit_failure:
+        result["error"] = "Test run failed"
+        return result
+
+    summary = result.get("summary") or {}
+    all_passed = result.get("allPassed")
+    if all_passed is None:
+        all_passed = (
+            summary.get("failed", 1) == 0
+            and summary.get("errored", 1) == 0
+            and summary.get("passed", 0) > 0
+        )
+    result["success"] = bool(all_passed)
+    empty = summary.get("empty", 0)
+    all_empty = empty > 0 and not any(
+        summary.get(key, 0) for key in ("passed", "failed", "errored")
     )
-    return parsed
+    if not result["success"] and all_empty and not result.get("error"):
+        result["error"] = _TEST_ALL_EMPTY_ERROR.format(empty=empty)
+    return result
 
 
 def _parse_test_runner_json(result_json: Any) -> dict[str, Any]:
@@ -234,16 +294,9 @@ def _parse_test_runner_json(result_json: Any) -> dict[str, Any]:
 
     if not isinstance(parsed, dict):
         return {"success": True, "result": parsed}
-    if is_decision_required(parsed):
-        parsed["success"] = False
-        parsed["decision_required"] = True
-        parsed["error_pattern"] = "decision_required"
-        if "decisions" in parsed:
-            parsed["decisions"] = coerce_decisions(parsed.get("decisions"))
-        return parsed
-    if "summary" not in parsed and "tests" not in parsed:
-        return parsed if "success" in parsed else {"success": True, "result": parsed}
-    return _apply_test_run_success(parsed)
+    if is_decision_required(parsed) or "summary" in parsed or "tests" in parsed:
+        return _test_run_verdict(parsed)
+    return parsed if "success" in parsed else {"success": True, "result": parsed}
 
 
 def _load_test_results_file(path: str | None) -> dict[str, Any] | None:
@@ -263,68 +316,44 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
 
     Failed tests finish as ``eorFailed`` (callback type ``error``) but still
     write ``results_path``. Prefer that file over the callback's error string,
-    but keep a ``runtime_error``: the run failed even if every test passed.
-    ``decision_required`` still wins over it.
+    add the callback's terminal fields, and let ``_test_run_verdict`` decide.
     """
+    runtime_error = completion.get("runtime_error")
     loaded = _load_test_results_file(completion.get("results_path"))
     if loaded is not None:
-        parsed = _apply_test_run_success(loaded)
         if completion.get("cancelled"):
-            parsed["cancelled"] = True
-            parsed["success"] = False
-        runtime_error = completion.get("runtime_error")
+            loaded["cancelled"] = True
         if runtime_error:
-            parsed["runtime_error"] = runtime_error
-            _copy_error_number(parsed, completion)
-            parsed["success"] = False
-            parsed.setdefault("error", completion.get("error") or runtime_error)
-        parsed = apply_decision_result(parsed, completion)
-        log_path = completion.get("log_path")
-        if log_path:
-            parsed.setdefault("log_path", log_path)
-            parsed.setdefault("logPath", log_path)
-        return parsed
+            loaded["runtime_error"] = runtime_error
+            _copy_error_number(loaded, completion)
+            loaded.setdefault("error", completion.get("error") or runtime_error)
+        if completion.get("log_path"):
+            loaded.setdefault("log_path", completion["log_path"])
+        return _test_run_verdict(apply_decision_result(loaded, completion))
 
     raw = completion.get("result")
     if raw not in (None, ""):
         return _parse_test_runner_json(raw)
 
-    runtime_error = completion.get("runtime_error")
-    results_error = completion.get("results_error")
-    if results_error and not is_decision_required(completion):
-        # The runner ran and posted its callback, but SaveResults could not write
-        # the file. Say so, with the error the add-in logged, instead of blaming
-        # a missing modTestAssert.
-        unsaved: dict[str, Any] = {
-            "success": False,
-            "error": _TEST_RESULTS_UNSAVED_ERROR.format(detail=results_error),
-            "results_error": results_error,
-        }
-        if completion.get("cancelled"):
-            unsaved["cancelled"] = True
+    if (
+        completion.get("results_error")
+        or completion.get("cancelled")
+        or is_decision_required(completion)
+    ):
+        # No results file. A results_error means the runner ran but SaveResults
+        # could not write it: say so, with the add-in's error, instead of
+        # blaming a missing modTestAssert.
+        terminal: dict[str, Any] = {"success": False}
+        for key in ("cancelled", "results_error", "log_path"):
+            if completion.get(key):
+                terminal[key] = completion[key]
         if runtime_error:
-            unsaved["runtime_error"] = runtime_error
-            _copy_error_number(unsaved, completion)
-        if completion.get("log_path"):
-            unsaved["log_path"] = completion["log_path"]
-        return unsaved
-
-    if is_decision_required(completion):
-        decision: dict[str, Any] = {
-            "success": False,
-            "error": completion.get("error") or completion.get("message"),
-        }
-        if runtime_error:
-            decision["runtime_error"] = runtime_error
-            _copy_error_number(decision, completion)
-        return apply_decision_result(decision, completion)
-
-    if completion.get("cancelled"):
-        return {
-            "success": False,
-            "cancelled": True,
-            "error": completion.get("message") or "Test run was cancelled",
-        }
+            terminal["runtime_error"] = runtime_error
+            _copy_error_number(terminal, completion)
+            terminal["error"] = completion.get("error") or completion.get("message")
+        elif completion.get("cancelled") and not completion.get("results_error"):
+            terminal["error"] = completion.get("message")
+        return _test_run_verdict(apply_decision_result(terminal, completion))
 
     if completion.get("success") and not completion.get("error"):
         return {"success": False, "error": _TEST_NO_RESULTS_ERROR}
@@ -3274,9 +3303,12 @@ async def vcs_run_tests(
             ``noninteractive`` is False.
 
     Returns:
-        Dictionary with ``success`` (True when all tests pass, none errored,
-        and at least one test ran), ``summary``, ``tests``, ``durationMs``,
-        and other fields from the test runner JSON output.
+        Dictionary with ``success`` (True when the add-in's ``allPassed`` is
+        true: nothing failed or errored and at least one test passed, so an
+        all-EMPTY run is False), ``summary``, ``tests``, ``durationMs``,
+        and other fields from the test runner JSON output. A cancelled run,
+        a ``runtime_error``, or an unsaved results file (``results_error``)
+        is never a success. The verdict is the same on every transport.
     """
     try:
         policy = noninteractive_policy(noninteractive, decision_policy)

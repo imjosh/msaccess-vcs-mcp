@@ -110,6 +110,17 @@ refusal once, normalised, and does not call `RunFilteredTests` a second time.
 A `runtime_error` in the results, or on the completion callback when the
 run went async, is kept on the result with its `errorNumber`.
 
+`vcs_run_tests` gives the same verdict whether the result came by callback,
+as an inline sync marker, or through the sync fallback. Highest precedence
+first: `decision_required`; a runtime error or the add-in's own
+`success: false`; `cancelled`; `results_error`; then the add-in's `allPassed`,
+which needs at least one passed test. An add-in without `allPassed` falls back
+to nothing failed or errored and `passed > 0`. An all-EMPTY run is
+`success: false` with an `error` that names the EMPTY count and no
+`error_pattern`; passing tests mixed with EMPTY ones are still a success.
+Results keep `decisions`, `log_path` and `logPath` when there is no
+`decision_required`.
+
 From VBA, the same switch is the optional policy argument:
 
 ```vba

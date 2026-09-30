@@ -601,44 +601,49 @@ class TestRunTestsRuntimeError:
         assert result["log_path"] == r"C:\logs\Tests.log"
 
 
+def _run_through_callback(tmp_path, payload):
+    """Post ``payload`` through a real OperationManager and return the tool result."""
+    from msaccess_vcs_mcp.operation_manager import OperationManager
+
+    mock_app, mock_conn, mock_addin = _build_mocks(tmp_path)
+    manager = OperationManager()
+
+    def _post_callback(callback_info, command, *args):
+        # The add-in posts its terminal callback while the COM call runs.
+        operation_id = json.loads(callback_info)["operation_id"]
+        manager.route_callback(operation_id, {"operation_id": operation_id, **payload})
+        return {"async": True, "timeout_ms": 5000}
+
+    mock_addin.call_async.side_effect = _post_callback
+    db_path = str(tmp_path / "test.accdb")
+    (tmp_path / "test.accdb").touch()
+
+    with (
+        patch("msaccess_vcs_mcp.tools.AccessConnection", return_value=mock_conn),
+        patch("msaccess_vcs_mcp.tools.VCSAddinIntegration", return_value=mock_addin),
+        patch("msaccess_vcs_mcp.tools.validate_database_path", return_value=tmp_path / "test.accdb"),
+        patch(
+            "msaccess_vcs_mcp.tools.get_config",
+            return_value={"ACCESS_VCS_ADDIN_PATH": str(tmp_path / "Version Control.accda")},
+        ),
+        patch("msaccess_vcs_mcp.tools.get_callback_url", return_value="http://localhost:1/cb"),
+        patch("msaccess_vcs_mcp.tools._get_operation_manager", return_value=manager),
+        patch("msaccess_vcs_mcp.tools._check_database_busy", return_value=None),
+    ):
+        from msaccess_vcs_mcp.tools import vcs_run_tests
+
+        result = asyncio.run(_unwrap(vcs_run_tests)(db_path))
+
+    mock_addin.call_sync.assert_called_once_with("SetOption", "DefaultTestFilter", "")
+    assert manager.pending_count() == 0
+    return result
+
+
 class TestRunTestsRuntimeErrorThroughCallback:
     """A callback payload travels through the real OperationManager into the result."""
 
     def _run(self, tmp_path, payload):
-        from msaccess_vcs_mcp.operation_manager import OperationManager
-
-        mock_app, mock_conn, mock_addin = _build_mocks(tmp_path)
-        manager = OperationManager()
-
-        def _post_callback(callback_info, command, *args):
-            # The add-in posts its terminal callback while the COM call runs.
-            operation_id = json.loads(callback_info)["operation_id"]
-            manager.route_callback(operation_id, {"operation_id": operation_id, **payload})
-            return {"async": True, "timeout_ms": 5000}
-
-        mock_addin.call_async.side_effect = _post_callback
-        db_path = str(tmp_path / "test.accdb")
-        (tmp_path / "test.accdb").touch()
-
-        with (
-            patch("msaccess_vcs_mcp.tools.AccessConnection", return_value=mock_conn),
-            patch("msaccess_vcs_mcp.tools.VCSAddinIntegration", return_value=mock_addin),
-            patch("msaccess_vcs_mcp.tools.validate_database_path", return_value=tmp_path / "test.accdb"),
-            patch(
-                "msaccess_vcs_mcp.tools.get_config",
-                return_value={"ACCESS_VCS_ADDIN_PATH": str(tmp_path / "Version Control.accda")},
-            ),
-            patch("msaccess_vcs_mcp.tools.get_callback_url", return_value="http://localhost:1/cb"),
-            patch("msaccess_vcs_mcp.tools._get_operation_manager", return_value=manager),
-            patch("msaccess_vcs_mcp.tools._check_database_busy", return_value=None),
-        ):
-            from msaccess_vcs_mcp.tools import vcs_run_tests
-
-            result = asyncio.run(_unwrap(vcs_run_tests)(db_path))
-
-        mock_addin.call_sync.assert_called_once_with("SetOption", "DefaultTestFilter", "")
-        assert manager.pending_count() == 0
-        return result
+        return _run_through_callback(tmp_path, payload)
 
     def test_plain_error_callback(self, tmp_path):
         result = self._run(tmp_path, {
@@ -713,3 +718,187 @@ class TestRunTestsRuntimeErrorThroughCallback:
 
         assert result["success"] is True
         assert "results_error" not in result
+
+
+PASSING_SUBSET = {"subs": 2, "assertions": 2, "passed": 2, "failed": 0, "errored": 0, "empty": 0}
+ALL_EMPTY = {"subs": 2, "assertions": 0, "passed": 0, "failed": 0, "errored": 0, "empty": 2}
+PASSING_AND_EMPTY = {"subs": 3, "assertions": 2, "passed": 2, "failed": 0, "errored": 0, "empty": 1}
+SAVE_ERROR = r"Error writing file: C:\src\logs\TestResults_1.json (Write to file failed.)"
+ADDIN_SAVE_ERROR_TEXT = "The test run finished, but its results file could not be written."
+ACKNOWLEDGED = [{"prompt": "Overwrite TestResults?", "resolution": "acknowledged"}]
+RUN_LOG = r"C:\src\logs\TestRun_1.log"
+
+
+def _results(summary, **fields):
+    """Add-in test results JSON: the sync return value and the TestResults file."""
+    return {
+        "durationMs": 20,
+        **fields,
+        "summary": dict(summary),
+        "tests": {"modTestFoo.TestOne": {"status": "PASSED", "assertions": []}},
+    }
+
+
+# add-in sync JSON, callback payload ("file" is the results file it points to),
+# expected on every transport, expected on the sync transports only.
+VERDICT_CASES = [
+    pytest.param(
+        _results(PASSING_SUBSET, cancelled=True, allPassed=False),
+        {"type": "cancelled", "message": "Operation cancelled",
+         "file": _results(PASSING_SUBSET, cancelled=True, allPassed=False)},
+        {"success": False, "cancelled": True, "summary": PASSING_SUBSET},
+        {},
+        id="cancelled-passing-subset",
+    ),
+    pytest.param(
+        _results(PASSING_SUBSET, cancelled=False, allPassed=False, success=False,
+                 results_error=SAVE_ERROR, error=ADDIN_SAVE_ERROR_TEXT),
+        {"type": "error", "message": "Operation failed", "results_error": SAVE_ERROR},
+        {"success": False, "results_error": SAVE_ERROR},
+        {"summary": PASSING_SUBSET},
+        id="results-not-written",
+    ),
+    pytest.param(
+        _results(PASSING_SUBSET, allPassed=True, success=False, error="Refused by the add-in"),
+        {"type": "complete", "message": "Operation completed successfully",
+         "file": _results(PASSING_SUBSET, allPassed=True, success=False, error="Refused by the add-in")},
+        {"success": False, "error": "Refused by the add-in"},
+        {},
+        id="explicit-success-false",
+    ),
+    pytest.param(
+        _results(ALL_EMPTY, cancelled=False, allPassed=False),
+        {"type": "error", "message": "Operation failed",
+         "file": _results(ALL_EMPTY, cancelled=False, allPassed=False)},
+        {"success": False, "summary": ALL_EMPTY},
+        {},
+        id="all-empty",
+    ),
+    pytest.param(
+        _results(ALL_EMPTY),
+        {"type": "error", "message": "Operation failed", "file": _results(ALL_EMPTY)},
+        {"success": False, "summary": ALL_EMPTY},
+        {},
+        id="all-empty-older-addin",
+    ),
+    pytest.param(
+        _results(PASSING_AND_EMPTY, cancelled=False, allPassed=True),
+        {"type": "complete", "message": "Operation completed successfully",
+         "file": _results(PASSING_AND_EMPTY, cancelled=False, allPassed=True)},
+        {"success": True},
+        {},
+        id="passing-and-empty",
+    ),
+    pytest.param(
+        _results(PASSING_SUBSET),
+        {"type": "complete", "message": "Operation completed successfully",
+         "file": _results(PASSING_SUBSET)},
+        {"success": True},
+        {},
+        id="passing-older-addin",
+    ),
+    pytest.param(
+        _results(PASSING_SUBSET, allPassed=True, decisions=json.dumps(ACKNOWLEDGED)),
+        {"type": "complete", "message": "Operation completed successfully",
+         "decisions": ACKNOWLEDGED, "file": _results(PASSING_SUBSET, allPassed=True)},
+        {"success": True, "decisions": ACKNOWLEDGED},
+        {},
+        id="acknowledged-decisions-kept",
+    ),
+    pytest.param(
+        _results(PASSING_SUBSET, allPassed=True, logPath=RUN_LOG),
+        {"type": "complete", "message": "Operation completed successfully", "log_path": RUN_LOG,
+         "file": _results(PASSING_SUBSET, allPassed=True, logPath=RUN_LOG)},
+        {"success": True, "log_path": RUN_LOG, "logPath": RUN_LOG},
+        {},
+        id="log-path-both-spellings",
+    ),
+    pytest.param(
+        _results(PASSING_SUBSET, cancelled=True, allPassed=False, success=False,
+                 decision_required=True, error_pattern="decision_required",
+                 decisions=json.dumps(DECISIONS), error="A prompt was blocked"),
+        {"type": "error", "message": "A prompt was blocked", "decision_required": True,
+         "error_pattern": "decision_required", "decisions": DECISIONS,
+         "file": _results(PASSING_SUBSET, cancelled=True, allPassed=False)},
+        {"success": False, "decision_required": True, "error_pattern": "decision_required",
+         "decisions": DECISIONS, "error": "A prompt was blocked"},
+        {},
+        id="decision-required-wins-over-cancel",
+    ),
+]
+
+
+def _run_sync_fallback(tmp_path, addin_json, _callback):
+    result, _, _ = _call_run_tests(tmp_path, call_sync_return=json.dumps(addin_json))
+    return result
+
+
+def _run_inline_sync(tmp_path, addin_json, _callback):
+    result, _, _, op_manager = _call_run_tests_async(
+        tmp_path, completion={}, async_result={"sync": True, "result": json.dumps(addin_json)}
+    )
+    op_manager.wait_for_completion.assert_not_called()
+    return result
+
+
+def _run_callback(tmp_path, _addin_json, callback):
+    payload = dict(callback)
+    results = payload.pop("file", None)
+    if results is not None:
+        results_path = tmp_path / "TestResults_1.json"
+        results_path.write_text(json.dumps(results), encoding="utf-8")
+        payload["results_path"] = str(results_path)
+    return _run_through_callback(tmp_path, payload)
+
+
+SYNC_TRANSPORTS = [
+    pytest.param(_run_sync_fallback, id="sync-fallback"),
+    pytest.param(_run_inline_sync, id="inline-sync"),
+]
+ALL_TRANSPORTS = [*SYNC_TRANSPORTS, pytest.param(_run_callback, id="callback")]
+
+
+class TestRunTestsOneVerdict:
+    """The same add-in outcome gives the same verdict on every transport."""
+
+    @pytest.mark.parametrize("run", ALL_TRANSPORTS)
+    @pytest.mark.parametrize("addin_json, callback, expected, sync_expected", VERDICT_CASES)
+    def test_verdict(self, tmp_path, run, addin_json, callback, expected, sync_expected):
+        result = run(tmp_path, addin_json, callback)
+
+        for key, value in expected.items():
+            assert result.get(key) == value, key
+        if run is not _run_callback:
+            for key, value in sync_expected.items():
+                assert result.get(key) == value, key
+        if not result["success"]:
+            assert result.get("error")
+        if "decision_required" not in expected:
+            assert "decision_required" not in result
+            assert result.get("error_pattern") is None
+
+    @pytest.mark.parametrize("run", ALL_TRANSPORTS)
+    def test_cancelled_run_keeps_its_tests(self, tmp_path, run):
+        cancelled = _results(PASSING_SUBSET, cancelled=True, allPassed=False)
+        result = run(tmp_path, cancelled, {"type": "cancelled", "file": cancelled})
+
+        assert result["success"] is False
+        assert "modTestFoo.TestOne" in result["tests"]
+
+    @pytest.mark.parametrize("run", ALL_TRANSPORTS)
+    def test_all_empty_error_names_the_empty_count(self, tmp_path, run):
+        all_empty = _results(ALL_EMPTY, cancelled=False, allPassed=False)
+        result = run(tmp_path, all_empty, {"type": "error", "file": all_empty})
+
+        assert "EMPTY" in result["error"]
+        assert "2 " in result["error"]
+        assert "error_pattern" not in result
+
+    @pytest.mark.parametrize("run", SYNC_TRANSPORTS)
+    def test_unsaved_results_use_the_x07_message(self, tmp_path, run):
+        unsaved = _results(PASSING_SUBSET, cancelled=False, allPassed=False, success=False,
+                           results_error=SAVE_ERROR, error=ADDIN_SAVE_ERROR_TEXT)
+        result = run(tmp_path, unsaved, {})
+
+        assert SAVE_ERROR in result["error"]
+        assert "modTestAssert" not in result["error"]
