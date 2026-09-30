@@ -526,7 +526,7 @@ class TestRunTestsStartRefusal:
 
 
 class TestRunTestsRuntimeError:
-    """runtime_error survives the results-file branch of a completion."""
+    """runtime_error survives every branch of a completion that carries it."""
 
     def test_runtime_error_survives_results_file(self, tmp_path):
         result, _, _, _ = _call_run_tests_async(
@@ -559,3 +559,41 @@ class TestRunTestsRuntimeError:
         assert result["error"] == "A prompt was blocked"
         assert result["decisions"] == DECISIONS
         assert result["runtime_error"] == RUNTIME_ERROR
+
+    def test_runtime_error_survives_decision_required_without_results_file(self, tmp_path):
+        result, _, _, _ = _call_run_tests_async(
+            tmp_path,
+            completion={
+                "success": False,
+                "error_pattern": "decision_required",
+                "decision_required": True,
+                "decisions": DECISIONS,
+                "error": "A prompt was blocked",
+                "runtime_error": RUNTIME_ERROR,
+                "errorNumber": 91,
+            },
+        )
+
+        assert result["success"] is False
+        assert result["decision_required"] is True
+        assert result["error_pattern"] == "decision_required"
+        assert result["error"] == "A prompt was blocked"
+        assert result["decisions"] == DECISIONS
+        assert result["runtime_error"] == RUNTIME_ERROR
+
+    def test_runtime_error_survives_plain_error_without_results_file(self, tmp_path):
+        result, _, _, _ = _call_run_tests_async(
+            tmp_path,
+            completion={
+                "success": False,
+                "error": "Operation failed",
+                "runtime_error": RUNTIME_ERROR,
+                "errorNumber": 91,
+                "log_path": r"C:\logs\Tests.log",
+            },
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "Operation failed"
+        assert result["runtime_error"] == RUNTIME_ERROR
+        assert result["log_path"] == r"C:\logs\Tests.log"

@@ -321,14 +321,15 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
     if raw not in (None, ""):
         return _parse_test_runner_json(raw)
 
+    runtime_error = completion.get("runtime_error")
     if is_decision_required(completion):
-        return apply_decision_result(
-            {
-                "success": False,
-                "error": completion.get("error") or completion.get("message"),
-            },
-            completion,
-        )
+        decision: dict[str, Any] = {
+            "success": False,
+            "error": completion.get("error") or completion.get("message"),
+        }
+        if runtime_error:
+            decision["runtime_error"] = runtime_error
+        return apply_decision_result(decision, completion)
 
     if completion.get("cancelled"):
         return {
@@ -346,6 +347,8 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
         or completion.get("message")
         or "Test run failed",
     }
+    if runtime_error:
+        result["runtime_error"] = runtime_error
     if completion.get("log_path"):
         result["log_path"] = completion["log_path"]
     return result
