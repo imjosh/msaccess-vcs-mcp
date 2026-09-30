@@ -2,8 +2,10 @@
 
 Access COM calls block while a modal dialog is open or VBA is in break mode.
 This module uses Win32 window enumeration and button messages so recovery can
-run while another MCP request is waiting on that COM call. It never sends
-keystrokes or clicks by screen coordinate.
+run while another MCP request is waiting on that COM call. Office NetUI dialogs
+(``NUIDialog``) have no Win32 buttons; their text and buttons are read and
+pressed through MSAA (see ``msaa.py``). It never sends keystrokes or clicks by
+screen coordinate.
 
 A dialog tool result describes what was found and what was clicked. Dismissing
 an error dialog does not make the failed Access operation a success.
@@ -32,6 +34,14 @@ WM_NULL = 0x0000
 SMTO_ABORTIFHUNG = 0x0002
 
 ACCESS_EXE_NAMES = {"msaccess.exe", "msaccess"}
+# Top-level classes of a standard dialog box. ``#32770`` is the Win32 dialog.
+# ``NUIDialog`` is Office NetUI: Access uses it for ``MsgBox`` with the
+# ``@``-separated bold form (the add-in's ``MsgBox2``) and for its own error
+# dialogs. Both get the same positive-signature rules.
+WIN32_DIALOG_CLASS = "#32770"
+NETUI_DIALOG_CLASS = "NUIDialog"
+NETUI_HOST_CLASS = "NetUIHWND"
+DIALOG_CLASSES = {WIN32_DIALOG_CLASS, NETUI_DIALOG_CLASS}
 ADDIN_CAPTIONS = {"msaccessvcs", "version control system"}
 VBA_RUNTIME_ERROR_KIND = "vba_runtime_error"
 VBA_COMPILE_ERROR_KIND = "vba_compile_error"
@@ -188,8 +198,16 @@ def finish_gated_call(call_id: int | None, result: Any) -> Any:
 
 @dataclass(frozen=True)
 class ButtonInfo:
+    """A dialog button.
+
+    For a Win32 button ``hwnd`` is the button window and ``path`` is None. For a
+    NetUI button ``hwnd`` is the ``NetUIHWND`` that hosts it and ``path`` is its
+    MSAA child-index path from that window's client object.
+    """
+
     hwnd: int
     text: str
+    path: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -225,8 +243,10 @@ class WindowBackend(Protocol):
 
     def process_identity(self, pid: int) -> ProcessIdentity: ...
 
-    def click(self, hwnd: int, *, expected_pid: int | None = None, timeout_ms: int = 5000) -> bool:
-        """Send BM_CLICK. True only when the message was handled within ``timeout_ms``."""
+    def click(
+        self, button: ButtonInfo, *, expected_pid: int | None = None, timeout_ms: int = 5000
+    ) -> bool:
+        """Press ``button``. True only when it was delivered within ``timeout_ms``."""
         ...
 
     def close(self, hwnd: int) -> None: ...
@@ -288,7 +308,7 @@ def classify_window(window: WindowInfo) -> str:
     if caption_key in ADDIN_CAPTIONS or caption_key.startswith("msaccessvcs"):
         return ADDIN_WINDOW_KIND
 
-    if class_name == "#32770":
+    if class_name in DIALOG_CLASSES:
         if title_l.startswith("microsoft access"):
             return ACCESS_DIALOG_KIND
         if title_l.startswith("microsoft visual basic"):
@@ -531,7 +551,7 @@ def _still_same_target(
     backend: WindowBackend,
     report: dict[str, Any],
     dialog_hwnd: int,
-    button_hwnd: int | None = None,
+    button: ButtonInfo | None = None,
 ) -> bool:
     """Re-list windows right before acting: same process, same dialog, same button."""
     pid = int(report["pid"])
@@ -543,7 +563,7 @@ def _still_same_target(
             continue
         if window.pid != pid:
             return False
-        return button_hwnd is None or any(b.hwnd == button_hwnd for b in window.buttons)
+        return button is None or button in window.buttons
     return False
 
 
@@ -810,10 +830,10 @@ def dismiss_dialog_in_windows(
             }
         target_button = _button_named(window, button)
         assert target_button is not None
-        if not _still_same_target(backend, before, int(item["hwnd"]), target_button.hwnd):
+        if not _still_same_target(backend, before, int(item["hwnd"]), target_button):
             return _dialog_changed(before, item)
         if not backend.click(
-            target_button.hwnd,
+            target_button,
             expected_pid=int(before["pid"]),
             timeout_ms=int(dialog_timeout_sec(click_timeout_sec) * 1000),
         ):
@@ -968,11 +988,11 @@ def recover_windows(
         if button is None:
             skipped.append({**item, "reason": "button_missing"})
             continue
-        if not _still_same_target(backend, report, int(item["hwnd"]), button.hwnd):
+        if not _still_same_target(backend, report, int(item["hwnd"]), button):
             skipped.append({**item, "reason": "dialog_changed"})
             continue
         if not backend.click(
-            button.hwnd,
+            button,
             expected_pid=int(report["pid"]),
             timeout_ms=int(dialog_timeout_sec(click_timeout_sec) * 1000),
         ):
@@ -1016,6 +1036,12 @@ class Win32Backend:
         import win32process
 
         found: list[WindowInfo] = []
+        access_pids: dict[int, bool] = {}
+
+        def _is_access(pid: int) -> bool:
+            if pid not in access_pids:
+                access_pids[pid] = _process_basename(pid).lower() in ACCESS_EXE_NAMES
+            return access_pids[pid]
 
         def _callback(hwnd: int, _extra: Any) -> bool:
             if not win32gui.IsWindowVisible(hwnd):
@@ -1023,7 +1049,11 @@ class Win32Backend:
             title = win32gui.GetWindowText(hwnd) or ""
             class_name = win32gui.GetClassName(hwnd) or ""
             _thread, pid = win32process.GetWindowThreadProcessId(hwnd)
-            buttons, texts = _child_contents(hwnd)
+            # Other Office apps draw NUIDialogs too; only Access's are read through MSAA.
+            if class_name == NETUI_DIALOG_CLASS and _is_access(int(pid)):
+                buttons, texts = _netui_contents(hwnd)
+            else:
+                buttons, texts = _child_contents(hwnd)
             found.append(
                 WindowInfo(
                     hwnd=int(hwnd),
@@ -1046,21 +1076,34 @@ class Win32Backend:
             running=_process_running(pid),
         )
 
-    def click(self, hwnd: int, *, expected_pid: int | None = None, timeout_ms: int = 5000) -> bool:
+    def click(
+        self, button: ButtonInfo, *, expected_pid: int | None = None, timeout_ms: int = 5000
+    ) -> bool:
         import ctypes
 
         import win32process
 
+        hwnd = int(button.hwnd)
         if expected_pid is not None:
             try:
-                _thread, owner_pid = win32process.GetWindowThreadProcessId(int(hwnd))
+                _thread, owner_pid = win32process.GetWindowThreadProcessId(hwnd)
             except Exception:
                 return False
             if int(owner_pid) != int(expected_pid):
                 return False
+        if button.path is not None:
+            # A hung window is not asked for its accessible object.
+            if not self.responsive(hwnd, timeout_ms):
+                return False
+            from . import msaa
+
+            try:
+                return msaa.press(hwnd, button.path, button.text, timeout_ms)
+            except OSError:
+                return False
         result = ctypes.c_ulong()
         sent = ctypes.windll.user32.SendMessageTimeoutW(
-            int(hwnd),
+            hwnd,
             BM_CLICK,
             0,
             0,
@@ -1108,6 +1151,34 @@ def _child_contents(hwnd: int) -> tuple[list[ButtonInfo], list[str]]:
 
     try:
         win32gui.EnumChildWindows(hwnd, _callback, None)
+    except Exception:
+        return buttons, texts
+    return buttons, texts
+
+
+def _netui_contents(hwnd: int) -> tuple[list[ButtonInfo], list[str]]:
+    """Buttons and texts of a ``NUIDialog``, read through MSAA from its ``NetUIHWND`` hosts."""
+    import win32gui
+
+    from . import msaa
+
+    hosts: list[int] = []
+
+    def _callback(child: int, _extra: Any) -> bool:
+        if (win32gui.GetClassName(child) or "") == NETUI_HOST_CLASS:
+            hosts.append(int(child))
+        return True
+
+    buttons: list[ButtonInfo] = []
+    texts: list[str] = []
+    try:
+        win32gui.EnumChildWindows(hwnd, _callback, None)
+        for host in hosts:
+            for control in msaa.read_controls(host, int(min(dialog_timeout_sec(), 2) * 1000)):
+                if control.role == msaa.ROLE_PUSHBUTTON:
+                    buttons.append(ButtonInfo(host, control.name, control.path))
+                else:
+                    texts.append(control.name)
     except Exception:
         return buttons, texts
     return buttons, texts

@@ -164,6 +164,19 @@ def _child_main(db_path: str, scenario: str) -> int:
         elif scenario == "msgbox_ok":
             app.Eval('MsgBox("dialog recovery probe",0,"ProbeTitle")')
             print(json.dumps({"event": "done"}), flush=True)
+        elif scenario == "msgbox2_ok":
+            # The exact Eval string the add-in's MsgBox2 builds; Access draws it as a NUIDialog.
+            app.Eval("MsgBox('Probe bold@netui probe line@@',0,'NetUIProbe','',0)")
+            print(json.dumps({"event": "done"}), flush=True)
+        elif scenario == "access_error":
+            # Without UserControl Access returns the error to COM instead of showing it.
+            app.UserControl = True
+            try:
+                app.DoCmd.OpenForm("NoSuchProbeForm")
+            except Exception as exc:
+                print(json.dumps({"event": "done", "error": str(exc)}), flush=True)
+            else:
+                print(json.dumps({"event": "done"}), flush=True)
         elif scenario == "msgbox_yesno":
             result = app.Eval('MsgBox("Keep this record?",4,"ConfirmKeep")')
             print(json.dumps({"event": "done", "result": int(result)}), flush=True)
@@ -326,6 +339,84 @@ def test_live_yes_no_is_not_auto_approved():
             done = _read_json(proc, 15)
             assert done and done.get("event") == "done", done
             assert int(done["result"]) == 7
+        finally:
+            _stop(proc, pid)
+            for extra in _access_pids() - before:
+                _kill(extra)
+
+
+@pytest.mark.integration
+def test_live_netui_msgbox2_is_listed_and_dismissed():
+    """An @-form MsgBox (as MsgBox2 shows) is a NUIDialog with no Win32 buttons."""
+    reset_interruptions()
+    before = _access_pids()
+    with tempfile.TemporaryDirectory(prefix="vcs-dialog-") as folder:
+        db_path = Path(folder) / f"ProbeNui-{uuid.uuid4().hex[:8]}.accdb"
+        proc = _start_child(db_path, "msgbox2_ok")
+        pid = 0
+        try:
+            ready = _wait_ready(proc, before)
+            pid = int(ready["pid"])
+            listed = _wait_dialog(db_path, pid, "NetUIProbe")
+            matches = [
+                item
+                for item in listed.get("dialogs") or []
+                if (item.get("title") or "") == "NetUIProbe"
+            ]
+            assert matches, listed
+            dialog = matches[0]
+            assert dialog["class_name"] == "NUIDialog"
+            assert dialog["kind"] == "vba_msgbox"
+            assert "Probe bold" in dialog["message"]
+            assert "netui probe line" in dialog["message"]
+            assert [_button_label(b) for b in dialog["buttons"]] == ["ok"]
+            assert listed["blocking_dialog"] is True
+            assert listed["ready"] is False
+
+            closed = dismiss_dialog(
+                str(db_path), dialog["dialog_id"], button="OK", pid=pid, timeout_seconds=5
+            )
+            assert closed["success"] is True, closed
+            assert closed["dismissed"] is True
+            done = _read_json(proc, 15)
+            assert done and done.get("event") == "done", done
+        finally:
+            _stop(proc, pid)
+            for extra in _access_pids() - before:
+                _kill(extra)
+
+
+@pytest.mark.integration
+def test_live_netui_access_error_is_reported_not_clicked_by_safe():
+    reset_interruptions()
+    before = _access_pids()
+    with tempfile.TemporaryDirectory(prefix="vcs-dialog-") as folder:
+        db_path = Path(folder) / f"ProbeNuiErr-{uuid.uuid4().hex[:8]}.accdb"
+        proc = _start_child(db_path, "access_error")
+        pid = 0
+        try:
+            ready = _wait_ready(proc, before)
+            pid = int(ready["pid"])
+            listed = _wait_dialog(db_path, pid, "NoSuchProbeForm")
+            matches = [
+                item
+                for item in listed.get("dialogs") or []
+                if "nosuchprobeform" in (item.get("message") or "").lower()
+            ]
+            assert matches, listed
+            dialog = matches[0]
+            assert dialog["class_name"] == "NUIDialog"
+            assert dialog["kind"] == "access_dialog"
+            safe = recover_dialogs(str(db_path), policy="safe", pid=pid, timeout_seconds=2)
+            assert not any(
+                item.get("dialog_id") == dialog["dialog_id"] for item in safe.get("closed") or []
+            ), safe
+            closed = dismiss_dialog(
+                str(db_path), dialog["dialog_id"], button="OK", pid=pid, timeout_seconds=5
+            )
+            assert closed["success"] is True, closed
+            done = _read_json(proc, 15)
+            assert done and done.get("event") == "done", done
         finally:
             _stop(proc, pid)
             for extra in _access_pids() - before:
