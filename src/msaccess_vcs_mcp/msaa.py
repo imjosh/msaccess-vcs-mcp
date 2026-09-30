@@ -228,8 +228,8 @@ def read_controls(hwnd: int, timeout_ms: int = 2000) -> list[Control]:
 def press(hwnd: int, path: tuple[int, ...], expected_name: str, timeout_ms: int = 2000) -> bool:
     """Run the default action of the push button at ``path`` under ``hwnd``.
 
-    True only when the control there is still a visible, enabled push button
-    named ``expected_name`` and accepted the action.
+    True only when a readable state confirms the control there is still a
+    visible, enabled push button named ``expected_name`` and accepted the action.
     """
     with _ComScope():
         current = _from_window(hwnd, timeout_ms)
@@ -246,8 +246,8 @@ def press(hwnd: int, path: tuple[int, ...], expected_name: str, timeout_ms: int 
                 current = chosen
                 if current is None:
                     return False
-            state = _int_property(current, _ACC_STATE) or 0
-            if state & (STATE_INVISIBLE | STATE_UNAVAILABLE):
+            state = _int_property(current, _ACC_STATE)
+            if state is None or state & (STATE_INVISIBLE | STATE_UNAVAILABLE):
                 return False
             if _int_property(current, _ACC_ROLE) != ROLE_PUSHBUTTON or _name(current) != expected_name:
                 return False
