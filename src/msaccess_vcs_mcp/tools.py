@@ -403,6 +403,22 @@ def _copy_error_number(result: dict[str, Any], completion: dict[str, Any]) -> No
         result["errorNumber"] = completion["errorNumber"]
 
 
+def _carry_cancel_outcome(
+    result: dict[str, Any], completion: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Copy what a completion says about cancellation onto the tool result.
+
+    ``cancelled`` is the add-in's confirmation. ``cancel_not_honored`` marks a
+    run that finished on its own after a ``vcs_cancel_operation`` request.
+    Neither is an ``error_pattern``.
+    """
+    if completion:
+        for key in ("cancelled", "cancel_not_honored"):
+            if completion.get(key):
+                result[key] = True
+    return result
+
+
 def _attach_log_context(
     result: dict[str, Any],
     source_dir: str | os.PathLike[str],
@@ -416,6 +432,8 @@ def _attach_log_context(
     and an agent told only that "the build failed" cannot search its way to the
     reason. Returning the tail inline on failure removes that dead end.
     """
+    _carry_cancel_outcome(result, completion)
+
     # Prefer an explicit path from the completion callback or an already-
     # normalized tool result (e.g. sync ImportByType / ExportByType JSON).
     log_path = (completion or {}).get("log_path") or result.get("log_path")
@@ -603,7 +621,7 @@ mcp = FastMCP(
         "- vcs_get_log(database_path*, log_type?) — read Export or Build log\n"
         "- vcs_get_recent_calls(limit?) — recent tool_call entries from the usage log\n"
         "- vcs_end_session(database_path*) — end session, remove option overrides\n"
-        "- vcs_cancel_operation(operation_id*) — cancel a running async operation\n"
+        "- vcs_cancel_operation(operation_id*) — request cancellation of a running async operation\n"
         "- vcs_list_dialogs(database_path*, pid?, create_time?, timeout_seconds?) "
         "— list Access, VBA and add-in dialogs without clicking (no Access gate)\n"
         "- vcs_dismiss_dialog(database_path*, dialog_id*, button?, action?, pid?, create_time?, "
@@ -1109,7 +1127,11 @@ async def vcs_export_database(
                         if not completion.get("success"):
                             return _attach_log_context({
                                 "success": False,
-                                "error": completion.get("error", "Export failed"),
+                                "error": (
+                                    completion.get("error")
+                                    or completion.get("message")
+                                    or "Export failed"
+                                ),
                                 "exported_count": 0,
                                 "export_path": str(export_path),
                                 "objects_by_type": {},
@@ -1647,7 +1669,11 @@ async def vcs_rebuild_database(
                         if not completion.get("success"):
                             return _attach_log_context({
                                 "success": False,
-                                "error": completion.get("error", "Build failed"),
+                                "error": (
+                                    completion.get("error")
+                                    or completion.get("message")
+                                    or "Build failed"
+                                ),
                                 "output_path": None,
                             }, src_path, "Build", completion)
                     elif async_result.get("sync"):
@@ -2114,66 +2140,59 @@ def vcs_get_recent_calls(limit: int = 10) -> dict[str, Any]:
 @vcs_tool("vcs_cancel_operation")
 def vcs_cancel_operation(operation_id: str) -> dict[str, Any]:
     """
-    Cancel a running async operation.
-    
-    Requests cancellation of a long-running operation (export, build, etc.).
-    The VBA add-in will detect the cancellation request during its next
-    DoEvents cycle and abort the operation.
-    
-    Note: Cancellation is cooperative - the operation will stop at the next
-    safe point, not immediately. The operation may take a few seconds to
-    respond depending on what it's doing.
-    
+    Request cancellation of a running async operation.
+
+    Records a cancel request for a long-running operation (export, build,
+    test run, etc.). This is a request, not a stop. The add-in reads it by
+    polling the server's ``/cancel-status`` endpoint and stops at its next safe
+    point, or finishes the run anyway.
+
+    The original call reports the outcome. Its result carries
+    ``cancelled: true`` only when the add-in confirms the cancel. A run that
+    completes despite the request returns its real outcome plus
+    ``cancel_not_honored: true``.
+
     Examples:
-        # Cancel an export operation
+        # Ask a running export to stop
         vcs_cancel_operation("a1b2c3d4-5678-90ab-cdef-1234567890ab")
-    
+
     Args:
         operation_id: The UUID of the operation to cancel
-    
+
     Returns:
         Dictionary with:
-        - success: Boolean indicating if cancellation was requested
-        - operation_id: The operation ID that was cancelled
+        - success: True when the request was recorded. False when the
+          operation is unknown or already finished.
+        - cancel_requested: True when the request was recorded. This does not
+          mean the operation stopped.
+        - operation_id: The operation the request names
         - message: Status message
     """
     op_manager = _get_operation_manager()
-    
+
     if not op_manager:
         return {
             "success": False,
             "error": "Callback system not available",
             "operation_id": operation_id,
         }
-    
-    # Request cancellation
-    cancelled = op_manager.request_cancel(operation_id)
-    
-    if cancelled:
-        # Also try to notify VBA immediately via COM (best effort)
-        # This is non-blocking - VBA will also poll /cancel-status
-        try:
-            config = get_config()
-            addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            # Attempt COM call to Cancel API - may block if Access is busy
-            # Using a short timeout would be ideal but COM doesn't support that
-            # So we just do best-effort here
-            # addin.call_sync("Cancel", operation_id)  # Uncomment when VBA side is ready
-        except Exception:
-            # COM call failed - that's OK, VBA will poll
-            pass
-        
-        return {
-            "success": True,
-            "operation_id": operation_id,
-            "message": "Cancellation requested. Operation will stop at next safe point.",
-        }
-    else:
+
+    if not op_manager.request_cancel(operation_id):
         return {
             "success": False,
             "operation_id": operation_id,
             "error": "Operation not found or already completed",
         }
+
+    return {
+        "success": True,
+        "cancel_requested": True,
+        "operation_id": operation_id,
+        "message": (
+            "Cancel requested. The operation has not stopped yet: the original "
+            "call reports cancelled: true only if the add-in confirms it."
+        ),
+    }
 
 
 @vcs_tool("vcs_check_vba_compiled")
@@ -3378,7 +3397,9 @@ async def vcs_run_tests(
                             ctx=ctx,
                             timeout_seconds=wait_timeout,
                         )
-                        return _test_results_from_completion(completion)
+                        return _carry_cancel_outcome(
+                            _test_results_from_completion(completion), completion
+                        )
                     if is_start_refusal(async_result):
                         # Refusals are also posted to the callback. Unregistering
                         # makes the first arrival win; the duplicate is dropped.

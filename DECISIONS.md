@@ -74,6 +74,30 @@ contradictory guidance.
 
 ---
 
+## 2026-09-30 — `vcs_cancel_operation` records a request; `cancelled` means the add-in confirmed it
+
+**Trigger**: M37 (interface review F7, MCP half). The tool set a flag and returned `success: true, "Operation will stop at next safe point"`, yet the add-in did not poll the flag (A28 wires that) and a run that finished anyway returned its normal result with nothing saying a cancel had been asked for. The acknowledgment read as a stop.
+
+**Options explored**:
+- Keep the wording and only fix the docs. Rejected: the result is what agents read, and it still claimed a stop.
+- Make the tool itself return `cancelled: true` or report a failed cancel after a wait. Rejected: the tool cannot know. Only the add-in's terminal callback does, and the tool must stay callable while Access is blocked.
+- Restore the commented direct `Cancel` COM call beside the poll. Rejected: it takes the Access gate's COM apartment, can block on a busy instance, and gives a second channel to keep consistent. The HTTP poll is the one channel.
+
+**Decision** (field names shared with A28 and M38):
+- The tool's result carries `cancel_requested: true` (with `success: true`) when the request was recorded. It never carries `cancelled`. An unknown or already-finished operation id is `success: false`.
+- `cancelled: true` on the original call appears only when the add-in confirms: a `cancelled` terminal callback, or `cancelled` in its final JSON. It keeps the M26 decision journal.
+- When a run ends with a `complete` or `error` callback while a request was outstanding, the original call returns its real outcome plus `cancel_not_honored: true`.
+- Neither field gets an `error_pattern`.
+- `/cancel-status/{operation_id}` answers for that id only, and stops answering true when the operation's terminal callback arrives (the flag is cleared then, and the operation is unregistered once its caller has read the result). A request that arrives after the terminal callback is refused, so it can never mark a finished run or bleed into the next one.
+- The commented-out direct `Cancel` API call is deleted.
+- The `/cancel-status` and `/cancel/{id}` response bodies keep their `cancelled` key: the add-in's poller (`clsMCP.CheckCancelled`) reads it, and it names the wire flag, not the tool result.
+
+**What this rules out**: Reporting a stop from the request alone; a second, COM-based cancel channel. The marker is an MCP result field, not an add-in field. Revisit if the add-in adds a cancel acknowledgment callback distinct from `cancelled`.
+
+**Relevant files**: `operation_manager.py` (`PendingOperation.finished` / `cancel_not_honored`, `route_callback`, `request_cancel`, `wait_for_completion`), `tools.py` (`vcs_cancel_operation`, `_carry_cancel_outcome`), `tests/test_cancel_request.py`.
+
+---
+
 ## 2026-09-30 — A dispatcher refusal is `operation_already_running`; non-JSON from a JSON-contract method is a failure
 
 **Trigger**: Only `vcs_call_vba` recognized the add-in's `VCS_API_REFUSED: ...` return. Every hard-coded call saw the marked string as data: policy setup looked accepted, cleanup looked successful, and `vcs_check_vba_compiled` / `vcs_compile_vba` read it as truthy (interface review F9).

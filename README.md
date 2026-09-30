@@ -502,7 +502,9 @@ vcs_get_version_info()
 
 #### `vcs_cancel_operation(operation_id)`
 
-Cancel a running async operation. Requests cancellation of a long-running export, build, or import. The VBA add-in will detect the cancellation during its next DoEvents cycle.
+Request cancellation of a running async operation (export, build, import, test run). This records a request; it does not stop the operation. The add-in reads the request from the server's `/cancel-status` endpoint and stops at its next safe point, or finishes anyway.
+
+The result is `success: true` with `cancel_requested: true`. An unknown or finished operation id is `success: false`. The original call reports the outcome: `cancelled: true` only when the add-in confirms the cancel, or its real outcome plus `cancel_not_honored: true` when the run completed despite the request. Neither field carries an `error_pattern`.
 
 **Args:**
 - `operation_id`: UUID of the operation to cancel (returned by async tool calls)

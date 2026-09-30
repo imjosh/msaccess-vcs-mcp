@@ -16,6 +16,17 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+TERMINAL_CALLBACK_TYPES = frozenset({"complete", "error", "cancelled"})
+
+
+def _cancel_not_honored_field(operation: "PendingOperation") -> dict[str, Any]:
+    """``cancel_not_honored: true`` when the run ended despite a cancel request.
+
+    Carried by the original call's result only. A ``cancelled`` terminal
+    callback is the one confirmation of a cancel and never gets the marker.
+    """
+    return {"cancel_not_honored": True} if operation.cancel_not_honored else {}
+
 
 def _runtime_error_fields(callback: dict) -> dict[str, Any]:
     """The add-in's ``runtime_error`` and ``errorNumber``, when the callback has them.
@@ -117,7 +128,9 @@ class PendingOperation:
     command: Optional[str] = None  # Command being executed (Export, Build, etc.)
     started_at: datetime = field(default_factory=datetime.now)
     timeout_ms: int = 300000  # 5 minutes default
-    cancelled: bool = False  # Set to True when cancellation is requested
+    cancelled: bool = False  # Live flag served by /cancel-status; cleared when the operation completes
+    finished: bool = False  # A terminal callback (complete, error, cancelled) has arrived
+    cancel_not_honored: bool = False  # A request was outstanding when a non-cancelled terminal callback arrived
     
     @property
     def timeout_seconds(self) -> float:
@@ -250,6 +263,14 @@ class OperationManager:
             logger.warning(f"Callback for unknown operation: {operation_id}")
             return False
         
+        if data.get("type") in TERMINAL_CALLBACK_TYPES and not operation.finished:
+            # The operation is over. Stop serving the request to the poller now,
+            # and remember whether it was outstanding when a run ended without
+            # confirming a cancel, so the original caller can be told.
+            operation.finished = True
+            operation.cancel_not_honored = operation.cancelled and data.get("type") != "cancelled"
+            operation.cancelled = False
+        
         # Put callback on queue - need thread-safe approach
         if self._loop:
             # Called from HTTP thread - use threadsafe method
@@ -324,15 +345,17 @@ class OperationManager:
     
     def is_cancelled(self, operation_id: str) -> bool:
         """
-        Check if an operation has been cancelled.
-        
-        This is called from the HTTP server to respond to VBA polling.
-        
+        Check if a cancel is outstanding for this operation.
+
+        This is called from the HTTP server to respond to VBA polling. Only the
+        requested operation id answers true, and only until that operation
+        completes; unknown and finished operations are never cancelled.
+
         Args:
             operation_id: The operation to check
-            
+
         Returns:
-            True if cancellation was requested
+            True if cancellation was requested and the operation has not finished
         """
         operation = self._operations.get(operation_id)
         if operation:
@@ -342,19 +365,19 @@ class OperationManager:
     
     def request_cancel(self, operation_id: str) -> bool:
         """
-        Request cancellation of an operation.
-        
-        Sets the cancelled flag on the operation. VBA will detect this
-        when it polls the /cancel-status endpoint.
-        
+        Record a cancel request for an operation.
+
+        Sets the flag the add-in reads from /cancel-status. This is a request:
+        the operation reports a cancel only when the add-in confirms it.
+
         Args:
             operation_id: The operation to cancel
-            
+
         Returns:
-            True if operation was found and marked for cancellation
+            True if the operation is running and the request was recorded
         """
         operation = self._operations.get(operation_id)
-        if operation:
+        if operation and not operation.finished:
             operation.cancelled = True
             logger.info(f"Cancellation requested for operation {operation_id}")
             return True
@@ -468,6 +491,7 @@ class OperationManager:
                             "decision_required": callback.get("decision_required"),
                             "error_pattern": callback.get("error_pattern"),
                             **_runtime_error_fields(callback),
+                            **_cancel_not_honored_field(operation),
                         }
 
                     elif msg_type == "error":
@@ -486,6 +510,7 @@ class OperationManager:
                             "decision_required": callback.get("decision_required"),
                             "error_pattern": callback.get("error_pattern"),
                             **_runtime_error_fields(callback),
+                            **_cancel_not_honored_field(operation),
                         }
 
                     elif msg_type == "cancelled":
