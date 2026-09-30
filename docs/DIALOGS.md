@@ -41,10 +41,33 @@ Pass `noninteractive=False` to select interactive mode explicitly and show
 the normal prompts. MCP sends the mode before the operation starts, so the
 run does not depend on the mode the add-in was last left in.
 
-The add-in restores its interaction mode when the operation
-finishes, fails, or is cancelled. A blocked prompt is `success: false` with
-`error_pattern: decision_required` and a `decisions` array. It is not a
-successful merge or a successful test run.
+MCP sets the policy before the call and clears it in `finally`, so the
+add-in's interaction mode is restored whether the operation finishes, fails,
+or is cancelled. `vcs_run_tests` and a full `vcs_import_objects` merge pass the
+policy inline to `RunFilteredTests` and `MergeBuild`. A category-scoped
+`vcs_import_objects`, `vcs_import_object` and `vcs_export_object` set it with
+`SetOperationPolicy`. A session policy set that way is caller-owned: the
+add-in's `Finish` does not close it, and `ClearOperationPolicy` does. Clearing
+is idempotent. A failed clear is attached as `policy_cleanup_error` (and
+written to the usage log as `policy_cleanup_failed`); it never replaces the
+operation's own result.
+
+If the add-in refuses the interaction-mode request (for example while an
+enclosing noninteractive scope is open), that refusal is the tool result, with
+the add-in's `error`, and the operation is not started.
+
+A blocked prompt is `success: false` with `error_pattern: decision_required`
+and a `decisions` array. It is not a successful merge or a successful test run.
+
+MCP passes these add-in refusals through unchanged, with `success: false` and
+an `error`:
+
+| `error_pattern` | Meaning |
+| --- | --- |
+| `invalid_decision_policy` | Unknown policy name. The message lists the valid names. MCP also refuses this before calling Access. |
+| `operation_already_running` | Another add-in operation is running. Setting a policy or starting a merge is refused and nothing changed. A normal refusal, not a cleanup failure. |
+| `merge_not_available` | The database has no merge to run (for example a blank database). It is not retried. Run a full build (`vcs_rebuild_database`). |
+| `decision_required` | A prompt or merge conflict the policy did not cover. Carries `decisions`. |
 
 The add-in's return from `MergeBuild` is a start result, not the outcome:
 the outcome arrives on the completion callback. When MCP had to start the
@@ -53,7 +76,13 @@ fell back to a sync call), `vcs_import_objects` cannot confirm the outcome.
 It returns `success: false` with `started: true` and
 `completion_unconfirmed: true`. The merge may have finished either way, so
 do not retry it blindly. Read `log_path`, or call `vcs_get_recent_calls()`
-and `vcs_get_log(log_type="Merge")`.
+and `vcs_get_log(log_type="Merge")`. A refusal arrives both as the sync return
+and on the callback; MCP returns it once.
+
+`RunFilteredTests` is different: it runs the tests before it returns, and its
+return is the final results JSON (or a refusal). `vcs_run_tests` returns a
+refusal once, normalised, and does not call `RunFilteredTests` a second time.
+A `runtime_error` in the results is kept on the result.
 
 From VBA, the same switch is the optional policy argument:
 
@@ -75,8 +104,10 @@ operation:
 - The merge conflict form (`frmVCSConflict`).
 - The folder picker used when no export folder is known.
 - The main results window (`frmVCSMain`) staying on screen after the run.
-- The extra "are you sure you want to cancel?" prompt if that window is
-  closed during a silent or noninteractive run.
+- The extra "are you sure you want to cancel?" prompt when the window of a
+  noninteractive run is closed: the add-in takes the close as the answer. A
+  silent run keeps the prompt. An unattended one (automation) takes the default
+  answer, yes, with no window; one a person started asks.
 
 These are not prevented by the add-in. Use the inspector below:
 
@@ -179,7 +210,9 @@ did not act on never extend the wait) or the timeout elapses, then inspect
 once for the report. A dialog they clicked that is still open at the deadline
 is `dismiss_uncertain`, for both tools. `end_runtime_error` does everything
 `safe` does, and adds End on a runtime-error dialog and OK on an OK-only compile
-error. It still never clicks Debug. The destructive-text check guards OK clicks
+error. It still never clicks Debug, and neither policy clicks an
+`access_dialog`; an explicit `vcs_dismiss_dialog(..., button=...)` is
+unchanged. The destructive-text check guards OK clicks
 only: End on a runtime-error dialog does not depend on it, so a runtime error
 whose text mentions "deleted" is still ended, and `safe` clicks nothing on it.
 
