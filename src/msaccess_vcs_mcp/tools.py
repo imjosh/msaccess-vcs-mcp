@@ -191,6 +191,9 @@ _DECISION_POLICIES = frozenset({
 
 class InvalidDecisionPolicy(ValueError):
     """An unknown ``decision_policy``; refused before Access is called."""
+    # Stays an exception, not an inline check: it is raised from inside the tool
+    # bodies' gate scopes and shared by two tools, and M13 moves the decision code
+    # (this included) into its own module.
 
     error_pattern = "invalid_decision_policy"
 

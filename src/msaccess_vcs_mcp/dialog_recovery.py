@@ -733,7 +733,7 @@ def _windows_for_pid(windows: Iterable[WindowInfo], pid: int) -> dict[int, Windo
     return {window.hwnd: window for window in windows if window.pid == pid}
 
 
-def dismiss_one(
+def dismiss_dialog_in_windows(
     windows: list[WindowInfo],
     database_path: str,
     dialog_id: str,
@@ -1244,7 +1244,7 @@ def dismiss_dialog(
     if not preview.get("success"):
         return preview
     responsive = _responsive_for(windows, int(preview["pid"]), live, timeout)
-    result = dismiss_one(
+    result = dismiss_dialog_in_windows(
         windows,
         database_path,
         dialog_id,

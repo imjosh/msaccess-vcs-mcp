@@ -12,7 +12,7 @@ from msaccess_vcs_mcp.dialog_recovery import (
     ButtonInfo,
     ProcessIdentity,
     WindowInfo,
-    dismiss_one,
+    dismiss_dialog_in_windows,
     inspect_windows,
     recover_windows,
     reset_interruptions,
@@ -55,7 +55,7 @@ def _runtime_error(pid=10):
 
 
 def _end_runtime_error(backend):
-    return dismiss_one(
+    return dismiss_dialog_in_windows(
         backend.list_windows(), DB, "hwnd:4", button="End", pid=10, responsive=True, backend=backend
     )
 
@@ -250,7 +250,7 @@ def _access_dialog_mentioning_error():
 
 def _dismiss_explicitly(window, button):
     backend = FakeBackend([window])
-    return dismiss_one(
+    return dismiss_dialog_in_windows(
         [window], DB, f"hwnd:{window.hwnd}", button=button, pid=10, responsive=True, backend=backend
     ), backend
 
