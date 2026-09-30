@@ -484,6 +484,9 @@ class OperationManager:
                             "results_path": callback.get("results_path"),
                             "results_error": callback.get("results_error"),
                             "result": callback.get("result"),
+                            "decisions": callback.get("decisions"),
+                            "decision_required": callback.get("decision_required"),
+                            "error_pattern": callback.get("error_pattern"),
                             **_runtime_error_fields(callback),
                         }
 
