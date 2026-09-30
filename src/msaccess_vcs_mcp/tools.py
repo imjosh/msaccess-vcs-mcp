@@ -840,6 +840,22 @@ async def _run_exempt_in_worker(name: str, logged, args: tuple, kwargs: dict) ->
         }
 
 
+def _then(func, finish):
+    """``func`` with ``finish`` applied to its result. Keeps the signature and sync or async kind."""
+    if inspect.iscoroutinefunction(func):
+        @functools.wraps(func)
+        async def run_async(*args, **kwargs):
+            return finish(await func(*args, **kwargs))
+
+        return run_async
+
+    @functools.wraps(func)
+    def run(*args, **kwargs):
+        return finish(func(*args, **kwargs))
+
+    return run
+
+
 def vcs_tool(name: str):
     """Register an MCP tool with lazy .env discovery, config reload, and logging.
 
@@ -854,7 +870,9 @@ def vcs_tool(name: str):
     2. Refreshes configuration from ``.env`` (picks up edits made while
        the server is running).
     3. Initializes or re-initializes usage logging with the current env vars.
-    4. Executes the tool body and logs the outcome.
+    4. Executes the tool body and logs the outcome. For a gated tool the
+       interruption record is applied first, so the log and the client see
+       the same final result.
 
     The wrapper is *always* an async coroutine. FastMCP detects this via
     ``inspect.iscoroutinefunction`` and awaits it correctly. Sync tool
@@ -907,14 +925,20 @@ def vcs_tool(name: str):
                     claimed["call_id"] = current.call_id
                 begin_gated_call(str(database) if database is not None else None)
 
+            # The interruption is applied inside the logging layer, so the
+            # usage entry records the result the client gets.
+            finished = with_logging(name)(
+                _then(func, lambda result: finish_gated_call(claimed.get("call_id"), result))
+            )
+
             def body(*a, **kw):
                 # One closure for both kinds: for an async tool this returns
                 # the coroutine, which the gate awaits (``is_async_body``).
                 _claim_call()
-                return logged(*a, **kw)
+                return finished(*a, **kw)
 
             try:
-                result = await gate.run_exclusive(
+                return await gate.run_exclusive(
                     name,
                     str(database) if database is not None else None,
                     body,
@@ -922,11 +946,11 @@ def vcs_tool(name: str):
                     *args,
                     **kwargs,
                 )
-            except BaseException:
+            finally:
+                # Uses up the records of a call that raised, and any attached
+                # after the handler returned: those did not interrupt it. A
+                # busy answer never ran the body, so nothing was claimed.
                 finish_gated_call(claimed.get("call_id"), None)
-                raise
-            # A busy answer never ran the body, so nothing was claimed.
-            return finish_gated_call(claimed.get("call_id"), result)
 
         return mcp.tool()(with_refresh)
     return decorator

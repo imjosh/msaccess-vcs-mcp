@@ -173,7 +173,11 @@ def begin_gated_call(database_path: str | None) -> None:
 def finish_gated_call(call_id: int | None, result: Any) -> Any:
     """Use up the interruption records of a finished gated call.
 
-    Precedence: ``decision_required`` > ``execution_interrupted`` > plain error.
+    An interrupted result is ``success: false`` with ``execution_interrupted:
+    true``. The primary ``error_pattern`` follows the precedence
+    ``decision_required`` > ``execution_interrupted`` > plain error, so a
+    decision-required result keeps its pattern, decisions and error text and
+    only gains the flag.
     """
     if call_id is None:
         return result
@@ -182,11 +186,11 @@ def finish_gated_call(call_id: int | None, result: Any) -> Any:
         records = [_interruptions.pop(k) for k in matched]
     if not records or not isinstance(result, dict):
         return result
-    if result.get("decision_required") or result.get("error_pattern") == "decision_required":
-        return result
     record = records[-1]
     result["success"] = False
     result["execution_interrupted"] = True
+    if result.get("decision_required") or result.get("error_pattern") == "decision_required":
+        return result
     result["error_pattern"] = "execution_interrupted"
     if not result.get("error"):
         detail = record.get("message") or "a runtime or compile error"

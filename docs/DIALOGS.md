@@ -175,10 +175,15 @@ so does clicking End on any dialog. Nothing else does: an `access_dialog` whose
 text merely mentions an error is not a failure, and neither tool records it or
 sets `failure_dialog_dismissed` for it.
 A record made while a gated call on that database was in flight belongs to that
-call: when the call finishes, its result is forced to `success: false`,
-`execution_interrupted: true`, `error_pattern: execution_interrupted` (original
-error text kept), and the record is removed. Precedence with add-in results is
-`decision_required`, then `execution_interrupted`, then a plain error. A record
+call: when the handler returns, its result is forced to `success: false` and
+`execution_interrupted: true`, and the record is removed. The primary
+`error_pattern` is `decision_required` if the result already had it (by
+`decision_required: true` or by pattern), otherwise `execution_interrupted`.
+Decisions, `runtime_error`, `policy_cleanup_error` and the original error text
+are kept. This happens before the usage log is written, so the `tool_call`
+entry, and `vcs_get_recent_calls`, record the same `success`, `error_pattern`
+and `execution_interrupted` the client got. A record attached after the handler
+returned did not interrupt it and is dropped when the gate is released. A record
 made with the gate free is shown as `last_interruption` by the status tools
 until the process identity changes or the next gated call on that database
 starts.

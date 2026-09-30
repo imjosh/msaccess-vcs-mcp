@@ -275,6 +275,42 @@ class TestLogToolCall:
         entry = json.loads(lines[-1])
         assert entry["success"] is False
 
+    def test_result_outcome_and_pattern_are_logged_as_returned(self, tmp_path):
+        """success: false without error text is a failure, and the result's own pattern wins."""
+        log_dir = tmp_path / "logs"
+        with patch.dict(
+            os.environ,
+            {"ACCESS_VCS_ENABLE_LOGGING": "true", "ACCESS_VCS_LOG_DIR": str(log_dir)},
+            clear=False,
+        ):
+            _initialize_logging()
+            log_tool_call(
+                tool_name="vcs_import_objects",
+                parameters={},
+                result={"success": False, "error_pattern": "decision_required"},
+            )
+            log_tool_call(
+                tool_name="vcs_run_tests",
+                parameters={},
+                result={
+                    "success": False,
+                    "error": "File not found: results.json",
+                    "error_pattern": "execution_interrupted",
+                    "execution_interrupted": True,
+                    "policy_cleanup_error": "clear failed",
+                },
+            )
+
+        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        decision, interrupted = (json.loads(line) for line in lines[-2:])
+        assert decision["success"] is False
+        assert decision["error_pattern"] == "decision_required"
+        assert "error" not in decision
+        assert interrupted["error_pattern"] == "execution_interrupted"
+        assert interrupted["error"] == "File not found: results.json"
+        assert interrupted["execution_interrupted"] is True
+        assert interrupted["policy_cleanup_error"] == "clear failed"
+
 
 class TestSanitizeParameters:
     """Tests for parameter sanitization."""

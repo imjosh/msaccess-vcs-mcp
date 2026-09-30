@@ -497,10 +497,22 @@ def log_tool_call(
         entry["error"] = _truncate_string(error, max_length=500)
         entry["error_pattern"] = _extract_error_pattern(error)
 
-    if result and isinstance(result, dict) and "error" in result:
-        entry["success"] = False
-        entry["error"] = _truncate_string(str(result.get("error", "")), max_length=500)
-        entry["error_pattern"] = _extract_error_pattern(str(result.get("error", "")))
+    if result and isinstance(result, dict):
+        if "error" in result:
+            entry["success"] = False
+            entry["error"] = _truncate_string(str(result.get("error", "")), max_length=500)
+            entry["error_pattern"] = _extract_error_pattern(str(result.get("error", "")))
+        if result.get("success") is False:
+            entry["success"] = False
+        # The result's own pattern is what the client saw; the text guess is a fallback.
+        if not entry["success"] and isinstance(result.get("error_pattern"), str):
+            entry["error_pattern"] = result["error_pattern"]
+        if result.get("execution_interrupted"):
+            entry["execution_interrupted"] = True
+        if result.get("policy_cleanup_error"):
+            entry["policy_cleanup_error"] = _truncate_string(
+                str(result["policy_cleanup_error"]), max_length=500
+            )
 
     _write_log_entry(entry)
 
