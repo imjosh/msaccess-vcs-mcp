@@ -4,7 +4,9 @@ One MCP server process is shared by every Cursor window. Sync tool bodies
 previously ran on the asyncio event loop and blocked all other requests.
 This module fronts Access-touching tools with a single COM apartment thread
 and a one-at-a-time slot so callers get a fast ``server_busy`` answer
-instead of queueing into a client-side timeout.
+instead of queueing into a client-side timeout. Waiting for the slot uses no
+worker thread, so a thread pool filled by hung workers cannot delay
+``server_busy`` past its deadline.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ except ImportError:
     COM_AVAILABLE = False
 
 DEFAULT_BUSY_WAIT_SEC = 15.0
+SLOT_POLL_SEC = 0.02
 _call_ids = itertools.count(1)
 
 # Tools that never touch an Access instance — they stay responsive while
@@ -115,6 +118,20 @@ class AccessGate:
         with self._state_lock:
             return self._in_flight
 
+    async def _acquire_slot(self, wait_sec: float) -> bool:
+        """Take the slot within ``wait_sec``, polling on the event loop.
+
+        Not ``asyncio.to_thread``: abandoned workers in the default executor
+        would leave this wait queued before its timeout even started.
+        """
+        deadline = time.monotonic() + wait_sec
+        while not self._slot.acquire(blocking=False):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(SLOT_POLL_SEC, remaining))
+        return True
+
     async def run_exclusive(
         self,
         tool: str,
@@ -125,15 +142,12 @@ class AccessGate:
         *args: Any,
         **kwargs: Any,
     ) -> Any:
-        wait_sec = _read_busy_wait_sec()
-        acquired = await asyncio.to_thread(self._slot.acquire, True, wait_sec)
-        if not acquired:
+        if not await self._acquire_slot(_read_busy_wait_sec()):
             current = self.current_in_flight()
             if current is not None:
                 return _busy_error(current)
             # Slot may have freed between timeout and the read — one short retry.
-            acquired = await asyncio.to_thread(self._slot.acquire, True, 0.1)
-            if not acquired:
+            if not await self._acquire_slot(0.1):
                 return _busy_error(
                     InFlight(tool="unknown", database=None, started_at=time.perf_counter())
                 )

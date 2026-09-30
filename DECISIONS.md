@@ -74,6 +74,24 @@ contradictory guidance.
 
 ---
 
+## 2026-09-30 — Gate-exempt tools get bounded worker threads of their own; the gate waits without a thread
+
+**Trigger**: M24 (review finding 2, follow-up to M01). `_run_exempt_in_worker` ran each sync gate-exempt tool through `asyncio.to_thread` under `wait_for`. Cancelling the await does not stop the thread, so a dialog call into a hung Access UI thread (an MSAA call on a `NUIDialog` is bounded only by that ceiling) stayed in the default executor. `AccessGate.run_exclusive` waited for its slot through `asyncio.to_thread(self._slot.acquire, True, wait_sec)` in the same executor. With the executor full, the slot wait queued before its timeout started, and gated calls neither ran nor returned `server_busy`. Reproduced with a one-thread executor.
+
+**Options explored**:
+- *A larger default executor*: rejected. It only moves the limit, and every hang still adds a thread.
+- *A dedicated `ThreadPoolExecutor` for exempt tools*: rejected. Its internal queue has no limit, and its threads are joined at interpreter exit, so a hung worker blocks shutdown.
+- *Kill or interrupt the hung worker*: not possible for a thread blocked in a Win32 or COM call.
+- *Daemon thread per call under a per-tool budget, admission by polling on the loop, and a slot wait that polls on the loop* (chosen).
+
+**Decision**: `exempt_workers.ExemptWorkers` gives each sync gate-exempt tool at most `MAX_WORKERS_PER_TOOL` (2) live daemon threads, counted until the thread returns, abandoned or not, and at most `MAX_WAITING_PER_TOOL` (2) waiting calls. A new call never overtakes a waiting one. The ceiling from M01 (dialog timeout plus `EXEMPT_WORKER_MARGIN_SEC`) is now one deadline for admission and the run together. No worker in time, or a full waiting line (refused at once), gives `worker_capacity_unavailable`, recoverable. A run past the deadline is `tool_timeout` as before. The budget is per tool, so hung `vcs_list_dialogs` calls do not lock out `vcs_get_recent_calls` or `vcs_dismiss_dialog`. `AccessGate._acquire_slot` polls a non-blocking acquire on the event loop, so `server_busy` arrives within `ACCESS_VCS_BUSY_WAIT_SEC` however full any executor is. The click stays in the worker that inspected the dialog, so M23's reservation deadline (twice the click timeout plus the settle margin) still holds. `Win32Backend.click` was already bounded (`SendMessageTimeoutW` with `SMTO_ABORTIFHUNG`, and a `WM_NULL` probe before an MSAA press). Tests now drive both paths against a real button window whose thread never pumps messages.
+
+**What this rules out**: `asyncio.to_thread` or the default executor for gate-exempt tool bodies or for the gate's slot wait. A slot handoff can lag by up to one poll (20 ms). A refused or timed-out exempt call writes no usage entry until an abandoned worker finishes. Revisit the per-tool numbers if a client legitimately runs more than two concurrent calls of one dialog tool.
+
+**Relevant files**: `exempt_workers.py`, `access_gate.py` (`_acquire_slot`), `tools.py` (`_run_exempt_in_worker`), `tests/test_exempt_workers.py`, `tests/test_access_gate.py`, `tests/conftest.py`, `AGENTS.md`, `docs/DIALOGS.md`.
+
+---
+
 ## 2026-09-30 — Reserve an interruption before the click; the finished call waits for the click to settle
 
 **Trigger**: M23. The interruption was recorded after `backend.click` returned. Ending a runtime-error dialog lets Access resume, so the blocked call could return and finish (no record yet: success) before the click returned. The record then found the gate free and became a free `last_interruption` with `busy_with: None`, or was dropped by the gate's cleanup. The existing tests released the call only after the dismissal finished, which hid the ordering.
@@ -241,6 +259,8 @@ contradictory guidance.
 2. **Positive signature**: a dialog is a known kind only by a positive signature. Everything else is `unknown` and is reported, never clicked.
 3. **Interruptions** (M05): dismissing a runtime or compile error records an interruption keyed by PID plus creation time, carrying the in-flight gated call. When that call finishes it is forced to `success: false`, `execution_interrupted: true`, `error_pattern: execution_interrupted`, keeping the original text, and the record is removed. With no call in flight it shows as `last_interruption` until the identity changes or the next gated call on that database starts. Precedence: `decision_required` > `execution_interrupted` > plain error. A call on a different database does not adopt the record.
 4. **Off the event loop**: every gate-exempt tool runs in a worker thread with a ceiling slightly above the dialog timeout, not only the four dialog tools.
+
+> **⚠ Partially superseded** (2026-09-30): The worker is no longer `asyncio.to_thread`. Each tool has a bounded budget of daemon threads, and the ceiling also covers the wait for one. See "Gate-exempt tools get bounded worker threads of their own; the gate waits without a thread" above.
 
 **What this rules out**: Treating a dismissed error dialog as success. Acting on an unverified process. Adding a gate-exempt tool that uses the COM thread. Revisit the interruption rule if records need to span databases.
 
