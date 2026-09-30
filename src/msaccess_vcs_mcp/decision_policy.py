@@ -93,11 +93,16 @@ def _as_dict(raw: Any) -> dict[str, Any]:
 
 
 def clear_operation_policy(addin: Any) -> str | None:
-    """Clear the add-in operation policy. Never raises; returns a failure message.
+    """Clear the add-in session policy. Never raises; returns a failure message or None.
 
-    ``ClearOperationPolicy`` is idempotent, so this is safe after the add-in's
-    ``Finish`` has already restored the mode. A failure is written to the
-    usage and diagnostic logs so a policy left set in the add-in is visible.
+    A session policy set through ``SetOperationPolicy`` is caller-owned: the
+    add-in's ``Finish`` does not close it, so this call is what restores the
+    interaction mode after the operation. ``ClearOperationPolicy`` is
+    idempotent (a second clear, or a clear when none is set, is a no-op), so a
+    caller can always call it from ``finally``. A failure is written to the
+    usage log (``policy_cleanup_failed``) and the diagnostic log, and the
+    caller attaches it to the tool result as ``policy_cleanup_error``; it is
+    never allowed to replace the operation's own result.
     """
     try:
         cleared = _as_dict(addin.call_sync("ClearOperationPolicy"))

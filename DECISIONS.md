@@ -74,6 +74,55 @@ contradictory guidance.
 
 ---
 
+## 2026-09-30 — MCP never calls the add-in's dialog APIs; Win32 only
+
+**Trigger**: The add-in exposes `ListAddinDialogs` and `DismissAddinDialog` (`modDialogInspect`, on `VCS.API`). Using them for add-in windows looked cheaper than a second classifier.
+
+**Options explored**:
+- *Call the add-in APIs for `frmVCS*` forms, Win32 for the rest*: rejected. They run on the Access COM thread, which a blocking dialog occupies, so the call hangs at the moment it is needed. They see only add-in forms, and `close` refuses while an operation runs.
+- *Try the add-in API first, fall back to Win32*: rejected. Two classifiers for one window, and the first attempt can hang.
+
+**Decision**: The dialog tools use Win32 enumeration and window messages only, off the Access gate, keyed on process identity. Add-in windows are classified by caption like any other. The add-in APIs stay for callers that are inside Access.
+
+**What this rules out**: A gate-exempt tool that calls `VCS.API`. Revisit only if the add-in can answer without the COM thread.
+
+**Relevant files**: `dialog_recovery.py`, `access_gate.EXEMPT_TOOLS`, add-in `modDialogInspect.bas`, `docs/DIALOGS.md`.
+
+---
+
+## 2026-09-30 — The add-in's start result is non-final; MCP never reports a start as success
+
+**Trigger**: The MCP spec assumed the sync return of `MergeBuild` carried the final result. It carries a start result (`started: true`); the outcome comes on the completion callback.
+
+**Options explored**:
+- *Treat the sync return as final*: rejected. It reports success for a merge that has not finished, or that then blocks on a prompt.
+- *Poll the add-in for the outcome*: rejected. Polling is a COM call, and the gate and a blocking dialog are what this work avoids.
+- *Return `success: true, started: true` when no callback exists*: rejected. Nothing can confirm the merge finished.
+
+**Decision**: A refusal in the sync return is returned at once, normalised, and the duplicate on the callback is dropped (the operation is unregistered, so the first arrival wins). A started marker waits for the callback, and the payload goes through the shared decision normaliser. With no callback (none configured, or the async start failed and MCP fell back to a sync call) the result is `success: false, started: true, completion_unconfirmed: true` with a pointer to `log_path` and `vcs_get_recent_calls()`, and no `error_pattern`. `RunFilteredTests` is the exception: it runs the tests before returning, so its return is final. The policy for a full merge or test run is passed inline to `MergeBuild` and `RunFilteredTests`; only the scoped and single-object calls set it through `SetOperationPolicy` and clear it in `finally`.
+
+**What this rules out**: Reading `success: true` from a start result as an outcome. Retrying an unconfirmed start blindly. Revisit if the add-in gains a synchronous final result for `MergeBuild`.
+
+**Relevant files**: `tools.py` (`_merge_sync`, `_normalize_import_result`, `_call_under_policy`), `decision_policy.py` (`is_start_refusal`, `clear_operation_policy`), `docs/DIALOGS.md`.
+
+---
+
+## 2026-09-30 — `safe` clicks only `vba_msgbox`; `access_dialog` is report-only
+
+**Trigger**: `SAFE_OK_KINDS` also held `access_dialog` and `vba_compile_error`, which the combined spec lists as report-only and as `end_runtime_error`'s.
+
+**Options explored**:
+- *Change the spec to match the code*: rejected (user decision). An Access error or warning dialog carries text the agent should read; clicking it away hides a failure.
+- *Keep the compile-error click under `safe`*: rejected. Compile errors belong to `end_runtime_error`.
+
+**Decision**: `safe` clicks OK only on an OK-only `vba_msgbox` without destructive text. `end_runtime_error` adds End on a runtime-error dialog (before, and independent of, the destructive-text check, which guards OK clicks only) and OK on an OK-only compile error. No policy clicks `access_dialog`. An explicit `vcs_dismiss_dialog(button=...)` is unchanged.
+
+**What this rules out**: Auto-clicking Access error or warning dialogs. Revisit if a real Access dialog is found that blocks a run and carries no information.
+
+**Relevant files**: `dialog_recovery.py` (`SAFE_OK_KINDS`, `auto_button`), `docs/DIALOGS.md`.
+
+---
+
 ## 2026-09-29 — Click OK-only VBA MsgBox of any caption (`vba_msgbox`)
 
 **Trigger**: After the classification work, a VBA `MsgBox` with a custom caption was kind `unknown` and never clicked, so an unattended run stalled on a dialog Access cannot continue past.
@@ -118,6 +167,8 @@ contradictory guidance.
 ## 2026-09-29 — Noninteractive add-in runs, Win32 dialog recovery off the Access gate
 
 > **⚠ Partially superseded** (2026-09-29): "clicks only recognized OK-only dialogs" now also covers an OK-only MsgBox with any caption (`vba_msgbox`). See "Click OK-only VBA MsgBox of any caption (`vba_msgbox`)" above.
+
+> **⚠ Partially superseded** (2026-09-30): "recognized OK-only dialogs" is now only `vba_msgbox` (plus an OK-only compile error under `end_runtime_error`). `access_dialog` is report-only. See "`safe` clicks only `vba_msgbox`; `access_dialog` is report-only" above.
 
 **Trigger**: An agent driving Access gets stuck when the add-in or VBA opens a modal dialog, and a second MCP call cannot inspect that dialog because it waits on the same Access COM gate.
 
