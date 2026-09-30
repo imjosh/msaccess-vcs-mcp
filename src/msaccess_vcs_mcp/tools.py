@@ -63,7 +63,7 @@ from .dialog_recovery import (
 from .decision_policy import (
     InvalidDecisionPolicy,
     apply_decision_result,
-    clear_operation_policy,
+    call_under_policy,
     coerce_decisions,
     invalid_policy_result,
     is_decision_required,
@@ -427,46 +427,6 @@ def _scoped_types_arg(object_types: list[str]) -> str | list[str]:
     if len(cleaned) == 1:
         return cleaned[0]
     return cleaned
-
-
-def _call_under_policy(
-    addin: VCSAddinIntegration, policy: str | None, command: str, *args: Any
-) -> tuple[dict[str, Any], str]:
-    """
-    Run one sync add-in call under ``policy``, or in explicit interactive mode.
-
-    Sets the policy through ``SetOperationPolicy`` first and clears it in
-    ``finally``, so the call is covered whether or not the add-in keeps a
-    session policy past ``Finish``. A cleanup failure is attached as
-    ``policy_cleanup_error`` and never replaces the call's result.
-
-    Returns the result and how the call went: ``"refused"`` when the policy
-    set or the interactive-mode request was refused (the refusal is the
-    result and the call never started), ``"raised"`` when the call raised
-    (the result is a plain failure with the exception text), otherwise
-    ``"completed"`` with the add-in's parsed result.
-    """
-    if policy:
-        # A refusal here (for example operation_already_running)
-        # is a normal result, not an error.
-        policy_result = _addin_json_result(addin.call_sync("SetOperationPolicy", policy))
-        if policy_result.get("success") is False:
-            return policy_result, "refused"
-    mode_refusal = select_interactive_mode(addin, policy)
-    if mode_refusal:
-        return mode_refusal, "refused"
-    state = "completed"
-    try:
-        result = _addin_json_result(addin.call_sync(command, *args))
-    except Exception as e:
-        state = "raised"
-        result = {"success": False, "error": str(e)}
-    finally:
-        cleanup_error = clear_operation_policy(addin) if policy else None
-    if cleanup_error:
-        # Secondary information: never replaces the operation's result.
-        result["policy_cleanup_error"] = cleanup_error
-    return result, state
 
 
 def _get_operation_manager():
@@ -1468,8 +1428,9 @@ async def vcs_import_objects(
                         "error": "object_types was empty after stripping blanks",
                         "imported_count": 0,
                     }
-                result, state = _call_under_policy(
-                    addin, policy, "ImportByType", types_arg, full_import
+                result, state = call_under_policy(
+                    addin, policy, "ImportByType", types_arg, full_import,
+                    parse_result=_addin_json_result,
                 )
                 if state == "refused":
                     return result
@@ -2396,8 +2357,9 @@ def vcs_export_object(
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
             addin.load_addin(app, db_path=str(db_path))
             
-            result, state = _call_under_policy(
-                addin, policy, "ExportObject", object_type, object_name
+            result, state = call_under_policy(
+                addin, policy, "ExportObject", object_type, object_name,
+                parse_result=_addin_json_result,
             )
             return surface_own_decision(result) if state == "completed" else result
     
@@ -2476,8 +2438,9 @@ def vcs_import_object(
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
             addin.load_addin(app, db_path=str(db_path))
             
-            result, state = _call_under_policy(
-                addin, policy, "ImportObject", object_type, object_name
+            result, state = call_under_policy(
+                addin, policy, "ImportObject", object_type, object_name,
+                parse_result=_addin_json_result,
             )
             return surface_own_decision(result) if state == "completed" else result
     
