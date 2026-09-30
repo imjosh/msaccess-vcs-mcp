@@ -288,3 +288,12 @@ always describes the box that was clicked.
 - The default dialog wait is 5 seconds (`ACCESS_VCS_DIALOG_TIMEOUT_SEC`,
   capped at 30). If the window is still open, the result is
   `dismiss_uncertain` and the mutation is not retried.
+- Each dialog tool call has one response deadline: the dialog wait plus 5
+  seconds, covering the wait for a worker thread and the call itself. A call
+  still running at the deadline returns `tool_timeout`; its thread cannot be
+  stopped and runs on until Access answers. Each tool keeps at most two such
+  threads and lets at most two more calls wait for one. A call that gets no
+  thread by its deadline, or finds two already waiting, returns
+  `worker_capacity_unavailable` without touching a window. Retry once Access
+  answers. These threads never use capacity the Access gate needs, so gated
+  tools keep answering, or return `server_busy`, on time.

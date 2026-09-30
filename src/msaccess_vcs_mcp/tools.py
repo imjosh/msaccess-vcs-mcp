@@ -51,6 +51,7 @@ from .access_com.connection import (
 from .access_com.dao_helpers import list_query_defs, list_table_defs
 from .access_com.process_qos import list_access_pids, prefer_full_power_if_created
 from .access_gate import EXEMPT_TOOLS, get_access_gate
+from .exempt_workers import WorkerCapacityUnavailable, workers_for
 from .dialog_recovery import (
     automation_status,
     begin_gated_call,
@@ -820,14 +821,28 @@ EXEMPT_WORKER_MARGIN_SEC = 5.0
 async def _run_exempt_in_worker(name: str, logged, args: tuple, kwargs: dict) -> Any:
     """Run a sync gate-exempt tool off the event loop and off the COM apartment thread.
 
-    Past the ceiling (just above the dialog timeout) the worker is abandoned and a
-    recoverable timeout is returned, as ``vcs_run_vba`` does for a hung worker.
+    One ceiling (just above the dialog timeout) covers waiting for one of the tool's
+    bounded workers and running in it. A call that gets no worker in time is refused;
+    one that runs past the ceiling is abandoned with a recoverable timeout, as
+    ``vcs_run_vba`` does for a hung worker. See ``exempt_workers``.
     """
     requested = kwargs.get("timeout_seconds")
     ceiling = dialog_timeout_sec(requested if isinstance(requested, (int, float)) else None)
     ceiling += EXEMPT_WORKER_MARGIN_SEC
     try:
-        return await asyncio.wait_for(asyncio.to_thread(logged, *args, **kwargs), timeout=ceiling)
+        return await workers_for(name).run(logged, args, kwargs, time.monotonic() + ceiling)
+    except WorkerCapacityUnavailable as exc:
+        return {
+            "success": False,
+            "error_pattern": "worker_capacity_unavailable",
+            "error": (
+                f"{name} did not start: {exc.running} earlier {name} calls are still "
+                "running in abandoned workers. Access may be hung; retry after they "
+                "finish, or call vcs_get_recent_calls()."
+            ),
+            "recoverable": True,
+            "retry_after_seconds": 5,
+        }
     except asyncio.TimeoutError:
         return {
             "success": False,

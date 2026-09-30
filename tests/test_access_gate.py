@@ -125,6 +125,50 @@ def test_run_exclusive_releases_slot_after_exception():
     assert result == "ok"
 
 
+@pytest.mark.parametrize("slot_free", [True, False], ids=["free", "busy"])
+def test_slot_wait_needs_no_worker_thread(slot_free):
+    """A default executor full of hung workers cannot delay the slot or server_busy."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    gate = AccessGate()
+    hung = threading.Event()
+
+    async def runner():
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        holder = None
+        try:
+            with patch("msaccess_vcs_mcp.access_gate._read_busy_wait_sec", return_value=0.1):
+                if not slot_free:
+                    entered = asyncio.Event()
+
+                    async def hold():
+                        entered.set()
+                        await asyncio.sleep(1.0)
+
+                    holder = asyncio.create_task(gate.run_exclusive("vcs_run_tests", None, hold, True))
+                    await entered.wait()
+                loop.run_in_executor(None, hung.wait, 5)
+                started = time.monotonic()
+                result = await asyncio.wait_for(
+                    gate.run_exclusive("vcs_test", None, lambda: "ran", False), 1.0
+                )
+                return result, time.monotonic() - started
+        finally:
+            hung.set()
+            if holder is not None:
+                holder.cancel()
+
+    result, elapsed = asyncio.run(runner())
+    if slot_free:
+        assert result == "ran"
+    else:
+        assert result["error_pattern"] == "server_busy"
+        assert result["busy_with"]["tool"] == "vcs_run_tests"
+    assert elapsed < 0.6
+
+
 def test_busy_error_shape():
     err = _busy_error(InFlight("vcs_export_database", r"C:\db.accdb", time.perf_counter()))
     assert err["error_pattern"] == "server_busy"
