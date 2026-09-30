@@ -13,6 +13,7 @@ an error dialog does not make the failed Access operation a success.
 
 from __future__ import annotations
 
+import itertools
 import os
 import threading
 import time
@@ -83,44 +84,36 @@ _DESTRUCTIVE_TEXT = (
     "lose changes",
 )
 
-# (pid, process creation time) -> record of an End/cancel done from outside Access.
-# Keyed by identity so a new process that reuses the PID starts clean. A record
-# made while a gated call was in flight carries that call (``busy_with`` and
-# ``call_id``) and is used up when the call finishes; otherwise it stays as
-# ``last_interruption`` until the identity changes or the next gated call on
-# its database starts.
-_interruptions: dict[tuple[int, int | None], dict[str, Any]] = {}
-_interruptions_lock = threading.Lock()
+# What ``WindowBackend.click`` reports. ``not_sent`` means nothing reached the
+# window (wrong owner, unresponsive, or the button refused the action).
+# ``uncertain`` means it may have: the send timed out or failed part way.
+CLICK_DELIVERED = "delivered"
+CLICK_NOT_SENT = "not_sent"
+CLICK_UNCERTAIN = "uncertain"
+# How long past the click timeout a finished gated call waits for a click still
+# in flight: the Win32 click may spend one timeout on the responsiveness probe
+# and another on the press.
+CLICK_SETTLE_MARGIN_SEC = 1.0
+
+# Reservation token -> record of an End/cancel done from outside Access. A record
+# is reserved (``pending``) before the action is delivered, because Access can
+# resume and finish the blocked call before the click returns. The action then
+# settles it: ``confirmed``, ``uncertain`` (kept only for a gated call), or gone
+# when nothing was sent. A record made while a gated call was in flight on the
+# same database carries that call (``busy_with`` and ``call_id``) and is used up
+# when the call finishes; otherwise a confirmed record stays as
+# ``last_interruption`` until the process identity changes or the next gated
+# call on its database starts.
+_interruptions: dict[int, dict[str, Any]] = {}
+_interruptions_changed = threading.Condition()
+_reservation_tokens = itertools.count(1)
+_INTERNAL_FIELDS = {"call_id", "identity", "state", "deadline"}
 
 
 def _same_path(a: str | None, b: str | None) -> bool:
     if not a or not b:
         return False
     return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
-
-
-def _record_interruption(
-    pid: int,
-    create_time: int | None,
-    database_path: str | None,
-    payload: dict[str, Any],
-) -> None:
-    """Record an interruption for one process identity.
-
-    Attaches the in-flight gated call when it is on the same database.
-    """
-    record = dict(payload)
-    record["database_path"] = database_path
-    record["busy_with"] = None
-    current = get_access_gate().current_in_flight()
-    if current is not None and _same_path(current.database, database_path):
-        record["busy_with"] = {"tool": current.tool, "database": current.database}
-        record["call_id"] = current.call_id
-    with _interruptions_lock:
-        # Any other identity on this PID is a dead process; forget it.
-        for key in [k for k in _interruptions if k[0] == int(pid) and k[1] != create_time]:
-            del _interruptions[key]
-        _interruptions[(int(pid), create_time)] = record
 
 
 def _interrupts_execution(kind: str, button_text: str | None) -> bool:
@@ -133,63 +126,160 @@ def _interrupts_execution(kind: str, button_text: str | None) -> bool:
     return kind in FAILURE_KINDS or _button_label(button_text or "") == "end"
 
 
-def _record_dialog_interruption(
+def _reserve_interruption(
     report: dict[str, Any],
     database_path: str | None,
     item: dict[str, Any],
     button_text: str | None,
+    settle_within_sec: float,
     message: str | None = None,
-) -> None:
-    """Record that ``item`` was dismissed from outside Access, for the target in ``report``."""
-    _record_interruption(int(report["pid"]), report.get("create_time"), database_path, {
+) -> int:
+    """Reserve an interruption for ``item`` before the action that causes it.
+
+    Attaches the in-flight gated call when it is on the same database. Returns
+    the token ``_settle_interruption`` takes once the action has been tried.
+    """
+    identity = (int(report["pid"]), report.get("create_time"))
+    record: dict[str, Any] = {
         "dialog_id": item["dialog_id"],
         "kind": item["kind"],
         "button": button_text,
         "title": item.get("title"),
         "message": message if message is not None else item.get("message"),
-    })
+        "database_path": database_path,
+        "busy_with": None,
+        "identity": identity,
+        "state": "pending",
+        "deadline": time.monotonic() + settle_within_sec,
+    }
+    current = get_access_gate().current_in_flight()
+    if current is not None and _same_path(current.database, database_path):
+        record["busy_with"] = {"tool": current.tool, "database": current.database}
+        record["call_id"] = current.call_id
+    token = next(_reservation_tokens)
+    with _interruptions_changed:
+        # Any other identity on this PID is a dead process; forget it.
+        for key in [
+            k for k, v in _interruptions.items()
+            if v["identity"][0] == identity[0] and v["identity"] != identity
+        ]:
+            del _interruptions[key]
+        _interruptions[token] = record
+    return token
+
+
+def _settle_interruption(token: int, outcome: str) -> None:
+    """Record how the reserved action went. A reservation already used up stays gone."""
+    with _interruptions_changed:
+        record = _interruptions.get(token)
+        if record is None:
+            return
+        if outcome == CLICK_DELIVERED:
+            record["state"] = "confirmed"
+            if record["busy_with"] is None:
+                # Only the newest free record is reported.
+                for key in [
+                    k for k, v in _interruptions.items()
+                    if k != token and v["busy_with"] is None and v["identity"] == record["identity"]
+                ]:
+                    del _interruptions[key]
+        elif outcome == CLICK_UNCERTAIN and record.get("call_id") is not None:
+            record["state"] = "uncertain"
+        else:
+            del _interruptions[token]
+        _interruptions_changed.notify_all()
 
 
 def _interruption_for(pid: int | None, create_time: int | None) -> dict[str, Any] | None:
     if not pid:
         return None
-    with _interruptions_lock:
-        record = _interruptions.get((int(pid), create_time))
-    if record is None:
+    with _interruptions_changed:
+        confirmed = [
+            (token, record) for token, record in _interruptions.items()
+            if record["identity"] == (int(pid), create_time) and record["state"] == "confirmed"
+        ]
+    if not confirmed:
         return None
-    return {k: v for k, v in record.items() if k != "call_id"}
+    _token, record = max(confirmed, key=lambda pair: pair[0])
+    return {k: v for k, v in record.items() if k not in _INTERNAL_FIELDS}
 
 
-def begin_gated_call(database_path: str | None) -> None:
-    """A new gated call on ``database_path`` starts: unattached records are stale."""
-    with _interruptions_lock:
+def begin_gated_call(database_path: str | None, call_id: int | None) -> None:
+    """Gated call ``call_id`` on ``database_path`` starts: other records there are stale.
+
+    That covers unattached records and one reserved against an earlier call just
+    as the gate released it, after that call had used up its records.
+    """
+    with _interruptions_changed:
         for key in [
             k for k, v in _interruptions.items()
-            if v.get("busy_with") is None and _same_path(v.get("database_path"), database_path)
+            if v.get("call_id") != call_id and _same_path(v["database_path"], database_path)
         ]:
             del _interruptions[key]
+
+
+def _await_reserved_actions(call_id: int) -> None:
+    """Wait, bounded by their deadlines, for actions reserved against ``call_id`` to settle.
+
+    The caller holds ``_interruptions_changed``.
+    """
+    while True:
+        deadlines = [
+            v["deadline"] for v in _interruptions.values()
+            if v.get("call_id") == call_id and v["state"] == "pending"
+        ]
+        remaining = max(deadlines, default=0.0) - time.monotonic()
+        if remaining <= 0:
+            return
+        _interruptions_changed.wait(remaining)
 
 
 def finish_gated_call(call_id: int | None, result: Any) -> Any:
     """Use up the interruption records of a finished gated call.
 
-    An interrupted result is ``success: false`` with ``execution_interrupted:
-    true``. The primary ``error_pattern`` follows the precedence
-    ``decision_required`` > ``execution_interrupted`` > plain error, so a
-    decision-required result keeps its pattern, decisions and error text and
-    only gains the flag.
+    A finished handler (``result`` is not None) first waits for any dialog
+    action reserved against it that is still being delivered, at most until that
+    action's deadline. An interrupted result is ``success: false`` with
+    ``execution_interrupted: true``. The primary ``error_pattern`` follows the
+    precedence ``decision_required`` > ``execution_interrupted`` > plain error >
+    ``interruption_uncertain``, so a decision-required result keeps its pattern,
+    decisions and error text and only gains the flag. An action whose delivery is
+    uncertain, or did not settle in time, adds ``interruption_uncertain: true``
+    and never leaves the result a success. ``result`` None uses the records up
+    without waiting: the call raised, or the gate is releasing it.
     """
     if call_id is None:
         return result
-    with _interruptions_lock:
+    with _interruptions_changed:
+        if result is not None:
+            _await_reserved_actions(call_id)
         matched = [k for k, v in _interruptions.items() if v.get("call_id") == call_id]
         records = [_interruptions.pop(k) for k in matched]
     if not records or not isinstance(result, dict):
         return result
-    record = records[-1]
+    decision_required = (
+        bool(result.get("decision_required")) or result.get("error_pattern") == "decision_required"
+    )
+    confirmed = [record for record in records if record["state"] == "confirmed"]
+    if not confirmed:
+        failed = result.get("success") is False
+        result["success"] = False
+        result["interruption_uncertain"] = True
+        if failed or decision_required:
+            return result
+        result["error_pattern"] = "interruption_uncertain"
+        if not result.get("error"):
+            detail = records[-1].get("message") or records[-1].get("kind")
+            result["error"] = (
+                "A dialog action that interrupts this call was sent while it ran, but its "
+                f"delivery was not confirmed ({detail}). The call may not have completed; "
+                "check its effects before relying on it."
+            )
+        return result
+    record = confirmed[-1]
     result["success"] = False
     result["execution_interrupted"] = True
-    if result.get("decision_required") or result.get("error_pattern") == "decision_required":
+    if decision_required:
         return result
     result["error_pattern"] = "execution_interrupted"
     if not result.get("error"):
@@ -249,8 +339,10 @@ class WindowBackend(Protocol):
 
     def click(
         self, button: ButtonInfo, *, expected_pid: int | None = None, timeout_ms: int = 5000
-    ) -> bool:
-        """Press ``button``. True only when it was delivered within ``timeout_ms``."""
+    ) -> str:
+        """Press ``button``. ``CLICK_DELIVERED`` only when it was delivered within
+        ``timeout_ms``; ``CLICK_NOT_SENT`` when nothing reached the window;
+        otherwise ``CLICK_UNCERTAIN``."""
         ...
 
     def close(self, hwnd: int) -> None: ...
@@ -596,6 +688,7 @@ def _press_fresh(
     inspected: WindowInfo,
     choose: Callable[[WindowInfo, str], ButtonInfo | None],
     click_timeout_sec: float | None,
+    database_path: str,
 ) -> tuple[str, dict[str, Any] | None, ButtonInfo | None]:
     """Re-verify, choose the button on the fresh window, and click that button.
 
@@ -604,7 +697,8 @@ def _press_fresh(
     nothing on the fresh window (nothing was clicked), ``dismiss_uncertain`` when
     the click was not delivered, otherwise ``clicked``. ``record`` describes the
     fresh window, so a result never reports text from a box other than the one
-    clicked.
+    clicked. A click that interrupts execution is reserved against the in-flight
+    call before it is sent and settled by its delivery outcome.
     """
     fresh = _reverify(backend, report, inspected)
     if fresh is None:
@@ -614,25 +708,55 @@ def _press_fresh(
     if button is None:
         return "dialog_changed", None, None
     record = _dialog_record(window, kind)
-    if not backend.click(
-        button,
-        expected_pid=int(report["pid"]),
-        timeout_ms=int(dialog_timeout_sec(click_timeout_sec) * 1000),
-    ):
+    timeout_sec = dialog_timeout_sec(click_timeout_sec)
+    token = None
+    if _interrupts_execution(kind, button.text):
+        token = _reserve_interruption(
+            report, database_path, record, button.text, 2 * timeout_sec + CLICK_SETTLE_MARGIN_SEC
+        )
+    outcome = CLICK_UNCERTAIN
+    try:
+        outcome = backend.click(
+            button, expected_pid=int(report["pid"]), timeout_ms=int(timeout_sec * 1000)
+        )
+    finally:
+        if token is not None:
+            _settle_interruption(token, outcome)
+    if outcome != CLICK_DELIVERED:
         return "dismiss_uncertain", record, button
     return "clicked", record, button
 
 
 def _close_fresh(
-    backend: WindowBackend, report: dict[str, Any], inspected: WindowInfo
+    backend: WindowBackend,
+    report: dict[str, Any],
+    inspected: WindowInfo,
+    database_path: str,
+    interruption: str | None = None,
 ) -> dict[str, Any] | None:
-    """Re-verify, then close the fresh window. Its record, or None when it changed."""
+    """Re-verify, then close the fresh window. Its record, or None when it changed.
+
+    With ``interruption`` (its message) the close is a cancellation, reserved
+    against the in-flight call before the close is posted.
+    """
     fresh = _reverify(backend, report, inspected)
     if fresh is None:
         return None
     window, kind = fresh
-    backend.close(window.hwnd)
-    return _dialog_record(window, kind)
+    record = _dialog_record(window, kind)
+    token = None
+    if interruption is not None:
+        token = _reserve_interruption(
+            report, database_path, record, None, CLICK_SETTLE_MARGIN_SEC, interruption
+        )
+    outcome = CLICK_NOT_SENT
+    try:
+        backend.close(window.hwnd)
+        outcome = CLICK_DELIVERED
+    finally:
+        if token is not None:
+            _settle_interruption(token, outcome)
+    return record
 
 
 def _dialog_changed(report: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
@@ -905,6 +1029,7 @@ def dismiss_dialog_in_windows(
             window,
             lambda fresh, _kind: _button_named(fresh, button),
             click_timeout_sec,
+            database_path,
         )
         if status == "dialog_changed":
             return _dialog_changed(before, item)
@@ -912,9 +1037,7 @@ def dismiss_dialog_in_windows(
         if status == "dismiss_uncertain":
             return _uncertain_click(before, record)
         closed.append({**record, "button": pressed.text, "how": "click"})
-        if _interrupts_execution(record["kind"], pressed.text):
-            interrupted = True
-            _record_dialog_interruption(before, database_path, record, pressed.text)
+        interrupted = _interrupts_execution(record["kind"], pressed.text)
     elif action_l == "cancel":
         if kind != "addin_window":
             return {
@@ -924,14 +1047,13 @@ def dismiss_dialog_in_windows(
                 "error": "cancel closes an add-in progress window. For a VBA dialog pass button.",
                 "dismissed": False,
             }
-        record = _close_fresh(backend, before, window)
+        record = _close_fresh(
+            backend, before, window, database_path, "Add-in window close requested as cancellation."
+        )
         if record is None:
             return _dialog_changed(before, item)
         closed.append({**record, "how": "cancel"})
         interrupted = True
-        _record_dialog_interruption(
-            before, database_path, record, None, "Add-in window close requested as cancellation."
-        )
     elif action_l == "close":
         if kind == "addin_window" and (before.get("operation") or {}).get("same_database"):
             return {
@@ -963,7 +1085,7 @@ def dismiss_dialog_in_windows(
                 "buttons": item.get("buttons"),
                 "dismissed": False,
             }
-        record = _close_fresh(backend, before, window)
+        record = _close_fresh(backend, before, window, database_path)
         if record is None:
             return _dialog_changed(before, item)
         closed.append({**record, "how": "close"})
@@ -1068,6 +1190,7 @@ def recover_windows(
             window,
             lambda fresh, kind: _policy_button(fresh, kind, policy_l),
             click_timeout_sec,
+            database_path,
         )
         if status == "dialog_changed":
             changed = True
@@ -1081,8 +1204,6 @@ def recover_windows(
             break
         handled += 1
         closed.append({**record, "button": pressed.text, "how": "auto"})
-        if _interrupts_execution(record["kind"], pressed.text):
-            _record_dialog_interruption(report, database_path, record, pressed.text)
 
     result = {
         "success": True,
@@ -1158,7 +1279,7 @@ class Win32Backend:
 
     def click(
         self, button: ButtonInfo, *, expected_pid: int | None = None, timeout_ms: int = 5000
-    ) -> bool:
+    ) -> str:
         import ctypes
 
         import win32process
@@ -1168,19 +1289,21 @@ class Win32Backend:
             try:
                 _thread, owner_pid = win32process.GetWindowThreadProcessId(hwnd)
             except Exception:
-                return False
+                return CLICK_NOT_SENT
             if int(owner_pid) != int(expected_pid):
-                return False
+                return CLICK_NOT_SENT
         if button.path is not None:
             # A hung window is not asked for its accessible object.
             if not self.responsive(hwnd, timeout_ms):
-                return False
+                return CLICK_NOT_SENT
             from . import msaa
 
             try:
-                return msaa.press(hwnd, button.path, button.text, timeout_ms)
+                pressed = msaa.press(hwnd, button.path, button.text, timeout_ms)
             except OSError:
-                return False
+                return CLICK_UNCERTAIN
+            # False: the button was not found as expected or refused the action.
+            return CLICK_DELIVERED if pressed else CLICK_NOT_SENT
         result = ctypes.c_ulong()
         sent = ctypes.windll.user32.SendMessageTimeoutW(
             hwnd,
@@ -1191,7 +1314,8 @@ class Win32Backend:
             int(timeout_ms),
             ctypes.byref(result),
         )
-        return bool(sent)
+        # A timed-out send may still be processed later.
+        return CLICK_DELIVERED if sent else CLICK_UNCERTAIN
 
     def close(self, hwnd: int) -> None:
         import win32gui
@@ -1533,5 +1657,5 @@ def automation_status(
 
 def reset_interruptions() -> None:
     """Clear recorded End/cancel diagnostics. Used by tests."""
-    with _interruptions_lock:
+    with _interruptions_changed:
         _interruptions.clear()

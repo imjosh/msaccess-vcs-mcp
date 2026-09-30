@@ -174,19 +174,37 @@ error records one, from `vcs_dismiss_dialog` or `vcs_recover_dialogs` alike, and
 so does clicking End on any dialog. Nothing else does: an `access_dialog` whose
 text merely mentions an error is not a failure, and neither tool records it or
 sets `failure_dialog_dismissed` for it.
-A record made while a gated call on that database was in flight belongs to that
-call: when the handler returns, its result is forced to `success: false` and
-`execution_interrupted: true`, and the record is removed. The primary
-`error_pattern` is `decision_required` if the result already had it (by
-`decision_required: true` or by pattern), otherwise `execution_interrupted`.
+The record is reserved before the click (or the cancel's close) is sent,
+because ending the dialog lets Access resume and the blocked call can return
+before the click does. A reservation made while a gated call on that database
+was in flight belongs to that call. When the handler returns, it waits for a
+click still being delivered, at most twice the dialog timeout plus a second,
+and then uses up its records:
+- Delivered: the result is forced to `success: false` and
+  `execution_interrupted: true`. The primary `error_pattern` is
+  `decision_required` if the result already had it (by `decision_required:
+  true` or by pattern), otherwise `execution_interrupted`.
+- Not sent (the button no longer belonged to the process, the window did not
+  answer, or the button refused the action): the reservation is dropped and the
+  result is unchanged. Nothing reached the dialog, so it did not release the
+  call.
+- Delivery uncertain (the button message timed out or failed part way), or the
+  click did not report back by the deadline: the result is `success: false` with
+  `interruption_uncertain: true`. A result that was a success gets
+  `error_pattern: interruption_uncertain`; a result that already failed keeps
+  its own pattern. It is not `execution_interrupted`, because the End may not
+  have arrived. A click that reports back after the call finished finds nothing
+  to settle, so a later call never inherits it.
+
 Decisions, `runtime_error`, `policy_cleanup_error` and the original error text
 are kept. This happens before the usage log is written, so the `tool_call`
-entry, and `vcs_get_recent_calls`, record the same `success`, `error_pattern`
-and `execution_interrupted` the client got. A record attached after the handler
-returned did not interrupt it and is dropped when the gate is released. A record
-made with the gate free is shown as `last_interruption` by the status tools
-until the process identity changes or the next gated call on that database
-starts.
+entry, and `vcs_get_recent_calls`, record the same `success`, `error_pattern`,
+`execution_interrupted` and `interruption_uncertain` the client got. A
+reservation made after the handler returned did not interrupt it and is dropped
+when the gate is released. A delivered click made with the gate free is shown as
+`last_interruption` by the status tools until the process identity changes or
+the next gated call on that database starts; an undelivered one records
+nothing.
 
 A dialog gets a known kind only from a positive signature (a Microsoft
 Access or Visual Basic caption, run-time or compile error text, the End/Debug
