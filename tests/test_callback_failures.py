@@ -280,7 +280,7 @@ def test_export_plain_failure_is_unchanged(tmp_path):
         "exported_count": 0,
         "export_path": str(out),
         "objects_by_type": {},
-        "log_path": None,
+        "log_path": RUN_LOG,
     }
 
 
@@ -289,7 +289,7 @@ def test_build_plain_failure_is_unchanged(tmp_path):
         "success": False,
         "error": "busy",
         "output_path": None,
-        "log_path": None,
+        "log_path": RUN_LOG,
     }
 
 

@@ -418,6 +418,9 @@ def _attach_log_context(
     source_dir: str | os.PathLike[str],
     base_name: str,
     completion: dict[str, Any] | None = None,
+    *,
+    call_started_at: float | None = None,
+    executed: bool = False,
 ) -> dict[str, Any]:
     """
     Add ``log_path`` to a tool result, plus ``log_excerpt`` when it failed.
@@ -425,16 +428,38 @@ def _attach_log_context(
     The add-in gitignores its ``logs/`` folder, so Glob/Grep skip it entirely
     and an agent told only that "the build failed" cannot search its way to the
     reason. Returning the tail inline on failure removes that dead end.
+
+    Explicit paths remain authoritative even when unreadable. Disk fallback
+    requires execution evidence and a wall-clock call start; refusals cannot
+    borrow another operation's log.
     """
     _carry_cancel_outcome(result, completion)
 
     # Prefer an explicit path from the completion callback or an already-
     # normalized tool result (e.g. sync ImportByType / ExportByType JSON).
-    log_path = (completion or {}).get("log_path") or result.get("log_path")
-    if not log_path or not os.path.exists(log_path):
-        # The operation just ran, so the newest log for this family is its own.
-        log_path = _newest_log(source_dir, base_name)
+    log_path = (completion or {}).get("log_path") or result.get("log_path") or None
+    pre_start_patterns = {
+        "invalid_decision_policy", "operation_already_running", "merge_not_available",
+        "interaction_mode_unconfirmed", "policy_unconfirmed", "api_self_dispatch",
+    }
+    refused = any(
+        payload.get("api_refused") is True
+        or payload.get("error_pattern") in pre_start_patterns
+        or payload.get("started") is False
+        for payload in (result, completion or {})
+    )
+    if not log_path and executed and not refused and call_started_at is not None:
+        candidate = _newest_log(source_dir, base_name)
+        if candidate:
+            try:
+                if os.path.getmtime(candidate) >= call_started_at:
+                    log_path = candidate
+            except OSError:
+                # The file may disappear between lookup and stat.
+                pass
 
+    # Never keep an excerpt from a different or unknown log.
+    result.pop("log_excerpt", None)
     result["log_path"] = log_path
     if not result.get("success") and log_path:
         excerpt = _read_log_excerpt(log_path)
@@ -443,7 +468,10 @@ def _attach_log_context(
     return result
 
 
-def _export_start_outcome(start: dict[str, Any], export_path: str | os.PathLike[str]) -> dict[str, Any]:
+def _export_start_outcome(
+    start: dict[str, Any], export_path: str | os.PathLike[str],
+    *, call_started_at: float | None = None,
+) -> dict[str, Any]:
     """The ``vcs_export_database`` result for a start that has no callback to follow.
 
     ``start`` is what ``export_source`` or ``start_only_result`` returned. It is an
@@ -456,11 +484,15 @@ def _export_start_outcome(start: dict[str, Any], export_path: str | os.PathLike[
     if not result.get("completion_unconfirmed"):
         result["exported_count"] = 0
         result["objects_by_type"] = {}
-    return _attach_log_context(result, export_path, "Export")
+    return _attach_log_context(
+        result, export_path, "Export", start,
+        call_started_at=call_started_at, executed=start.get("started") is True,
+    )
 
 
 def _build_start_outcome(
-    start: dict[str, Any], src_path: str | os.PathLike[str], output_path: str | None
+    start: dict[str, Any], src_path: str | os.PathLike[str], output_path: str | None,
+    *, call_started_at: float | None = None,
 ) -> dict[str, Any]:
     """The ``vcs_rebuild_database`` result for a start that has no callback to follow.
 
@@ -474,7 +506,10 @@ def _build_start_outcome(
         result["source_dir"] = str(src_path)
     else:
         result["output_path"] = None
-    return _attach_log_context(result, src_path, "Build")
+    return _attach_log_context(
+        result, src_path, "Build", start,
+        call_started_at=call_started_at, executed=start.get("started") is True,
+    )
 
 
 def _scoped_types_arg(object_types: list[str]) -> str | list[str]:
@@ -1062,6 +1097,7 @@ async def vcs_export_database(
     The add-in gitignores its ``logs`` folder, so Glob/Grep will not find
     these files. Open ``log_path`` directly, or call vcs_get_log("Export").
     """
+    call_started_at = time.time()
     logger.info(
         "vcs_export_database called with ctx=%s, ctx_type=%s, report_progress=%s",
         ctx is not None,
@@ -1122,7 +1158,7 @@ async def vcs_export_database(
                     addin.call_sync("ExportByType", types_arg, full_export)
                 )
                 result.setdefault("export_path", str(export_path))
-                return _attach_log_context(result, export_path, "Export")
+                return _attach_log_context(result, export_path, "Export", call_started_at=call_started_at, executed=True)
             
             # Check if async export is available
             if callback_url and op_manager:
@@ -1150,6 +1186,7 @@ async def vcs_export_database(
                         return _export_start_outcome(
                             start_only_result(async_result.get("result"), "export", "Export"),
                             export_path,
+                            call_started_at=call_started_at,
                         )
                     elif async_result.get("async"):
                         # Wait for completion with progress reporting
@@ -1174,7 +1211,7 @@ async def vcs_export_database(
                                 "exported_count": 0,
                                 "export_path": str(export_path),
                                 "objects_by_type": {},
-                            }, export_path, "Export", completion)
+                            }, export_path, "Export", completion, call_started_at=call_started_at, executed=True)
                     else:
                         # Neither marker: the add-in never started the operation,
                         # so run it synchronously rather than reporting success
@@ -1185,6 +1222,7 @@ async def vcs_export_database(
                                 str(db_path), str(export_path), full_export=full_export
                             ),
                             export_path,
+                            call_started_at=call_started_at,
                         )
                 except Exception as e:
                     # Async call failed - fall back to sync, which is a start
@@ -1195,6 +1233,7 @@ async def vcs_export_database(
                             str(db_path), str(export_path), full_export=full_export
                         ),
                         export_path,
+                        call_started_at=call_started_at,
                     )
             else:
                 # Use sync path (no callbacks available): a start whose outcome
@@ -1204,13 +1243,14 @@ async def vcs_export_database(
                         str(db_path), str(export_path), full_export=full_export
                     ),
                     export_path,
+                    call_started_at=call_started_at,
                 )
             
             return _attach_log_context({
                 "success": True,
                 "export_path": str(export_path),
                 "messages": (completion or {}).get("log_messages"),
-            }, export_path, "Export", completion)
+            }, export_path, "Export", completion, call_started_at=call_started_at, executed=True)
     
     except Exception as e:
         return {
@@ -1474,6 +1514,7 @@ async def vcs_import_objects(
     The add-in gitignores its ``logs`` folder, so Glob/Grep will not find
     these files. Open ``log_path`` directly, or call vcs_get_log("Merge").
     """
+    call_started_at = time.time()
     config = get_config()
     callback_url = get_callback_url()
     op_manager = _get_operation_manager()
@@ -1534,7 +1575,7 @@ async def vcs_import_objects(
                     if result.get("success") and "imported_count" not in result:
                         result["imported_count"] = "See log for details"
                     result = surface_own_decision(result)
-                return _attach_log_context(result, src_path, "Merge")
+                return _attach_log_context(result, src_path, "Merge", call_started_at=call_started_at, executed=True)
             
             mode_refusal = select_interactive_mode(addin, policy)
             if mode_refusal:
@@ -1572,7 +1613,7 @@ async def vcs_import_objects(
                 "source_dir": str(src_path),
                 **normalized,
             }
-            return _attach_log_context(result, src_path, "Merge", final)
+            return _attach_log_context(result, src_path, "Merge", final, call_started_at=call_started_at, executed=True)
 
     except InvalidDecisionPolicy as e:
         return invalid_policy_result(e, imported_count=0)
@@ -1634,6 +1675,7 @@ async def vcs_rebuild_database(
     The add-in gitignores its ``logs`` folder, so Glob/Grep will not find
     these files. Open ``log_path`` directly, or call vcs_get_log("Build").
     """
+    call_started_at = time.time()
     config = get_config()
     callback_url = get_callback_url()
     op_manager = _get_operation_manager()
@@ -1704,7 +1746,7 @@ async def vcs_rebuild_database(
                                     {**completion, "success": False}, "Build failed"
                                 ),
                                 "output_path": None,
-                            }, src_path, "Build", completion)
+                            }, src_path, "Build", completion, call_started_at=call_started_at, executed=True)
                     elif async_result.get("sync"):
                         # The add-in answered inline and no callback will follow;
                         # re-running the build here would build twice. Build
@@ -1714,6 +1756,7 @@ async def vcs_rebuild_database(
                         return _build_start_outcome(
                             start_only_result(async_result.get("result"), "build", "Build"),
                             src_path, output_path,
+                            call_started_at=call_started_at,
                         )
                     else:
                         # Neither marker: the add-in never started the operation,
@@ -1723,6 +1766,7 @@ async def vcs_rebuild_database(
                         return _build_start_outcome(
                             addin.build_from_source(str(src_path), output_path),
                             src_path, output_path,
+                            call_started_at=call_started_at,
                         )
                 except Exception as e:
                     # Async call failed - fall back to sync, which is a start
@@ -1731,6 +1775,7 @@ async def vcs_rebuild_database(
                     return _build_start_outcome(
                         addin.build_from_source(str(src_path), output_path),
                         src_path, output_path,
+                        call_started_at=call_started_at,
                     )
             else:
                 # Use sync path (no callbacks available): a start whose outcome
@@ -1738,13 +1783,14 @@ async def vcs_rebuild_database(
                 return _build_start_outcome(
                     addin.build_from_source(str(src_path), output_path),
                     src_path, output_path,
+                    call_started_at=call_started_at,
                 )
             
             return _attach_log_context({
                 "success": True,
                 "output_path": output_path,
                 "source_dir": str(src_path),
-            }, src_path, "Build", completion)
+            }, src_path, "Build", completion, call_started_at=call_started_at, executed=True)
         finally:
             try:
                 app.Quit()

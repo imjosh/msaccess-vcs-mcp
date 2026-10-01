@@ -8,6 +8,7 @@ that spares agents a follow-up call into a gitignored folder.
 
 import asyncio
 import json
+import os
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -34,6 +35,7 @@ def _unwrap_sync(tool_fn):
 def _patch_tool_infra(monkeypatch, tmp_path_factory):
     diag_dir = tmp_path_factory.mktemp("diag")
     monkeypatch.setenv("ACCESS_VCS_DIAGNOSTIC_LOG_DIR", str(diag_dir))
+    monkeypatch.setattr("msaccess_vcs_mcp.tools.time.time", lambda: 1000.0)
 
 
 def _write_log(source_dir, name, content="line one\nline two\n"):
@@ -41,6 +43,7 @@ def _write_log(source_dir, name, content="line one\nline two\n"):
     logs.mkdir(exist_ok=True)
     path = logs / name
     path.write_text(content, encoding="utf-8")
+    os.utime(path, (1000, 1000))
     return path
 
 
@@ -209,68 +212,113 @@ class TestReadLogExcerpt:
 
 
 class TestAttachLogContext:
-    def test_completion_log_path_wins_over_disk_lookup(self, tmp_path):
-        from_callback = _write_log(tmp_path, "Merge_20260101_000000_000.log")
+    @pytest.mark.parametrize("origin", ["result", "completion"])
+    @pytest.mark.parametrize("exists", [True, False])
+    def test_explicit_path_wins(self, tmp_path, origin, exists):
+        explicit = tmp_path / "explicit.log"
+        if exists:
+            explicit.write_text("explicit failure", encoding="utf-8")
         _write_log(tmp_path, "Merge_20260807_235959_999.log")
+        result = {"success": False}
+        completion = {}
+        (result if origin == "result" else completion)["log_path"] = str(explicit)
+
+        result = _attach_log_context(result, tmp_path, "Merge", completion)
+
+        assert result["log_path"] == str(explicit)
+        assert ("log_excerpt" in result) == exists
+
+    @pytest.mark.parametrize("pattern", [
+        "invalid_decision_policy", "operation_already_running", "merge_not_available",
+        "interaction_mode_unconfirmed", "policy_unconfirmed", "api_refused", "api_self_dispatch",
+    ])
+    @pytest.mark.parametrize("origin", ["result", "completion"])
+    @pytest.mark.parametrize("mtime", [999, 1000, 1001])
+    def test_refusals_never_borrow_logs(self, tmp_path, pattern, origin, mtime):
+        log = _write_log(tmp_path, "Merge_20260807_235959_999.log")
+        os.utime(log, (mtime, mtime))
+        refusal = {"error_pattern": pattern}
+        if pattern == "api_refused":
+            refusal = {"api_refused": True, "error_pattern": "unknown_dispatcher_refusal"}
+        result = {"success": False, "log_excerpt": "stale"}
+        completion = {}
+        (result if origin == "result" else completion).update(refusal)
 
         result = _attach_log_context(
-            {"success": True}, tmp_path, "Merge", {"log_path": str(from_callback)}
-        )
-
-        assert result["log_path"] == str(from_callback)
-
-    def test_result_log_path_wins_when_no_completion(self, tmp_path):
-        """Sync ImportByType / ExportByType put log_path on the result first."""
-        from_result = _write_log(tmp_path, "Merge_20260101_000000_000.log")
-        _write_log(tmp_path, "Merge_20260807_235959_999.log")
-
-        result = _attach_log_context(
-            {"success": True, "log_path": str(from_result)}, tmp_path, "Merge"
-        )
-
-        assert result["log_path"] == str(from_result)
-
-    def test_falls_back_to_disk_when_callback_has_no_path(self, tmp_path):
-        newest = _write_log(tmp_path, "Merge_20260807_235959_999.log")
-
-        result = _attach_log_context({"success": True}, tmp_path, "Merge", {})
-
-        assert result["log_path"] == str(newest)
-
-    def test_stale_callback_path_falls_back_to_disk(self, tmp_path):
-        newest = _write_log(tmp_path, "Merge_20260807_235959_999.log")
-
-        result = _attach_log_context(
-            {"success": True}, tmp_path, "Merge", {"log_path": str(tmp_path / "gone.log")}
-        )
-
-        assert result["log_path"] == str(newest)
-
-    def test_stale_callback_path_with_no_logs_is_none(self, tmp_path):
-        result = _attach_log_context(
-            {"success": True}, tmp_path, "Merge", {"log_path": str(tmp_path / "gone.log")}
+            result, tmp_path, "Merge", completion, call_started_at=1000, executed=True,
         )
 
         assert result["log_path"] is None
-
-    def test_failure_includes_excerpt(self, tmp_path):
-        _write_log(tmp_path, "Merge_20260807_120000_000.log", "Error: merge blew up\n")
-
-        result = _attach_log_context({"success": False, "error": "x"}, tmp_path, "Merge")
-
-        assert "merge blew up" in result["log_excerpt"]
-
-    def test_success_omits_excerpt(self, tmp_path):
-        _write_log(tmp_path, "Merge_20260807_120000_000.log")
-
-        result = _attach_log_context({"success": True}, tmp_path, "Merge")
-
         assert "log_excerpt" not in result
-        assert result["log_path"] is not None
 
-    def test_failure_without_any_log_omits_excerpt(self, tmp_path):
-        result = _attach_log_context({"success": False, "error": "x"}, tmp_path, "Merge")
+    @pytest.mark.parametrize("mtime,accepted", [(999, False), (1000, True), (1001, True)])
+    @pytest.mark.parametrize("success", [True, False])
+    def test_fallback_requires_current_log(self, tmp_path, mtime, accepted, success):
+        _write_log(tmp_path, "Merge_20260101_000000_000.log")
+        newest = _write_log(tmp_path, "Merge_20260807_235959_999.log", "this run failed")
+        os.utime(newest, (mtime, mtime))
 
+        result = _attach_log_context(
+            {"success": success}, tmp_path, "Merge", call_started_at=1000, executed=True,
+        )
+
+        assert result["log_path"] == (str(newest) if accepted else None)
+        assert ("log_excerpt" in result) == (accepted and not success)
+
+    @pytest.mark.parametrize("kwargs", [
+        {}, {"executed": True}, {"call_started_at": 1000},
+        {"call_started_at": 1000, "executed": False},
+    ])
+    def test_unknown_execution_or_start_does_not_borrow(self, tmp_path, kwargs):
+        _write_log(tmp_path, "Merge_20260807_235959_999.log")
+        result = _attach_log_context({"success": False}, tmp_path, "Merge", **kwargs)
+        assert result["log_path"] is None
+        assert "log_excerpt" not in result
+
+    def test_unstarted_decision_does_not_borrow(self, tmp_path):
+        _write_log(tmp_path, "Merge_20260807_235959_999.log")
+        result = _attach_log_context(
+            {"success": False, "started": False, "error_pattern": "decision_required"},
+            tmp_path, "Merge", call_started_at=1000, executed=True,
+        )
+        assert result["log_path"] is None
+        assert "log_excerpt" not in result
+
+    def test_executed_decision_uses_current_log(self, tmp_path):
+        log = _write_log(tmp_path, "Merge_20260807_235959_999.log", "decision blocked")
+        result = _attach_log_context(
+            {"success": False, "error_pattern": "decision_required"},
+            tmp_path, "Merge", call_started_at=1000, executed=True,
+        )
+        assert result["log_path"] == str(log)
+        assert result["log_excerpt"] == "decision blocked"
+
+    def test_missing_logs_omit_excerpt(self, tmp_path):
+        result = _attach_log_context(
+            {"success": False}, tmp_path, "Merge", call_started_at=1000, executed=True,
+        )
+        assert result["log_path"] is None
+        assert "log_excerpt" not in result
+
+    def test_empty_path_is_unknown(self, tmp_path):
+        result = _attach_log_context({"success": False, "log_path": ""}, tmp_path, "Merge")
+        assert result["log_path"] is None
+        assert "log_excerpt" not in result
+
+    def test_explicit_refusal_log_remains_authoritative(self, tmp_path):
+        log = _write_log(tmp_path, "Merge_20260101_000000_000.log", "known log")
+        result = _attach_log_context(
+            {"success": False, "error_pattern": "operation_already_running", "log_path": str(log)},
+            tmp_path, "Merge", call_started_at=1001, executed=False,
+        )
+        assert result["log_path"] == str(log)
+        assert result["log_excerpt"] == "known log"
+
+    def test_disappearing_fallback_log_is_unknown(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("msaccess_vcs_mcp.tools._newest_log", lambda *args: str(tmp_path / "gone.log"))
+        result = _attach_log_context(
+            {"success": False}, tmp_path, "Merge", call_started_at=1000, executed=True,
+        )
         assert result["log_path"] is None
         assert "log_excerpt" not in result
 
