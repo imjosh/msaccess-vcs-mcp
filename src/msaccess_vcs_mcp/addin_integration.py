@@ -20,6 +20,7 @@ try:
 except ImportError:
     COM_AVAILABLE = False
 
+from .decision_policy import is_decision_required, normalize_terminal_result
 from .usage_logging import log_addin_probe
 
 # Prefix the add-in puts on a refused (re-entrant) call. Keep in sync with
@@ -47,6 +48,57 @@ def api_refusal_payload(value: Any) -> dict[str, Any] | None:
             "api_refused": True,
         }
     return None
+
+
+_UNCONFIRMED_START_ERROR = (
+    "The {operation} started, but no completion callback exists on this path to "
+    "report its outcome. It may have succeeded or failed. Read log_path, or "
+    "call vcs_get_recent_calls() and vcs_get_log(log_type=\"{log_type}\")."
+)
+
+
+def unconfirmed_start_result(operation: str, log_type: str) -> dict[str, Any]:
+    """The result of a start whose outcome this path cannot follow.
+
+    Same shape as the merge's (M15): neither a success nor a failure, no
+    ``error_pattern``, so the caller must not retry blindly.
+    """
+    return {
+        "success": False,
+        "started": True,
+        "completion_unconfirmed": True,
+        "error": _UNCONFIRMED_START_ERROR.format(operation=operation, log_type=log_type),
+    }
+
+
+def start_only_result(raw: Any, operation: str, log_type: str) -> dict[str, Any]:
+    """Interpret what a start-only API call (Export, FullExport, ExportVBA, Build) returned.
+
+    These add-in methods are Subs or form starts, so a normal return is Empty and
+    says nothing about the outcome. Only an explicit failure is reported as one:
+    a dispatcher refusal, or a JSON object with ``success: false`` or an
+    undecided ``decision_required``, which keeps its ``error_pattern``. Anything
+    else, including a ``success: true`` the method has no contract to give, is an
+    unconfirmed start. This never returns ``success: true``.
+    """
+    refusal = api_refusal_payload(raw)
+    if refusal:
+        return refusal
+    value = raw
+    if isinstance(value, str) and value.strip():
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = None
+    if isinstance(value, dict):
+        wrapped = api_refusal_payload(value.get("error"))
+        if wrapped:
+            return {**value, **wrapped}
+        if value.get("success") is False or is_decision_required(value):
+            return normalize_terminal_result(
+                {**value, "success": False}, f"The {operation} failed"
+            )
+    return unconfirmed_start_result(operation, log_type)
 
 
 def get_access_info(app) -> dict[str, Any]:
@@ -525,36 +577,20 @@ class VCSAddinIntegration:
             full_export: If True, force full export; if False, use fast save
             
         Returns:
-            Dictionary with export results:
-            - success: Boolean
-            - export_path: Path where files were exported
-            - log_path: Path to Export.log file
-            - message: Status message
+            Dictionary with the start result, never ``success: true``: Export and
+            FullExport return Empty, so the outcome is unknown.
+            - success: False
+            - started / completion_unconfirmed: True when the call returned
+              normally; ``error`` then says to read the log
+            - error / message: The failure, for a refusal or a COM exception
+            - export_path: Path the export was asked to write to
+            - log_path: Path to Export.log, when it exists
         """
         export_path = self._get_export_folder(db_path, source_folder)
-        
-        try:
-            # Call VCS API directly (Export or FullExport based on flag)
-            command = "FullExport" if full_export else "Export"
-            self._call_addin_function(command)
-            
-            # Check for log file to confirm export completed
-            log_path = os.path.join(export_path, "Export.log")
-            
-            return {
-                "success": True,
-                "export_path": export_path,
-                "log_path": log_path if os.path.exists(log_path) else None,
-                "message": "Export completed successfully"
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "export_path": export_path,
-                "log_path": None,
-                "message": f"Export failed: {e}"
-            }
+        command = "FullExport" if full_export else "Export"
+        result = self._start_only(command, "export", "Export", export_path, "Export.log")
+        result["export_path"] = export_path
+        return result
     
     def export_vba(self, db_path: str, source_folder: Optional[str] = None) -> dict[str, Any]:
         """
@@ -568,29 +604,12 @@ class VCSAddinIntegration:
             source_folder: Optional custom export folder
             
         Returns:
-            Dictionary with export results
+            Dictionary with the start result, as for ``export_source``
         """
         export_path = self._get_export_folder(db_path, source_folder)
-        
-        try:
-            self._call_addin_function("ExportVBA")
-            
-            log_path = os.path.join(export_path, "Export.log")
-            
-            return {
-                "success": True,
-                "export_path": export_path,
-                "log_path": log_path if os.path.exists(log_path) else None,
-                "message": "VBA export completed successfully"
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "export_path": export_path,
-                "log_path": None,
-                "message": f"VBA export failed: {e}"
-            }
+        result = self._start_only("ExportVBA", "VBA export", "Export", export_path, "Export.log")
+        result["export_path"] = export_path
+        return result
     
     def merge_build(
         self,
@@ -670,34 +689,48 @@ class VCSAddinIntegration:
             output_path: Optional path for new database (default: build in place)
             
         Returns:
-            Dictionary with build results:
-            - success: Boolean
-            - output_path: Path to built database
-            - log_path: Path to Build.log file
-            - message: Status message
+            Dictionary with the start result, never ``success: true``: Build is a
+            form start that returns Empty, so the outcome is unknown.
+            - success: False
+            - started / completion_unconfirmed: True when the call returned
+              normally; ``error`` then says to read the log
+            - error / message: The failure, for a refusal or a COM exception
+            - output_path: Path the build was asked to write to; None on failure
+            - log_path: Path to Build.log, when it exists
         """
+        # Build always takes an optional source folder argument.
+        # BuildAs is interactive-only (shows file dialogs), so we use
+        # Build for both cases in headless mode.
+        result = self._start_only("Build", "build", "Build", source_folder, "Build.log", source_folder)
+        result["output_path"] = output_path if result.get("completion_unconfirmed") else None
+        return result
+
+    def _start_only(
+        self,
+        command: str,
+        operation: str,
+        log_type: str,
+        folder: str,
+        log_name: str,
+        *args: Any,
+    ) -> dict[str, Any]:
+        """Dispatch a start-only API method and report only what its return proves.
+
+        ``folder`` is where ``log_name`` is looked for.
+        """
+        log_path = os.path.join(folder, log_name)
         try:
-            # Build always takes an optional source folder argument.
-            # BuildAs is interactive-only (shows file dialogs), so we use
-            # Build for both cases in headless mode.
-            self._call_addin_function("Build", source_folder)
-            
-            log_path = os.path.join(source_folder, "Build.log")
-            
-            return {
-                "success": True,
-                "output_path": output_path,
-                "log_path": log_path if os.path.exists(log_path) else None,
-                "message": "Build from source completed successfully"
-            }
-            
+            raw = self._call_addin_function(command, *args)
         except Exception as e:
+            message = f"The {operation} failed: {e}"
             return {
-                "success": False,
-                "output_path": None,
-                "log_path": None,
-                "message": f"Build from source failed: {e}"
+                "success": False, "log_path": None,
+                "error": message, "message": message,
             }
+        result = start_only_result(raw, operation, log_type)
+        result["log_path"] = log_path if os.path.exists(log_path) else None
+        result["message"] = result.get("error")
+        return result
     
     def parse_log_file(self, log_path: str) -> dict[str, Any]:
         """

@@ -74,6 +74,26 @@ contradictory guidance.
 
 ---
 
+## 2026-09-30 — Whole export and database build report success only from a callback; every other path is `completion_unconfirmed`
+
+**Trigger**: M35 (interface review F12). `Export`, `FullExport` and `ExportVBA` are Subs and `Build` is a form start, so their API return is Empty. MCP's sync helpers discarded that return and made up `success: true`, the inline `{sync: true, result}` marker was accepted without reading `result`, and every sync fallback omitted `full_export`, so a requested `FullExport` ran as `Export`.
+
+**Options explored**:
+- MCP only: reuse the `completion_unconfirmed` result M15 defined for the merge. Chosen: the add-in contract does not change and the result shape is already documented.
+- Add-in final-result sync APIs for whole export and build. Deferred, out of scope: it changes the add-in contract and needs its own ticket. Reopen it if callers need a confirmed outcome without the callback server.
+
+**Decision**:
+- `vcs_export_database` and `vcs_rebuild_database` are `success: true` only on a terminal callback. The sync fallback, an inline marker whose nested result is Empty, and a neither-marker start all return `success: false, started: true, completion_unconfirmed: true`, no `error_pattern`, with `log_path` / `log_excerpt` when found and guidance text naming the operation and its log family.
+- An inline marker's nested `result` is parsed: a dispatcher refusal or a `success: false` object fails and keeps its pattern and decision fields (through M34's `normalize_terminal_result`); anything else is unconfirmed. An inline start is not repeated.
+- `export_source`, `export_vba` and `build_from_source` return that start result; a COM exception still fails. `start_only_result` in `addin_integration.py` is the one interpreter.
+- `full_export` is passed to `export_source` on every fallback, so `FullExport` is dispatched on the async, inline and sync paths.
+
+**What this rules out**: Reporting success for a start-only API from its return. The unconfirmed marker is an MCP result field, not an add-in field. The rebuild entry point (`BuildAs` with no source folder on the async path) and the export destination are X09 and X10.
+
+**Relevant files**: `addin_integration.py` (`start_only_result`, `unconfirmed_start_result`, `_start_only`), `tools.py` (`_export_start_outcome`, `_build_start_outcome`, `vcs_export_database`, `vcs_rebuild_database`), `tests/test_export_build_fallbacks.py`, `docs/DIALOGS.md`.
+
+---
+
 ## 2026-09-30 — `vcs_cancel_operation` records a request; `cancelled` means the add-in confirmed it
 
 **Trigger**: M37 (interface review F7, MCP half). The tool set a flag and returned `success: true, "Operation will stop at next safe point"`, yet the add-in did not poll the flag (A28 wires that) and a run that finished anyway returned its normal result with nothing saying a cancel had been asked for. The acknowledgment read as a stop.

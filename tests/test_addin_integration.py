@@ -164,8 +164,8 @@ class TestVCSAddinIntegration:
         
         assert folder == custom_folder
     
-    def test_export_source_success(self, tmp_path):
-        """Test successful source export."""
+    def test_export_source_return_is_unconfirmed_not_success(self, tmp_path):
+        """Export returns Empty, so a normal return proves only that it started."""
         addin_file = tmp_path / "test_addin.accda"
         addin_file.touch()
         
@@ -179,7 +179,10 @@ class TestVCSAddinIntegration:
         db_path = str(tmp_path / "test.accdb")
         result = addin.export_source(db_path)
         
-        assert result["success"] is True
+        assert result["success"] is False
+        assert result["started"] is True
+        assert result["completion_unconfirmed"] is True
+        assert "error_pattern" not in result
         assert "export_path" in result
         assert "message" in result
         mock_app.Run.assert_called()
@@ -200,7 +203,8 @@ class TestVCSAddinIntegration:
         result = addin.export_source(db_path)
         
         assert result["success"] is False
-        assert "Export failed" in result["message"]
+        assert "export failed" in result["message"]
+        assert "completion_unconfirmed" not in result
     
     def test_export_vba(self, tmp_path):
         """Test VBA-only export."""
@@ -217,8 +221,9 @@ class TestVCSAddinIntegration:
         db_path = str(tmp_path / "test.accdb")
         result = addin.export_vba(db_path)
         
-        assert result["success"] is True
-        mock_app.Run.assert_called()
+        assert result["success"] is False
+        assert result["completion_unconfirmed"] is True
+        assert mock_app.Run.call_args.args[1] == "ExportVBA"
     
     def test_merge_build(self, tmp_path):
         """Test merge build operation."""
@@ -285,8 +290,9 @@ class TestVCSAddinIntegration:
         source_folder = str(tmp_path / "source")
         result = addin.build_from_source(source_folder)
         
-        assert result["success"] is True
-        mock_app.Run.assert_called()
+        assert result["success"] is False
+        assert result["completion_unconfirmed"] is True
+        assert mock_app.Run.call_args.args[1:] == ("Build", source_folder)
     
     def test_parse_log_file_exists(self, tmp_path):
         """Test parsing existing log file."""

@@ -113,6 +113,27 @@ do not retry it blindly. Read `log_path`, or call `vcs_get_recent_calls()`
 and `vcs_get_log(log_type="Merge")`. A refusal arrives both as the sync return
 and on the callback; MCP returns it once.
 
+Whole-database export and build follow the same rule. `Export`, `FullExport`,
+`ExportVBA` and `Build` are Subs or form starts, so their API return is Empty
+and says nothing about the outcome. `vcs_export_database` and
+`vcs_rebuild_database` report success only from a terminal callback. Any path
+that has none returns the unconfirmed-start result above, with the operation
+named in `error` and `vcs_get_log(log_type="Export")` or `"Build"`:
+
+- the sync fallback (no callback server, an async start that raised, or a
+  start result with neither `async` nor `sync`);
+- an inline `{sync: true, result}` marker. MCP parses the nested `result`:
+  a dispatcher refusal or a failure object with `success: false` fails and
+  keeps its `error_pattern`, `decisions` and `decision_required`; Empty or
+  anything else is unconfirmed. It is never run a second time.
+
+A COM exception still fails. The integration helpers `export_source`,
+`export_vba` and `build_from_source` never return `success: true` for the same
+reason. `full_export=True` dispatches `FullExport` on the async, inline and
+sync-fallback paths. A final-result sync API in the add-in is deferred (see
+`DECISIONS.md`); until it exists, an agent that needs the outcome without the
+callback server reads the log.
+
 `RunFilteredTests` is different: it runs the tests before it returns, and its
 return is the final results JSON (or a refusal). `vcs_run_tests` returns a
 refusal once, normalised, and does not call `RunFilteredTests` a second time.

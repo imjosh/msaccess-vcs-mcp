@@ -86,7 +86,7 @@ from .config import (
     initialize_from_workspace,
     load_config,
 )
-from .addin_integration import VCSAddinIntegration
+from .addin_integration import VCSAddinIntegration, start_only_result
 from .security import (
     validate_database_path,
     validate_export_directory,
@@ -441,6 +441,40 @@ def _attach_log_context(
         if excerpt:
             result["log_excerpt"] = excerpt
     return result
+
+
+def _export_start_outcome(start: dict[str, Any], export_path: str | os.PathLike[str]) -> dict[str, Any]:
+    """The ``vcs_export_database`` result for a start that has no callback to follow.
+
+    ``start`` is what ``export_source`` or ``start_only_result`` returned. It is an
+    unconfirmed start or a failure, never a success. A failure keeps its
+    ``error_pattern`` and the empty counts of any other failed export.
+    """
+    result = {k: v for k, v in start.items() if k not in ("message", "log_path", "export_path")}
+    result["success"] = False
+    result["export_path"] = str(export_path)
+    if not result.get("completion_unconfirmed"):
+        result["exported_count"] = 0
+        result["objects_by_type"] = {}
+    return _attach_log_context(result, export_path, "Export")
+
+
+def _build_start_outcome(
+    start: dict[str, Any], src_path: str | os.PathLike[str], output_path: str | None
+) -> dict[str, Any]:
+    """The ``vcs_rebuild_database`` result for a start that has no callback to follow.
+
+    As ``_export_start_outcome``: an unconfirmed start or a failure, never a
+    success. An unconfirmed start reports the path the build was asked to write.
+    """
+    result = {k: v for k, v in start.items() if k not in ("message", "log_path", "output_path")}
+    result["success"] = False
+    if result.get("completion_unconfirmed"):
+        result["output_path"] = output_path
+        result["source_dir"] = str(src_path)
+    else:
+        result["output_path"] = None
+    return _attach_log_context(result, src_path, "Build")
 
 
 def _scoped_types_arg(object_types: list[str]) -> str | list[str]:
@@ -1016,7 +1050,15 @@ async def vcs_export_database(
         - errors: List of any errors encountered
         - log_path: Full path to this run's log file
         - log_excerpt: Tail of the log, included only on failure
-    
+
+    A whole-project export reports ``success: true`` only from the add-in's
+    completion callback. Without one (no callback server, an async start that
+    failed, or an inline start result) the result is ``success: false`` with
+    ``started: true`` and ``completion_unconfirmed: true``: the export may have
+    finished either way, so do not retry it blindly. Read ``log_path``, or call
+    ``vcs_get_recent_calls()`` and ``vcs_get_log(log_type="Export")``.
+    ``full_export=True`` runs ``FullExport`` on every one of those paths.
+
     The add-in gitignores its ``logs`` folder, so Glob/Grep will not find
     these files. Open ``log_path`` directly, or call vcs_get_log("Export").
     """
@@ -1098,11 +1140,17 @@ async def vcs_export_database(
                 try:
                     # Call async API (Export/FullExport use VCS options)
                     async_result = addin.call_async(callback_info, command)
-                    
+
                     completion = None
                     if async_result.get("sync"):
-                        # VBA returned sync result
+                        # The add-in answered inline, so no callback will follow.
+                        # Export and FullExport return Empty: parse the nested
+                        # value rather than assume success.
                         op_manager.unregister_operation(operation_id)
+                        return _export_start_outcome(
+                            start_only_result(async_result.get("result"), "export", "Export"),
+                            export_path,
+                        )
                     elif async_result.get("async"):
                         # Wait for completion with progress reporting
                         timeout_ms = async_result.get("timeout_ms", 300000)
@@ -1132,43 +1180,31 @@ async def vcs_export_database(
                         # so run it synchronously rather than reporting success
                         # for work that never happened.
                         op_manager.unregister_operation(operation_id)
-                        result = addin.export_source(str(db_path), str(export_path))
-                        
-                        if not result["success"]:
-                            return _attach_log_context({
-                                "success": False,
-                                "error": result["message"],
-                                "exported_count": 0,
-                                "export_path": str(export_path),
-                                "objects_by_type": {},
-                            }, export_path, "Export")
+                        return _export_start_outcome(
+                            addin.export_source(
+                                str(db_path), str(export_path), full_export=full_export
+                            ),
+                            export_path,
+                        )
                 except Exception as e:
-                    # Async call failed - fall back to sync
-                    completion = None
+                    # Async call failed - fall back to sync, which is a start
+                    # with no callback: its outcome is unconfirmed.
                     op_manager.unregister_operation(operation_id)
-                    result = addin.export_source(str(db_path), str(export_path))
-                    
-                    if not result["success"]:
-                        return _attach_log_context({
-                            "success": False,
-                            "error": result["message"],
-                            "exported_count": 0,
-                            "export_path": str(export_path),
-                            "objects_by_type": {},
-                        }, export_path, "Export")
+                    return _export_start_outcome(
+                        addin.export_source(
+                            str(db_path), str(export_path), full_export=full_export
+                        ),
+                        export_path,
+                    )
             else:
-                # Use sync path (no callbacks available)
-                completion = None
-                result = addin.export_source(str(db_path), str(export_path))
-                
-                if not result["success"]:
-                    return _attach_log_context({
-                        "success": False,
-                        "error": result["message"],
-                        "exported_count": 0,
-                        "export_path": str(export_path),
-                        "objects_by_type": {},
-                    }, export_path, "Export")
+                # Use sync path (no callbacks available): a start whose outcome
+                # nothing reports, so it is unconfirmed, never a success.
+                return _export_start_outcome(
+                    addin.export_source(
+                        str(db_path), str(export_path), full_export=full_export
+                    ),
+                    export_path,
+                )
             
             return _attach_log_context({
                 "success": True,
@@ -1588,8 +1624,13 @@ async def vcs_rebuild_database(
     
     Returns:
         Dictionary with build results, plus ``log_path`` for this run's log
-        and ``log_excerpt`` (tail of the log) on failure.
-    
+        and ``log_excerpt`` (tail of the log) on failure. ``success: true``
+        comes only from the add-in's completion callback. Without one the
+        result is ``success: false`` with ``started: true`` and
+        ``completion_unconfirmed: true``: the build may have finished either
+        way, so do not retry it blindly. Read ``log_path``, or call
+        ``vcs_get_recent_calls()`` and ``vcs_get_log(log_type="Build")``.
+        
     The add-in gitignores its ``logs`` folder, so Glob/Grep will not find
     these files. Open ``log_path`` directly, or call vcs_get_log("Build").
     """
@@ -1665,43 +1706,39 @@ async def vcs_rebuild_database(
                                 "output_path": None,
                             }, src_path, "Build", completion)
                     elif async_result.get("sync"):
-                        # The add-in already ran the build inline; re-running it
-                        # here would build twice. Fall through and resolve the
-                        # log from disk.
+                        # The add-in answered inline and no callback will follow;
+                        # re-running the build here would build twice. Build
+                        # returns Empty, so parse the nested value rather than
+                        # assume success.
                         op_manager.unregister_operation(operation_id)
+                        return _build_start_outcome(
+                            start_only_result(async_result.get("result"), "build", "Build"),
+                            src_path, output_path,
+                        )
                     else:
                         # Neither marker: the add-in never started the operation,
                         # so run it synchronously rather than reporting success
                         # for work that never happened.
                         op_manager.unregister_operation(operation_id)
-                        result = addin.build_from_source(str(src_path), output_path)
-                        if not result["success"]:
-                            return _attach_log_context({
-                                "success": False,
-                                "error": result["message"],
-                                "output_path": None,
-                            }, src_path, "Build")
+                        return _build_start_outcome(
+                            addin.build_from_source(str(src_path), output_path),
+                            src_path, output_path,
+                        )
                 except Exception as e:
-                    # Async call failed - fall back to sync
-                    completion = None
+                    # Async call failed - fall back to sync, which is a start
+                    # with no callback: its outcome is unconfirmed.
                     op_manager.unregister_operation(operation_id)
-                    result = addin.build_from_source(str(src_path), output_path)
-                    if not result["success"]:
-                        return _attach_log_context({
-                            "success": False,
-                            "error": result["message"],
-                            "output_path": None,
-                        }, src_path, "Build")
+                    return _build_start_outcome(
+                        addin.build_from_source(str(src_path), output_path),
+                        src_path, output_path,
+                    )
             else:
-                # Use sync path
-                completion = None
-                result = addin.build_from_source(str(src_path), output_path)
-                if not result["success"]:
-                    return _attach_log_context({
-                        "success": False,
-                        "error": result["message"],
-                        "output_path": None,
-                    }, src_path, "Build")
+                # Use sync path (no callbacks available): a start whose outcome
+                # nothing reports, so it is unconfirmed, never a success.
+                return _build_start_outcome(
+                    addin.build_from_source(str(src_path), output_path),
+                    src_path, output_path,
+                )
             
             return _attach_log_context({
                 "success": True,
