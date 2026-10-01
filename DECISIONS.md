@@ -74,7 +74,53 @@ contradictory guidance.
 
 ---
 
+## 2026-10-01 — Version probes use a bounded COM-initialized exempt worker (M45)
+
+**Trigger**: M45, the gate-exempt `vcs_get_version_info` still called
+`get_version_info_safe()` on the server loop after M44. Access startup or a
+trust prompt prevented dialog, status and cancel tools from answering.
+
+**Options explored**:
+- Use the gate's COM apartment: rejected because a version probe would wait
+  behind the blocked operation whose environment the caller wants to inspect.
+- Use the default executor: rejected because hung probes could consume threads
+  needed by unrelated waits, and its queue is unbounded.
+- Use the existing per-tool exempt worker budget (chosen), with a 120 s deadline
+  instead of the dialog timeout plus 5 s, to accommodate cold Access startup.
+
+**Decision**: Keep environment loading and result enrichment on the server loop.
+Move only the full validation call to an exempt worker, initialize COM there,
+and uninitialize after validation has returned and cleaned up. COM objects
+never cross back to the server loop. At most two probes run and two wait;
+abandoned workers retain their budget and ownership until their synchronous
+sequence returns, so client cancellation or the deadline cannot skip cleanup.
+Recovery tools retain their independent worker budgets. A permanently blocked
+COM call still requires recovery; timing out does not kill Access or its worker.
+
+The existing attach/create ownership rules remain unchanged: an isolated host
+is quit, while an attached target is left open. Overlap with gated COM work is
+allowed: each call obtains its own COM proxies in its own apartment; attaching
+can reach the same Access process when it holds the configured target. No proxy
+is shared between the threads. The regression test completes a gated option
+read during a three-second blocked version attach and verifies same-thread
+cleanup after completion, cancellation and timeout for both ownership paths.
+Live version and gated `ShowDebug` calls also both succeeded concurrently on
+the configured target, with no LoopLag span over 1 s (tracker
+`verification/M45/version_probe.json`). Existing M43 ownership tests pass unchanged.
+
+**What this rules out**: Moving just attach or just cleanup to a worker, or
+making version probes wait for the Access gate. The M44 entry's uncovered
+version-probe case is addressed here; its gated dispatch design is unchanged.
+
+**Relevant files**: `tools.py`, `access_gate.py`,
+`tests/test_version_info_dispatch.py`; tracker ticket M45 and `verification/M45/`.
+
+
+---
+
 ## 2026-10-01 — Async gated tool bodies run on the COM apartment thread in a loop of their own (M44)
+
+> **Partially superseded** (2026-10-01): M45 moves the exempt version probe off the server loop. See the version-probe entry above.
 
 **Trigger**: M44, found by X12. `AccessGate.run_exclusive` awaited an async body on the server's event loop; only sync bodies went to the apartment executor. `vcs_export_database`, `vcs_list_objects`, `vcs_import_objects`, `vcs_run_tests` and `vcs_rebuild_database` are async (they await completion callbacks and report progress), and their connect, add-in probe, synchronous API calls and build-host startup ran on that loop. X12 measured loop stalls of 4 to 14 s, during which `vcs_list_dialogs`, `vcs_automation_status` and `vcs_cancel_operation` could not start or return.
 

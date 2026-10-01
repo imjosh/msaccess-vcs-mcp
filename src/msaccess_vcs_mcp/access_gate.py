@@ -38,8 +38,9 @@ DEFAULT_BUSY_WAIT_SEC = 15.0
 SLOT_POLL_SEC = 0.02
 _call_ids = itertools.count(1)
 
-# Tools that never touch an Access instance — they stay responsive while
-# a long export or test run holds the gate.
+# Tools that can run independently of the Access gate. Dialog/status/cancel
+# tools must stay responsive during a long operation. The version probe uses
+# its own COM-initialized worker; rebuild acquires the gate for its launch.
 EXEMPT_TOOLS = frozenset({
     "vcs_get_version_info",
     "vcs_cancel_operation",

@@ -971,6 +971,7 @@ async def _ensure_env_loaded(ctx: Context | None) -> None:
 
 
 EXEMPT_WORKER_MARGIN_SEC = 5.0
+VERSION_INFO_WORKER_TIMEOUT_SEC = 120.0
 
 
 async def _run_exempt_in_worker(name: str, logged, args: tuple, kwargs: dict) -> Any:
@@ -984,6 +985,9 @@ async def _run_exempt_in_worker(name: str, logged, args: tuple, kwargs: dict) ->
     requested = kwargs.get("timeout_seconds")
     ceiling = dialog_timeout_sec(requested if isinstance(requested, (int, float)) else None)
     ceiling += EXEMPT_WORKER_MARGIN_SEC
+    if name == "vcs_get_version_info":
+        # Cold Access startup and the add-in probe need more than a UI timeout.
+        ceiling = VERSION_INFO_WORKER_TIMEOUT_SEC
     try:
         return await workers_for(name).run(logged, args, kwargs, time.monotonic() + ceiling)
     except WorkerCapacityUnavailable as exc:
@@ -2259,6 +2263,26 @@ def _with_rebuild_fields(
     return result
 
 
+def _probe_version_info() -> dict[str, Any]:
+    """Keep attach, probe and cleanup in one COM apartment, even after cancellation.
+
+    The bounded exempt worker retains ownership until validation's finally has
+    quit its own host. Only plain result data returns to the server loop.
+    """
+    from .validation import COM_AVAILABLE, get_version_info_safe
+
+    if not COM_AVAILABLE:
+        return get_version_info_safe()
+
+    import pythoncom
+
+    pythoncom.CoInitialize()
+    try:
+        return get_version_info_safe()
+    finally:
+        pythoncom.CoUninitialize()
+
+
 @vcs_tool("vcs_get_version_info")
 async def vcs_get_version_info(
     ctx: Context | None = None,
@@ -2306,9 +2330,10 @@ async def vcs_get_version_info(
         is_diagnostic_logging_enabled,
         is_logging_enabled,
     )
-    from .validation import get_version_info_safe
 
-    result = get_version_info_safe()
+    result = await _run_exempt_in_worker(
+        "vcs_get_version_info", _probe_version_info, (), {}
+    )
 
     callback_url = get_callback_url()
     op_manager = _get_operation_manager()
