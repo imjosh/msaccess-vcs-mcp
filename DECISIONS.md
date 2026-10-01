@@ -74,6 +74,36 @@ contradictory guidance.
 
 ---
 
+## 2026-09-30 — Window class decides before the add-in caption (M36)
+
+**Trigger**: Live reproduction on a disposable database: a `MsgBox2`-style box
+with the caption "Version Control System" is an `NUIDialog`, but
+`classify_window` matched `ADDIN_CAPTIONS` first and reported it as
+`addin_window` (`is_dialog: false`, not blocking, `ready: true`) while it held
+Access modal. The default `MsgBox2` caption, "Version Control Add-in", is not in
+`ADDIN_CAPTIONS` and was already `vba_msgbox`.
+
+**Options explored**:
+- Reorder: test `DIALOG_CLASSES` before the caption. Chosen: the class is a
+  stronger signal than a caption any caller can pass to `MsgBox2`.
+- Add the caption to the dialog rules only when buttons are present. Rejected:
+  the NetUI box has no Win32 buttons, so this depends on MSAA reads succeeding.
+- Remove the caption heuristic. Rejected: the add-in's main and progress forms
+  (class `OForm`) still need `addin_window` and the close/cancel reservation.
+
+**Decision**: In `classify_window` the add-in caption rule applies only to a
+window whose class is not `#32770` or `NUIDialog`. The positive-signature rules
+for break, runtime error and compile error keep their order above it.
+
+**What this rules out**: An add-in-captioned standard dialog can no longer be
+treated as a nonblocking add-in window. Revisit if the add-in ever draws its own
+form with a `#32770` or `NUIDialog` class.
+
+**Relevant files**: `src/msaccess_vcs_mcp/dialog_recovery.py`,
+`docs/DIALOGS.md`, `tests/test_dialog_recovery.py`, `tests/test_dialog_live.py`.
+
+---
+
 ## 2026-09-30 — Whole export and database build report success only from a callback; every other path is `completion_unconfirmed`
 
 **Trigger**: M35 (interface review F12). `Export`, `FullExport` and `ExportVBA` are Subs and `Build` is a form start, so their API return is Empty. MCP's sync helpers discarded that return and made up `success: true`, the inline `{sync: true, result}` marker was accepted without reading `result`, and every sync fallback omitted `full_export`, so a requested `FullExport` ran as `Export`.

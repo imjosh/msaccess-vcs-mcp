@@ -274,7 +274,8 @@ nothing.
 
 A dialog gets a known kind only from a positive signature (a Microsoft
 Access or Visual Basic caption, run-time or compile error text, the End/Debug
-button set, the add-in caption, or the single-OK-button rule below). A standard
+button set, the single-OK-button rule below, or, for a window that is not a
+standard dialog box, the add-in caption). A standard
 dialog box with a custom caption is `kind: "vba_msgbox"` when its only
 actionable button is OK (a Help button does not count); this is the shape of a
 VBA `MsgBox "text", vbOKOnly, "Caption"`. Any other standard dialog that
@@ -290,6 +291,15 @@ its text and buttons through Microsoft Active Accessibility and presses a button
 with its default action, after checking again that the same button is at the
 same place. Only `NUIDialog` windows of an Access process are read. Both classes
 get the same classification rules.
+
+The window class is tested before the add-in caption. A `MsgBox2` box that
+carries an add-in caption ("Version Control System", or a caption starting
+`MSAccessVCS`) is still a `#32770` or `NUIDialog` window, so it is classified
+by its buttons like any other dialog: OK-only is `vba_msgbox` (blocking,
+`ready: false`, pressed by `safe` unless the text is destructive) and a
+multi-button box is `unknown` (blocking, report-only). Only a window of another
+class with an add-in caption, the add-in's main or progress form, is
+`kind: "addin_window"` (`is_dialog: false`, never blocking).
 
 `policy="safe"` clicks OK only on a `vba_msgbox` (an OK-only standard dialog)
 whose text is not a save, discard, delete, or overwrite confirmation. Access

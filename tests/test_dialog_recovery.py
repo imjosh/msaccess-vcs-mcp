@@ -476,3 +476,74 @@ def test_undelivered_click_is_dismiss_uncertain_and_not_retried():
     assert result["success"] is False
     assert result["error_pattern"] == "dismiss_uncertain"
     assert backend.clicked == [11]
+
+
+def _inspect(windows):
+    """Inspect the fixture's known Access process, independent of dialog captions."""
+    report = inspect_windows(
+        windows, r"C:\data\Northwind.accdb", backend=FakeBackend(windows),
+        pid=10, create_time=1000, responsive=True,
+    )
+    assert report["success"] is True, report
+    return report
+
+
+# M36: window descriptions recorded live (NUIDialog, caption set by MsgBox2 callers).
+def _branded_ok():
+    return _win(
+        hwnd=51,
+        title="Version Control System",
+        class_name="NUIDialog",
+        texts=("Addin probe bold", "addin probe line"),
+        buttons=(_button(52, "OK"),),
+    )
+
+
+def _branded_yesno():
+    return _win(
+        hwnd=61,
+        title="Version Control System",
+        class_name="NUIDialog",
+        texts=("Keep these options?",),
+        buttons=(_button(62, "Yes"), _button(63, "No")),
+    )
+
+
+def test_branded_ok_box_is_a_blocking_msgbox():
+    box = _branded_ok()
+    assert classify_window(box) == "vba_msgbox"
+    report = _inspect([box])
+    assert report["blocking_dialog"] is True
+    assert report["ready"] is False
+    assert report["dialogs"][0]["is_dialog"] is True
+
+
+def test_branded_yes_no_box_is_unknown_and_report_only():
+    box = _branded_yesno()
+    assert classify_window(box) == "unknown"
+    report = _inspect([box])
+    assert report["blocking_dialog"] is True
+    assert report["ready"] is False
+    assert auto_button(box, "unknown", "safe") is None
+
+
+def test_safe_presses_only_the_branded_ok_box_without_destructive_text():
+    ok = _branded_ok()
+    assert auto_button(ok, classify_window(ok), "safe") == "OK"
+    destructive = _win(
+        hwnd=53,
+        title="Version Control System",
+        class_name="NUIDialog",
+        texts=("Delete all objects?",),
+        buttons=(_button(54, "OK"),),
+    )
+    assert auto_button(destructive, classify_window(destructive), "safe") is None
+
+
+@pytest.mark.parametrize("class_name", ["OForm", "OFormPopup", ""])
+def test_add_in_caption_on_a_non_dialog_class_stays_addin_window(class_name):
+    form = _win(hwnd=71, title="Version Control System", class_name=class_name, texts=("Done",))
+    assert classify_window(form) == "addin_window"
+    report = _inspect([form])
+    assert report["blocking_dialog"] is False
+    assert report["dialogs"][0]["is_dialog"] is False

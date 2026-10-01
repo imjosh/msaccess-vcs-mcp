@@ -400,8 +400,13 @@ def classify_window(window: WindowInfo) -> str:
     if "end" in buttons and "debug" in buttons:
         return VBA_RUNTIME_ERROR_KIND
 
+    # The window class decides before the caption: an add-in MsgBox2 box keeps the
+    # add-in caption but is a real dialog (#32770 or NUIDialog) and blocks. Only a
+    # window of another class with an add-in caption is the add-in's own form.
     caption_key = title_l.strip()
-    if caption_key in ADDIN_CAPTIONS or caption_key.startswith("msaccessvcs"):
+    if class_name not in DIALOG_CLASSES and (
+        caption_key in ADDIN_CAPTIONS or caption_key.startswith("msaccessvcs")
+    ):
         return ADDIN_WINDOW_KIND
 
     if class_name in DIALOG_CLASSES:

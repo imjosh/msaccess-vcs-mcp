@@ -246,6 +246,18 @@ def _child_main(db_path: str, scenario: str) -> int:
             # The exact Eval string the add-in's MsgBox2 builds; Access draws it as a NUIDialog.
             app.Eval("MsgBox('Probe bold@netui probe line@@',0,'NetUIProbe','',0)")
             print(json.dumps({"event": "done"}), flush=True)
+        elif scenario in ("msgbox2_addin_ok", "msgbox2_addin_yesno", "msgbox2_default_ok"):
+            # The Eval string MsgBox2 builds, with the add-in's own captions (M36).
+            caption = {
+                "msgbox2_addin_ok": "Version Control System",
+                "msgbox2_addin_yesno": "Version Control System",
+                "msgbox2_default_ok": "",
+            }[scenario]
+            style = 4 if scenario == "msgbox2_addin_yesno" else 0
+            if not caption:
+                caption = "Version Control Add-in"
+            result = app.Eval(f"MsgBox('Addin probe bold@addin probe line@@',{style},'{caption}','',0)")
+            print(json.dumps({"event": "done", "result": int(result)}), flush=True)
         elif scenario == "access_error":
             # Without UserControl Access returns the error to COM instead of showing it.
             app.UserControl = True
@@ -449,6 +461,77 @@ def test_live_netui_msgbox2_is_listed_and_dismissed():
             assert closed["dismissed"] is True
             done = _read_json(proc, 15)
             assert done and done.get("event") == "done", done
+        finally:
+            _stop(proc)
+
+
+@pytest.mark.integration
+def test_live_branded_msgbox2_ok_is_blocking_and_dismissed():
+    """M36: an add-in caption on a NUIDialog does not make it an addin_window."""
+    reset_interruptions()
+    with tempfile.TemporaryDirectory(prefix="vcs-dialog-") as folder:
+        db_path = Path(folder) / f"ProbeBrand-{uuid.uuid4().hex[:8]}.accdb"
+        proc = _start_child(db_path, "msgbox2_addin_ok")
+        pid = 0
+        try:
+            ready = _wait_ready(proc)
+            pid = int(ready["pid"])
+            listed = _wait_dialog(db_path, pid, "Addin probe")
+            matches = [
+                item
+                for item in listed.get("dialogs") or []
+                if (item.get("title") or "") == "Version Control System"
+            ]
+            assert matches, listed
+            dialog = matches[0]
+            assert dialog["class_name"] == "NUIDialog"
+            assert dialog["kind"] == "vba_msgbox"
+            assert dialog["is_dialog"] is True
+            assert [_button_label(b) for b in dialog["buttons"]] == ["ok"]
+            assert listed["blocking_dialog"] is True
+            assert listed["ready"] is False
+
+            closed = dismiss_dialog(
+                str(db_path), dialog["dialog_id"], button="OK", pid=pid, timeout_seconds=5
+            )
+            assert closed["success"] is True, closed
+            assert closed["dismissed"] is True
+            done = _read_json(proc, 15)
+            assert done and done.get("event") == "done", done
+        finally:
+            _stop(proc)
+
+
+@pytest.mark.integration
+def test_live_branded_msgbox2_yes_no_is_unknown_and_report_only():
+    reset_interruptions()
+    with tempfile.TemporaryDirectory(prefix="vcs-dialog-") as folder:
+        db_path = Path(folder) / f"ProbeBrandYN-{uuid.uuid4().hex[:8]}.accdb"
+        proc = _start_child(db_path, "msgbox2_addin_yesno")
+        pid = 0
+        try:
+            ready = _wait_ready(proc)
+            pid = int(ready["pid"])
+            listed = _wait_dialog(db_path, pid, "Addin probe")
+            matches = [
+                item
+                for item in listed.get("dialogs") or []
+                if (item.get("title") or "") == "Version Control System"
+            ]
+            assert matches, listed
+            dialog = matches[0]
+            assert dialog["kind"] == "unknown"
+            assert _has_button(dialog["buttons"], "yes") and _has_button(dialog["buttons"], "no")
+            assert listed["blocking_dialog"] is True
+            assert listed["ready"] is False
+
+            closed = dismiss_dialog(
+                str(db_path), dialog["dialog_id"], button="No", pid=pid, timeout_seconds=5
+            )
+            assert closed["success"] is True, closed
+            done = _read_json(proc, 15)
+            assert done and done.get("event") == "done", done
+            assert int(done["result"]) == 7
         finally:
             _stop(proc)
 
