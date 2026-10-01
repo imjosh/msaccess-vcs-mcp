@@ -71,9 +71,17 @@ policy inline to `RunFilteredTests` and `MergeBuild`. A category-scoped
 `vcs_import_objects`, `vcs_import_object` and `vcs_export_object` set it with
 `SetOperationPolicy`. A session policy set that way is caller-owned: the
 add-in's `Finish` does not close it, and `ClearOperationPolicy` does. Clearing
-is idempotent. A failed clear is attached as `policy_cleanup_error` (and
+is idempotent. A clear counts only on `{success: true}`; Empty or malformed is
+a failure too. A failed clear is attached as `policy_cleanup_error` (and
 written to the usage log as `policy_cleanup_failed`); it never replaces the
 operation's own result.
+
+MCP dispatches a noninteractive operation only after `SetOperationPolicy`
+returns `{success: true, policy: <the requested policy>}`. An add-in refusal is
+the tool result unchanged; Empty, malformed JSON, a missing or different
+`policy` is `error_pattern: policy_unconfirmed`. Nothing starts and no clear is
+sent. This is capability detection, not a numeric version gate. A policy method
+that throws is a separate case and not handled.
 
 If the add-in refuses the interaction-mode request (for example while an
 enclosing noninteractive scope is open), that refusal is the tool result, with
@@ -92,6 +100,7 @@ an `error`:
 | `merge_not_available` | The database has no merge to run (for example a blank database). It is not retried. Run a full build (`vcs_rebuild_database`). |
 | `decision_required` | A prompt or merge conflict the policy did not cover. Carries `decisions`. |
 | `interaction_mode_refused` | The add-in could not make interactive mode effective. Its enclosing scope or active operation must be released by its owner; nothing starts. |
+| `policy_unconfirmed` | MCP could not confirm `SetOperationPolicy` (Empty, malformed, no echoed `policy`, or a different policy). Nothing starts and no clear is sent; requires an add-in whose `SetOperationPolicy` returns `{success: true, policy}`. |
 | `interaction_mode_unconfirmed` | MCP could not confirm interactive mode, including VBA Empty from an older add-in. Nothing starts; unsupported responses require an A24 or later build. |
 
 The add-in's return from `MergeBuild` is a start result, not the outcome:

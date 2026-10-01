@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.interaction_mode_contract import policy_aware
+
 from msaccess_vcs_mcp.tools import (
     _addin_json_result,
     _attach_log_context,
@@ -51,7 +53,7 @@ def _patch_sync_tool(tmp_path, call_sync_result):
     mock_conn.connect.return_value = (MagicMock(), MagicMock())
 
     mock_addin = MagicMock()
-    mock_addin.call_sync.return_value = call_sync_result
+    mock_addin.call_sync.side_effect = policy_aware(call_sync_result)
 
     db_path = tmp_path / "test.accdb"
     db_path.touch()

@@ -94,3 +94,59 @@ def test_real_confirmation_refusal_and_failed_cleanup(tmp_path, monkeypatch):
                 app.Quit(2)
         pythoncom.CoUninitialize()
         reset_logging()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(sys.platform != "win32", reason="Requires Microsoft Access")
+def test_real_policy_set_and_clear_acknowledgments(tmp_path, monkeypatch):
+    """The real add-in's SetOperationPolicy/ClearOperationPolicy JSON passes the M40 checks."""
+    import pythoncom
+    import win32com.client
+    from msaccess_vcs_mcp.access_com.connection import ensure_access_visible
+
+    monkeypatch.setenv("ACCESS_VCS_LOG_DIR", str(tmp_path / "usage"))
+    monkeypatch.setenv("ACCESS_VCS_DIAGNOSTIC_LOG_DIR", str(tmp_path / "diag"))
+    reset_logging()
+    pythoncom.CoInitialize()
+    app = None
+    addin = None
+    loaded = False
+    try:
+        app = win32com.client.DispatchEx("Access.Application")
+        app.NewCurrentDatabase(str(tmp_path / "policy-contract.accdb"))
+        ensure_access_visible(app)
+        app.CurrentDb().CreateQueryDef("qryPolicyContract", "SELECT 1 AS ResultValue")
+        addin = VCSAddinIntegration(get_default_addin_path())
+        api = str(Path(addin.addin_path).with_suffix("")) + ".API"
+        with patch.object(addin, "_probe_with_timeout", side_effect=lambda *_: app.Run(api, "GetVCSVersion")):
+            addin.load_addin(app)
+        loaded = True
+
+        assert json.loads(addin.call_sync("SetOperationPolicy", "Block")) == {"success": True, "policy": "block"}
+        assert json.loads(addin.call_sync("ClearOperationPolicy")) == {"success": True}
+        assert json.loads(addin.call_sync("ClearOperationPolicy")) == {"success": True}  # idempotent
+
+        result, state = call_under_policy(
+            addin, "block", "ExportObject", "query", "qryPolicyContract", parse_result=json.loads,
+        )
+        print("result:", json.dumps(result))
+        assert state == "completed"
+        assert result["success"] is True
+        assert "policy_cleanup_error" not in result
+        assert json.loads(addin.call_sync("SetInteractionMode", 0)) == INTERACTIVE_CONFIRMED
+
+        invalid, state = call_under_policy(
+            addin, "bogus", "ExportObject", "query", "qryPolicyContract", parse_result=json.loads,
+        )
+        assert state == "refused"
+        assert invalid["error_pattern"] == "invalid_decision_policy"
+    finally:
+        if app is not None:
+            try:
+                if loaded:
+                    addin.call_sync("ClearOperationPolicy")
+            finally:
+                app.CloseCurrentDatabase()
+                app.Quit(2)
+        pythoncom.CoUninitialize()
+        reset_logging()

@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+from tests.interaction_mode_contract import policy_aware
+
 from msaccess_vcs_mcp.tools import _scoped_types_arg
 
 
@@ -40,7 +42,7 @@ def _patch_import_tool(tmp_path, *, call_sync_result=None, async_result=None):
 
     mock_addin = MagicMock()
     if call_sync_result is not None:
-        mock_addin.call_sync.return_value = call_sync_result
+        mock_addin.call_sync.side_effect = policy_aware(call_sync_result)
     mock_addin.call_async.return_value = async_result or {"async": True, "timeout_ms": 1000}
     mock_addin.merge_build.return_value = {"success": True, "message": "ok"}
 
@@ -135,9 +137,9 @@ class TestImportObjectsScoped:
 
         with _patch_import_tool(tmp_path) as (db_path, src_path, mock_addin, _):
             log = _write_log(src_path, "Merge_20260807_120000_000.log")
-            mock_addin.call_sync.return_value = json.dumps(
+            mock_addin.call_sync.side_effect = policy_aware(json.dumps(
                 {"success": True, "logPath": str(log)}
-            )
+            ))
             result = asyncio.run(
                 _unwrap_sync(vcs_import_objects)(
                     db_path, str(src_path), object_types=["modules"]

@@ -111,6 +111,29 @@ def _as_dict(raw: Any) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _policy_unconfirmed(policy: str) -> dict[str, Any]:
+    return {
+        "success": False,
+        "error_pattern": "policy_unconfirmed",
+        "error": (
+            f"SetOperationPolicy did not confirm the {policy} policy; no operation started. "
+            "An add-in build whose SetOperationPolicy returns the policy it set is required. "
+            "Upgrade the add-in if its response is empty or unsupported."
+        ),
+    }
+
+
+def _policy_confirmed(raw: Any, policy: str) -> bool:
+    """True only for ``{success: true, policy: <requested policy, normalised>}``."""
+    reply = _as_dict(raw)
+    echoed = reply.get("policy")
+    return (
+        reply.get("success") is True
+        and isinstance(echoed, str)
+        and echoed.strip().lower() == policy
+    )
+
+
 def clear_operation_policy(addin: Any) -> str | None:
     """Clear the add-in session policy. Never raises; returns a failure message or None.
 
@@ -121,14 +144,17 @@ def clear_operation_policy(addin: Any) -> str | None:
     caller can always call it from ``finally``. A failure is written to the
     usage log (``policy_cleanup_failed``) and the diagnostic log, and the
     caller attaches it to the tool result as ``policy_cleanup_error``; it is
-    never allowed to replace the operation's own result.
+    never allowed to replace the operation's own result. Only
+    ``{success: true}`` counts as cleared; Empty or malformed returns do not.
     """
     try:
         cleared = _as_dict(addin.call_sync("ClearOperationPolicy"))
-        if cleared.get("success") is False:
-            message = str(cleared.get("error") or cleared.get("message") or "ClearOperationPolicy refused")
-        else:
+        if cleared.get("success") is True:
             return None
+        message = str(
+            cleared.get("error") or cleared.get("message")
+            or "ClearOperationPolicy did not confirm the policy was cleared"
+        )
     except Exception as e:
         message = str(e) or type(e).__name__
     log_diagnostic_event("policy_cleanup_failed", error=message)
@@ -144,7 +170,8 @@ def call_under_policy(
     Run one sync add-in call under ``policy``, or in explicit interactive mode.
 
     ``parse_result`` keeps tool-specific result formatting with the caller.
-    Sets the policy through ``SetOperationPolicy`` first and clears it in
+    Sets the policy through ``SetOperationPolicy`` first, proceeding only on a
+    confirmed ``{success: true, policy}`` reply (else ``policy_unconfirmed``), and clears it in
     ``finally``, so the call is covered whether or not the add-in keeps a
     session policy past ``Finish``. A cleanup failure is attached as
     ``policy_cleanup_error`` and never replaces the call's result.
@@ -156,11 +183,14 @@ def call_under_policy(
     ``"completed"`` with the add-in's parsed result.
     """
     if policy:
-        # A refusal here (for example operation_already_running)
-        # is a normal result, not an error.
-        policy_result = parse_result(addin.call_sync("SetOperationPolicy", policy))
-        if policy_result.get("success") is False:
-            return policy_result, "refused"
+        # A refusal here (for example operation_already_running) is a normal
+        # result. Anything but a confirmed set fails closed with no dispatch
+        # and no cleanup call: nothing was set, so there is nothing to clear.
+        raw = addin.call_sync("SetOperationPolicy", policy)
+        if not _policy_confirmed(raw, policy):
+            if _as_dict(raw).get("success") is False:
+                return parse_result(raw), "refused"
+            return _policy_unconfirmed(policy), "refused"
     mode_refusal = select_interactive_mode(addin, policy)
     if mode_refusal:
         return mode_refusal, "refused"

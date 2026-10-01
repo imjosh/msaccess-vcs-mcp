@@ -242,7 +242,7 @@ def _scripted_sync(import_result, clear_error=None):
     """call_sync stand-in: policy set succeeds, import and clear are scripted."""
     def _call(command, *_args):
         if command == "SetOperationPolicy":
-            return json.dumps({"success": True})
+            return json.dumps({"success": True, "policy": _args[0]})
         if command == "ImportByType":
             if isinstance(import_result, Exception):
                 raise import_result
@@ -282,7 +282,8 @@ def test_cleanup_failure_is_attached_and_logged_on_success(tmp_path):
 
 def test_policy_set_refusal_is_a_normal_result(tmp_path):
     refusal = {"success": False, "error_pattern": "operation_already_running", "error": "busy"}
-    with _patch_import_tool(tmp_path, call_sync_result=json.dumps(refusal)) as (db, src, addin, ops):
+    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
+        addin.call_sync.return_value = json.dumps(refusal)
         result = _run((db, src), object_types=["forms"])
     assert result["error_pattern"] == "operation_already_running"
     commands = [c.args[0] for c in addin.call_sync.call_args_list]
@@ -451,7 +452,7 @@ def _single_object_sync(command, result, *, set_result=None, clear_error=None, e
         if events is not None:
             events.append((name, *args))
         if name == "SetOperationPolicy":
-            return json.dumps(set_result or {"success": True})
+            return json.dumps(set_result or {"success": True, "policy": args[0]})
         if name == "SetInteractionMode":
             return json.dumps(INTERACTIVE_CONFIRMED)
         if name == command:

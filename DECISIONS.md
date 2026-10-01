@@ -187,6 +187,38 @@ Noninteractive operation setup and cleanup retain their existing contracts.
 
 ---
 
+## 2026-09-30 — Require an acknowledged policy set and clear: `policy_unconfirmed`
+
+**Trigger**: M40. An older add-in returns VBA Empty on every call while busy.
+MCP treated any `SetOperationPolicy` reply that was not an explicit refusal as
+success, ran the operation, and reported `success: true` with no policy in force.
+
+**Options explored**:
+- Accept Empty from older add-ins: preserves compatibility but runs the
+  operation under whatever policy was already in force, defeating the request.
+- Gate on a numeric add-in version: rebuilding does not increment it, so it
+  cannot identify the capability (same reasoning as M32).
+- Require the acknowledgment shape (chosen): a capability check, parallel to
+  `interaction_mode_unconfirmed`.
+
+**Decision**: `call_under_policy` dispatches only after `SetOperationPolicy`
+returns `{success: true, policy: <requested policy, normalised>}`. An explicit
+`success: false` passes through unchanged. Anything else (Empty, None, malformed
+JSON, success without `policy`, a mismatched name) is
+`success: false, error_pattern: policy_unconfirmed`, with no operation call and
+no cleanup call (nothing was set). `ClearOperationPolicy` counts as cleared only
+on `{success: true}`; anything else is attached as `policy_cleanup_error` and
+the operation's own result is kept.
+
+**What this rules out**: Noninteractive scoped operations against add-ins whose
+`SetOperationPolicy` cannot acknowledge the policy. Out of scope: a policy
+method that throws (missing member) is a different case and is not handled here.
+
+**Relevant files**: `decision_policy.py`, `docs/DIALOGS.md`,
+`tests/test_policy_unconfirmed.py`, `tests/test_interactive_mode_live.py`.
+
+---
+
 ## 2026-09-30 — Gate-exempt tools get bounded worker threads of their own; the gate waits without a thread
 
 **Trigger**: M24 (review finding 2, follow-up to M01). `_run_exempt_in_worker` ran each sync gate-exempt tool through `asyncio.to_thread` under `wait_for`. Cancelling the await does not stop the thread, so a dialog call into a hung Access UI thread (an MSAA call on a `NUIDialog` is bounded only by that ceiling) stayed in the default executor. `AccessGate.run_exclusive` waited for its slot through `asyncio.to_thread(self._slot.acquire, True, wait_sec)` in the same executor. With the executor full, the slot wait queued before its timeout started, and gated calls neither ran nor returned `server_busy`. Reproduced with a one-thread executor.

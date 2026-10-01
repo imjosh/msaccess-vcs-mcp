@@ -60,6 +60,8 @@ class FakeApp:
             result = REFUSAL
         elif method in ("IsVBACompiled", "CompileVBA"):
             result = True
+        elif method == "SetOperationPolicy":
+            result = json.dumps({"success": True, "policy": args[1]})
         elif method == "SetInteractionMode":
             result = json.dumps({"success": True, "effective_mode": 0})
         else:

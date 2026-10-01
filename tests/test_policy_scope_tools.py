@@ -63,6 +63,8 @@ def test_cleanup_failure_keeps_operation_outcome(tmp_path, public_tool, operatio
                 return json.dumps({**operation_result, "logPath": log_path})
             if name == "ClearOperationPolicy":
                 raise RuntimeError("cleanup raised")
+            if name == "SetOperationPolicy":
+                return json.dumps({"success": True, "policy": args[0]})
             return json.dumps({"success": True})
 
         addin.call_sync.side_effect = call
