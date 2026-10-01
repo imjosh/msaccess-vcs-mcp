@@ -99,15 +99,17 @@ CLICK_SETTLE_MARGIN_SEC = 1.0
 # is reserved (``pending``) before the action is delivered, because Access can
 # resume and finish the blocked call before the click returns. The action then
 # settles it: ``confirmed``, ``uncertain`` (kept only for a gated call), or gone
-# when nothing was sent. A record made while a gated call was in flight on the
-# same database carries that call (``busy_with`` and ``call_id``) and is used up
-# when the call finishes; otherwise a confirmed record stays as
-# ``last_interruption`` until the process identity changes or the next gated
-# call on its database starts.
+# when nothing was sent. A delivered cancel close is only a ``request``: the
+# add-in may ask to confirm and resume, so it settles as ``requested`` (kept only
+# for a gated call) and that call's own result decides it. A record made while a
+# gated call was in flight on the same database carries that call (``busy_with``
+# and ``call_id``) and is used up when the call finishes; otherwise a confirmed
+# record stays as ``last_interruption`` until the process identity changes or the
+# next gated call on its database starts.
 _interruptions: dict[int, dict[str, Any]] = {}
 _interruptions_changed = threading.Condition()
 _reservation_tokens = itertools.count(1)
-_INTERNAL_FIELDS = {"call_id", "identity", "state", "deadline"}
+_INTERNAL_FIELDS = {"call_id", "identity", "state", "deadline", "request"}
 
 
 def _same_path(a: str | None, b: str | None) -> bool:
@@ -133,11 +135,14 @@ def _reserve_interruption(
     button_text: str | None,
     settle_within_sec: float,
     message: str | None = None,
+    request: bool = False,
 ) -> int:
     """Reserve an interruption for ``item`` before the action that causes it.
 
     Attaches the in-flight gated call when it is on the same database. Returns
     the token ``_settle_interruption`` takes once the action has been tried.
+    ``request`` marks an action that only asks Access to stop (a posted cancel
+    close), so its delivery does not confirm the interruption.
     """
     identity = (int(report["pid"]), report.get("create_time"))
     record: dict[str, Any] = {
@@ -151,6 +156,7 @@ def _reserve_interruption(
         "identity": identity,
         "state": "pending",
         "deadline": time.monotonic() + settle_within_sec,
+        "request": request,
     }
     current = get_access_gate().current_in_flight()
     if current is not None and _same_path(current.database, database_path):
@@ -174,7 +180,13 @@ def _settle_interruption(token: int, outcome: str) -> None:
         record = _interruptions.get(token)
         if record is None:
             return
-        if outcome == CLICK_DELIVERED:
+        if outcome == CLICK_DELIVERED and record["request"]:
+            # Only the call's result can confirm a request; with no call, nothing will.
+            if record.get("call_id") is not None:
+                record["state"] = "requested"
+            else:
+                del _interruptions[token]
+        elif outcome == CLICK_DELIVERED:
             record["state"] = "confirmed"
             if record["busy_with"] is None:
                 # Only the newest free record is reported.
@@ -247,6 +259,15 @@ def finish_gated_call(call_id: int | None, result: Any) -> Any:
     uncertain, or did not settle in time, adds ``interruption_uncertain: true``
     and never leaves the result a success. ``result`` None uses the records up
     without waiting: the call raised, or the gate is releasing it.
+
+    A delivered cancel close is a request, and the result decides it.
+    ``cancelled: true`` (the add-in's confirmation, from its sync result or its
+    ``cancelled`` terminal callback) makes it an interruption as above. A
+    success stands and gains ``cancel_not_honored: true``: the person answered
+    No and the operation completed. Any other failure gains
+    ``interruption_uncertain: true``, because a result without ``cancelled``
+    (a whole-export sync fallback, for one) cannot say whether the cancel
+    stopped it.
     """
     if call_id is None:
         return result
@@ -260,16 +281,25 @@ def finish_gated_call(call_id: int | None, result: Any) -> Any:
     decision_required = (
         bool(result.get("decision_required")) or result.get("error_pattern") == "decision_required"
     )
-    confirmed = [record for record in records if record["state"] == "confirmed"]
+    cancelled = result.get("cancelled") is True
+    confirmed = [
+        record for record in records
+        if record["state"] == "confirmed" or (record["state"] == "requested" and cancelled)
+    ]
     if not confirmed:
+        unsettled = [record for record in records if record["state"] != "requested"]
         failed = result.get("success") is False
+        if not (unsettled or failed or decision_required):
+            # Only cancel requests, and the call completed: the add-in resumed.
+            result["cancel_not_honored"] = True
+            return result
         result["success"] = False
         result["interruption_uncertain"] = True
         if failed or decision_required:
             return result
         result["error_pattern"] = "interruption_uncertain"
         if not result.get("error"):
-            detail = records[-1].get("message") or records[-1].get("kind")
+            detail = unsettled[-1].get("message") or unsettled[-1].get("kind")
             result["error"] = (
                 "A dialog action that interrupts this call was sent while it ran, but its "
                 f"delivery was not confirmed ({detail}). The call may not have completed; "
@@ -741,8 +771,9 @@ def _close_fresh(
 ) -> dict[str, Any] | None:
     """Re-verify, then close the fresh window. Its record, or None when it changed.
 
-    With ``interruption`` (its message) the close is a cancellation, reserved
-    against the in-flight call before the close is posted.
+    With ``interruption`` (its message) the close is a cancel request, reserved
+    against the in-flight call before the close is posted. Posting it does not
+    confirm the cancel: the add-in can ask to confirm and resume.
     """
     fresh = _reverify(backend, report, inspected)
     if fresh is None:
@@ -752,7 +783,13 @@ def _close_fresh(
     token = None
     if interruption is not None:
         token = _reserve_interruption(
-            report, database_path, record, None, CLICK_SETTLE_MARGIN_SEC, interruption
+            report,
+            database_path,
+            record,
+            None,
+            CLICK_SETTLE_MARGIN_SEC,
+            interruption,
+            request=True,
         )
     outcome = CLICK_NOT_SENT
     try:
@@ -1008,6 +1045,7 @@ def dismiss_dialog_in_windows(
     window = _windows_for_pid(windows, int(before["pid"]))[int(item["hwnd"])]
     closed: list[dict[str, Any]] = []
     interrupted = False
+    cancel_requested = False
     failure_dialog = kind in FAILURE_KINDS
 
     if button:
@@ -1058,7 +1096,7 @@ def dismiss_dialog_in_windows(
         if record is None:
             return _dialog_changed(before, item)
         closed.append({**record, "how": "cancel"})
-        interrupted = True
+        cancel_requested = True
     elif action_l == "close":
         if kind == "addin_window" and (before.get("operation") or {}).get("same_database"):
             return {
@@ -1103,7 +1141,7 @@ def dismiss_dialog_in_windows(
             "dismissed": False,
         }
 
-    return {
+    result = {
         "success": True,
         "dismissed": True,
         "closed": closed,
@@ -1117,6 +1155,14 @@ def dismiss_dialog_in_windows(
             "is true, the Access operation that was waiting did not succeed."
         ),
     }
+    if cancel_requested:
+        result["cancel_requested"] = True
+        result["note"] = (
+            "The close was posted to the add-in window as a cancel request. The add-in "
+            "may ask to confirm, and keeps its window open while the operation runs. "
+            "The waiting call's own result says whether it was cancelled."
+        )
+    return result
 
 
 def recover_windows(
@@ -1556,6 +1602,8 @@ def dismiss_dialog(
         "timeout_seconds": timeout,
         "note": result.get("note"),
     })
+    if result.get("cancel_requested"):
+        follow["cancel_requested"] = True
     if uncertain:
         follow["error_pattern"] = "dismiss_uncertain"
         follow["error"] = "The dialog was still open when the timeout elapsed. The operation was not retried."

@@ -216,8 +216,13 @@ operation. If the gate is busy with an operation on the same database
 (compared after path normalisation), close is refused with
 `operation_in_progress`. An operation on another database does not block it.
 Closing the window of a noninteractive run cancels that run without any
-confirmation prompt. `action=cancel` asks the add-in window to stop the
-operation and reports `interrupted: true`.
+confirmation prompt. `action=cancel` posts a close to the add-in window as a
+cancel request and reports `cancel_requested: true`, not `interrupted`. While
+an operation runs the add-in keeps its window open. An interactive run
+(`noninteractive=False`, and `vcs_export_database`) also asks
+"Cancel Current Operation?": Yes stops it, No resumes it. The window staying
+open can make the dismissal `dismiss_uncertain` even though the close was
+posted. The waiting call's own result says how the request ended (see below).
 
 Button names ignore the Win32 accelerator marker, so `End` matches a button caption of `&End`. `button="Debug"` is refused. `button="End"` stops the failed VBA call. Continue is never clicked automatically. The
 result sets `failure_dialog_dismissed` or `interrupted`. The waiting tool
@@ -232,7 +237,8 @@ open, and the Access gate is not busy with that database. When it is false,
 and `no_windows_to_probe` (wait) are different outcomes; the others are
 `identity_unconfirmed`, `access_unresponsive`, `vba_break`, `blocking_dialog`
 and `server_busy`.
-`execution_interrupted` carries the dialog text captured before End or cancel.
+`execution_interrupted` carries the dialog text captured before End. A cancel
+request is never shown there; the call it was made against reports it.
 
 Interruption records are keyed by process identity (PID plus creation time), so
 a new process that reuses a PID starts clean. Dismissing a runtime or compile
@@ -261,6 +267,23 @@ and then uses up its records:
   its own pattern. It is not `execution_interrupted`, because the End may not
   have arrived. A click that reports back after the call finished finds nothing
   to settle, so a later call never inherits it.
+- A cancel close that was posted is a request, not a confirmed interruption:
+  the person may answer No. The call's result decides it:
+  - `cancelled: true` (the add-in confirmed the cancel, in its sync result or
+    its `cancelled` terminal callback): `success: false` and
+    `execution_interrupted: true` with the same precedence as above. `cancelled`
+    and the add-in's error text are kept.
+  - A success: the result is unchanged and gains `cancel_not_honored: true`. The
+    operation completed.
+  - Any other failure: `interruption_uncertain: true` is added and the result
+    keeps its own `error_pattern` (`decision_required`,
+    `completion_unconfirmed`, or the error's own).
+  A whole export (`vcs_export_database`) or a build that falls back to the sync
+  API carries no `cancelled`. Its result is `completion_unconfirmed`, so a
+  cancel there shows up only as `interruption_uncertain`. Single-object import
+  and export report `cancelled: true` for a confirmed cancel. A delivered End
+  on the same call still makes it `execution_interrupted`. A cancel posted with
+  no call running on that database records nothing.
 
 Decisions, `runtime_error`, `policy_cleanup_error` and the original error text
 are kept. This happens before the usage log is written, so the `tool_call`

@@ -717,3 +717,219 @@ def test_reservation_for_a_call_already_released_is_dropped_by_the_next_call():
     assert _healthy_call() == {"success": True}
     after = inspect_windows([], DB, backend=backend, pid=10, responsive=True)
     assert after["execution_interrupted"] is False
+
+
+# A cancel posted to the add-in window is a request (M38). The interactive
+# add-in asks "Cancel Current Operation?" and No resumes the run. Only the held
+# call's own result can say which answer was given.
+
+
+def _addin_window(pid=10):
+    return WindowInfo(hwnd=7, pid=pid, title="MSAccessVCS", class_name="OForm")
+
+
+class CancellingBackend(ClosingBackend):
+    """Posting the close removes the add-in window; ``on_close`` runs first."""
+
+    def __init__(self, windows, on_close=None):
+        super().__init__(windows)
+        self.on_close = on_close
+        self.closed = []
+
+    def close(self, hwnd):
+        if self.on_close is not None:
+            self.on_close()
+        self.closed.append(hwnd)
+        self.windows = [w for w in self.windows if w.hwnd != hwnd]
+
+
+def _run_cancelled_by_close(
+    monkeypatch, body_result, *, is_async=False, end_too=False, inside_close=False
+):
+    """Hold a gated call, cancel its add-in window through ``vcs_dismiss_dialog``, finish it.
+
+    With ``end_too`` a runtime error is also Ended while the call is held. With
+    ``inside_close`` the call is released from inside the close and finalizes
+    while the close is still being posted. Returns the cancel's dismissal, the
+    held call's result, and an inspection taken after both finished.
+    """
+    started, release = threading.Event(), threading.Event()
+    finishing, finished = threading.Event(), threading.Event()
+    real_finish = tools_module.finish_gated_call
+
+    def observed_finish(call_id, result):
+        if result is not None:
+            finishing.set()
+        try:
+            return real_finish(call_id, result)
+        finally:
+            if result is not None:
+                finished.set()
+
+    monkeypatch.setattr(tools_module, "finish_gated_call", observed_finish)
+
+    if is_async:
+        async def body(database_path: str):
+            started.set()
+            await asyncio.to_thread(release.wait, 5)
+            return dict(body_result)
+    else:
+        def body(database_path: str):
+            started.set()
+            release.wait(5)
+            return dict(body_result)
+
+    def release_inside_close():
+        release.set()
+        assert finishing.wait(5), "the held call never reached its finalization"
+        finished.wait(0.3)
+
+    windows = [_addin_window()] + ([_runtime_error()] if end_too else [])
+    backend = CancellingBackend(windows, on_close=release_inside_close if inside_close else None)
+
+    async def scenario():
+        task = asyncio.create_task(_register(body)(DB))
+        assert await asyncio.to_thread(started.wait, 5)
+        if end_too:
+            await tools_module.vcs_dismiss_dialog(DB, "hwnd:4", button="End", pid=10)
+        dialog = await tools_module.vcs_dismiss_dialog(DB, "hwnd:7", action="cancel", pid=10)
+        release.set()
+        return dialog, await task
+
+    with (
+        patch("msaccess_vcs_mcp.tools.validate_database_path", return_value=DB),
+        patch("msaccess_vcs_mcp.dialog_recovery.list_owned", return_value=[]),
+        patch("msaccess_vcs_mcp.dialog_recovery._default_backend", return_value=backend),
+    ):
+        dialog, result = asyncio.run(scenario())
+    assert backend.closed == [7]
+    after = inspect_windows([], DB, backend=FakeBackend([]), pid=10, responsive=True)
+    return dialog, result, after
+
+
+@pytest.mark.parametrize("inside_close", [False, True], ids=["after_close", "inside_close"])
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_declined_cancel_leaves_the_completed_call_a_success(
+    monkeypatch, usage_log, is_async, inside_close
+):
+    dialog, result, after = _run_cancelled_by_close(
+        monkeypatch, {"success": True, "value": 1}, is_async=is_async, inside_close=inside_close
+    )
+    assert dialog["success"] is True
+    assert dialog["cancel_requested"] is True
+    assert dialog["interrupted"] is False
+    assert result == {"success": True, "value": 1, "cancel_not_honored": True}
+    # A request is never shown as an interruption, and nothing is carried on.
+    assert after["execution_interrupted"] is False
+    assert after["last_interruption"] is None
+    assert _healthy_call() == {"success": True}
+    first, second = _tool_entries(usage_log)
+    assert first["success"] is True
+    assert "execution_interrupted" not in first
+    assert "interruption_uncertain" not in first
+    assert second["success"] is True
+
+
+@pytest.mark.parametrize("inside_close", [False, True], ids=["after_close", "inside_close"])
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_confirmed_cancel_is_an_interruption(monkeypatch, usage_log, is_async, inside_close):
+    dialog, result, after = _run_cancelled_by_close(
+        monkeypatch,
+        {"success": False, "cancelled": True, "error": "Operation was cancelled"},
+        is_async=is_async,
+        inside_close=inside_close,
+    )
+    assert dialog["cancel_requested"] is True
+    assert result["success"] is False
+    assert result["cancelled"] is True
+    assert result["execution_interrupted"] is True
+    assert result["error_pattern"] == "execution_interrupted"
+    assert result["error"] == "Operation was cancelled"
+    assert "interruption_uncertain" not in result
+    assert "cancel_not_honored" not in result
+    assert after["execution_interrupted"] is False
+    [entry] = _tool_entries(usage_log)
+    assert entry["success"] is False
+    assert entry["error_pattern"] == "execution_interrupted"
+    assert entry["execution_interrupted"] is True
+
+
+def test_confirmed_cancel_keeps_decision_required_primary(monkeypatch):
+    _dialog, result, _after = _run_cancelled_by_close(
+        monkeypatch,
+        {
+            "success": False,
+            "cancelled": True,
+            "decision_required": True,
+            "error_pattern": "decision_required",
+            "decisions": [{"id": 1}],
+        },
+    )
+    assert result["execution_interrupted"] is True
+    assert result["error_pattern"] == "decision_required"
+    assert result["decisions"] == [{"id": 1}]
+
+
+@pytest.mark.parametrize(
+    "body_result, pattern",
+    [
+        ({"success": False, "error": "COM says boom", "error_pattern": "com_error"}, "com_error"),
+        # A whole-export sync fallback carries no ``cancelled``.
+        (
+            {
+                "success": False,
+                "started": True,
+                "completion_unconfirmed": True,
+                "error_pattern": "completion_unconfirmed",
+                "error": "No completion callback arrived",
+            },
+            "completion_unconfirmed",
+        ),
+        (
+            {
+                "success": False,
+                "decision_required": True,
+                "error_pattern": "decision_required",
+                "decisions": [{"id": 1}],
+            },
+            "decision_required",
+        ),
+    ],
+    ids=["plain_error", "completion_unconfirmed", "decision_required"],
+)
+def test_other_failure_after_a_cancel_request_is_uncertain(monkeypatch, body_result, pattern):
+    _dialog, result, after = _run_cancelled_by_close(monkeypatch, body_result)
+    assert result["success"] is False
+    assert result["interruption_uncertain"] is True
+    assert result["error_pattern"] == pattern
+    assert result.get("error") == body_result.get("error")
+    assert "execution_interrupted" not in result
+    assert "cancel_not_honored" not in result
+    assert after["execution_interrupted"] is False
+
+
+def test_end_press_still_wins_over_a_declined_cancel(monkeypatch):
+    _dialog, result, _after = _run_cancelled_by_close(
+        monkeypatch, {"success": True, "value": 1}, end_too=True
+    )
+    assert result["success"] is False
+    assert result["execution_interrupted"] is True
+    assert result["error_pattern"] == "execution_interrupted"
+    assert "cancel_not_honored" not in result
+
+
+def test_cancel_close_outside_a_call_records_nothing():
+    backend = CancellingBackend([_addin_window()])
+    result = dismiss_dialog_in_windows(
+        backend.list_windows(),
+        DB,
+        "hwnd:7",
+        action="cancel",
+        pid=10,
+        responsive=True,
+        backend=backend,
+    )
+    assert result["cancel_requested"] is True
+    after = inspect_windows([], DB, backend=backend, pid=10, responsive=True)
+    assert after["execution_interrupted"] is False
+    assert after["last_interruption"] is None

@@ -349,7 +349,9 @@ def test_close_finished_addin_window_does_not_cancel_while_gate_busy_on_same_dat
     assert backend.closed == [7]
 
 
-def test_cancel_addin_window_is_an_interruption():
+def test_cancel_addin_window_is_a_cancel_request():
+    # The add-in may ask to confirm and resume, so posting the close does not
+    # interrupt anything yet. The held call's result decides (M38).
     addin = _win(hwnd=7, title="MSAccessVCS", class_name="OForm")
     backend = FakeBackend([addin])
     result = dismiss_dialog_in_windows(
@@ -361,7 +363,8 @@ def test_cancel_addin_window_is_an_interruption():
         responsive=True,
         backend=backend,
     )
-    assert result["interrupted"] is True
+    assert result["cancel_requested"] is True
+    assert result["interrupted"] is False
     assert backend.closed == [7]
 
 

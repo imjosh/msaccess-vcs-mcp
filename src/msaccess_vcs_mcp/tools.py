@@ -3606,8 +3606,12 @@ def vcs_dismiss_dialog(
     ``dialog_id`` comes from ``vcs_list_dialogs`` (``hwnd:<number>``).
     Pass ``button`` to click that button (``OK``, ``Cancel``, ``No``, ``End``).
     ``Debug`` is refused. ``action=close`` closes a finished add-in results
-    window and does not cancel a running operation. ``action=cancel`` closes
-    an add-in progress window in order to interrupt the operation.
+    window and does not cancel a running operation. ``action=cancel`` posts a
+    close to an add-in progress window as a cancel request
+    (``cancel_requested: true``). An interactive run asks the person to
+    confirm. The waiting call returns ``cancelled`` and ``execution_interrupted``
+    if it stopped, or its own result with ``cancel_not_honored: true`` if it
+    completed.
 
     Closing an error dialog sets ``failure_dialog_dismissed`` or
     ``interrupted``. The operation that was waiting is not reported as a
@@ -3693,8 +3697,10 @@ def vcs_automation_status(
     dialog is open, and the MCP Access gate is not busy with this database.
     When false, ``error_pattern`` says why (``access_not_running`` and
     ``no_windows_to_probe`` are distinct).
-    ``execution_interrupted`` is true after End or an explicit cancel; the
-    diagnostics from that dialog are in ``last_interruption``. This does not
+    ``execution_interrupted`` is true after End, or after a runtime or compile
+    error is dismissed; the diagnostics from that dialog are in
+    ``last_interruption``. An ``action=cancel`` request is not shown here: the
+    call it was made against reports whether it was cancelled. This does not
     click anything and does not use the Access COM gate.
 
     Examples:

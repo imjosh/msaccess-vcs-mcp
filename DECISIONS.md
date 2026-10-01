@@ -74,6 +74,31 @@ contradictory guidance.
 
 ---
 
+## 2026-09-30 — A posted cancel close is a request; the held call's result decides it (M38)
+
+**Trigger**: M38 (interface review F8). `vcs_dismiss_dialog action=cancel` reserved an interruption, posted `WM_CLOSE`, and settled it as confirmed once the post returned, so the held call became `success: false, execution_interrupted: true` whatever happened next. While an interactive operation runs, `frmVCSMain.Form_Unload` always cancels the unload and asks "Cancel Current Operation?", and No resumes the run. A live run on a disposable database (add-in 5.1.0, MCP `adbe1ce`) showed both cases. After No, the 400-query whole export finished with a `complete` callback, yet the call returned `execution_interrupted`. After Yes, the result was `cancelled: true` plus `execution_interrupted`.
+
+**Options explored**:
+- *Wait in the dismissal for the confirm prompt and the window to close*: rejected. The tool cannot answer the prompt, and the person may take any time to.
+- *Keep the reservation pending until a terminal callback arrives*: rejected. A sync gated call has no callback, and the reservation deadline is there so a finished call never waits on Access.
+- *Settle a delivered close as `requested` and let the call's own result decide* (chosen).
+- *Treat any failure after a request as the cancel*: rejected. A sync fallback with no `cancelled` (whole export, build) cannot tell a cancel from an error, so claiming either is a guess.
+
+**Decision**:
+- `_close_fresh` reserves a cancel with `request=True`. Once the close is posted, the reservation settles to `requested` when a gated call is attached. A request with no call is dropped, since nothing could confirm it, so `vcs_automation_status` never reports a cancel request as `execution_interrupted`.
+- In `finish_gated_call`, a `requested` record and a result with `cancelled: true` give `execution_interrupted`, with M28's precedence. `cancelled: true` comes from the add-in's sync JSON or from the eorCanceled terminal callback, which `wait_for_completion` turns into `cancelled: true`. `cancelled` and the original error are kept.
+- A success stands unchanged and gains M37's `cancel_not_honored: true`: the person answered No.
+- Any other failure gains M23's `interruption_uncertain: true` and keeps its own `error_pattern` (including `decision_required` and `completion_unconfirmed`).
+- A confirmed End press on the same call still wins. An uncertain or unsettled End or close keeps M23's rule.
+- The cancel's dismissal now reports `cancel_requested: true` (M37's word), not `interrupted: true`. Its note says the call's own result decides. The add-in keeps its window open, so the public dismissal can still end `dismiss_uncertain`. That behaviour is unchanged.
+- Whole-export (and build) sync results carry no `cancelled`. On those paths, a confirmed cancel shows up only as `interruption_uncertain`. Single-object import and export do carry it since A30.
+
+**What this rules out**: Treating a posted window message as proof that Access stopped. Reading a cancel from error text. A cancel request showing as `last_interruption`. Revisit if the add-in gains a final-result sync API for whole export and build (see M35) or a cancel-acknowledged callback.
+
+**Relevant files**: `dialog_recovery.py` (`_reserve_interruption`, `_settle_interruption`, `finish_gated_call`, `_close_fresh`, `dismiss_dialog_in_windows`, `dismiss_dialog`), `tools.py` (`vcs_dismiss_dialog`, `vcs_automation_status` docstrings), `tests/test_interruption_records.py`, `tests/test_dialog_recovery.py`, `docs/DIALOGS.md`, `AGENTS.md`.
+
+---
+
 ## 2026-09-30 — Window class decides before the add-in caption (M36)
 
 **Trigger**: Live reproduction on a disposable database: a `MsgBox2`-style box
@@ -298,6 +323,8 @@ method that throws (missing member) is a different case and is not handled here.
 - *Keep `WindowBackend.click` a bool*: rejected. False covered both "nothing was sent" (wrong owner, unresponsive window, button refused the action) and "sent but not confirmed" (a timed-out `SendMessageTimeout`). The first must leave the call alone; the second must not leave a success.
 
 **Decision**: `_press_fresh` reserves the interruption against the in-flight call on the same database after `_reverify` and the chooser, right before `backend.click`, when `_interrupts_execution` holds for the fresh kind and chosen button. `_close_fresh` does the same for a cancel. `WindowBackend.click` returns `CLICK_DELIVERED`, `CLICK_NOT_SENT` or `CLICK_UNCERTAIN`, and the reservation settles to `confirmed`, gone, or `uncertain` (a free reservation is dropped rather than kept uncertain). Records are keyed by reservation token and carry the process identity, so a second reservation never overwrites a confirmed one. `finish_gated_call(call_id, result)` waits on a condition for that call's pending reservations, bounded by each one's deadline (twice the click timeout plus `CLICK_SETTLE_MARGIN_SEC`: the Win32 click may spend one timeout on the responsiveness probe and one on the press). Confirmed wins: `execution_interrupted` as before. Otherwise any uncertain or unsettled reservation gives `success: false` and `interruption_uncertain: true`, with `error_pattern: interruption_uncertain` only when the result was a success and not `decision_required`. Precedence: `decision_required` > `execution_interrupted` > plain error > `interruption_uncertain`. For an async handler `_then` runs the finalization in a worker thread so the wait never blocks the event loop. `finish_gated_call(call_id, None)` in the gate cleanup still uses records up without waiting. `begin_gated_call` drops every record on its database that is not the starting call's: besides free records, that clears a reservation that read an earlier call as in flight just before the gate released it and landed after that call's cleanup. The public `vcs_dismiss_dialog` and `vcs_recover_dialogs` results are unchanged: any undelivered click is still `dismiss_uncertain`.
+
+> **⚠ Partially superseded** (2026-09-30): the cancel's close is no longer settled `confirmed` on delivery. A delivered cancel close settles as `requested`. The held call's result then decides it: `cancelled: true` makes it `execution_interrupted`, a success stands with `cancel_not_honored: true`, and any other failure is `interruption_uncertain`. A cancel with no call attached is dropped, and its dismissal reports `cancel_requested: true` rather than `interrupted: true`. End presses and the rest of this entry are unchanged. See "A posted cancel close is a request; the held call's result decides it (M38)" above.
 
 **What this rules out**: Recording an interruption after the action that causes it. Treating a click that was never sent as an interruption, or an unconfirmed one as a success. A late settle reaching a later call: a reservation belongs to one `call_id` and is gone once that call finishes. Revisit the deadline with M24 if a hung click is moved out of the worker that holds it.
 
