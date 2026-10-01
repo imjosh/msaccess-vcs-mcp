@@ -131,6 +131,7 @@ class PendingOperation:
     cancelled: bool = False  # Live flag served by /cancel-status; cleared when the operation completes
     finished: bool = False  # A terminal callback (complete, error, cancelled) has arrived
     cancel_not_honored: bool = False  # A request was outstanding when a non-cancelled terminal callback arrived
+    loop: Optional[asyncio.AbstractEventLoop] = None  # The loop that waits on the queue; None means the manager's
     
     @property
     def timeout_seconds(self) -> float:
@@ -206,13 +207,20 @@ class OperationManager:
         """
         operation_id = str(uuid.uuid4())
         queue: asyncio.Queue = asyncio.Queue()
+        try:
+            # Gated tools wait on the Access apartment's loop, not the server's,
+            # so each operation's callbacks go to the loop that registered it.
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
         
         operation = PendingOperation(
             operation_id=operation_id,
             queue=queue,
             database_path=database_path,
             command=command,
-            timeout_ms=timeout_ms
+            timeout_ms=timeout_ms,
+            loop=loop,
         )
         
         self._operations[operation_id] = operation
@@ -272,12 +280,17 @@ class OperationManager:
             operation.cancelled = False
         
         # Put callback on queue - need thread-safe approach
-        if self._loop:
+        loop = operation.loop or self._loop
+        if loop:
             # Called from HTTP thread - use threadsafe method
-            self._loop.call_soon_threadsafe(
-                operation.queue.put_nowait,
-                data
-            )
+            try:
+                loop.call_soon_threadsafe(
+                    operation.queue.put_nowait,
+                    data
+                )
+            except RuntimeError:
+                logger.warning(f"Callback for operation {operation_id} arrived after its loop closed")
+                return False
         else:
             # Called from async context - put directly
             try:

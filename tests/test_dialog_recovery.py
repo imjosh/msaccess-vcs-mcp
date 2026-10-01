@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -419,7 +420,7 @@ def test_dialog_tools_run_while_the_access_gate_is_held(tmp_path):
     db = tmp_path / "Northwind.accdb"
     db.write_bytes(b"")
     gate = get_access_gate()
-    entered = asyncio.Event()
+    entered = threading.Event()
 
     async def hold():
         entered.set()
@@ -430,7 +431,7 @@ def test_dialog_tools_run_while_the_access_gate_is_held(tmp_path):
         task = asyncio.create_task(
             gate.run_exclusive("vcs_run_tests", str(db), hold, True)
         )
-        await entered.wait()
+        assert await asyncio.to_thread(entered.wait, 5)
         with (
             patch("msaccess_vcs_mcp.access_gate._read_busy_wait_sec", return_value=0.05),
             patch(

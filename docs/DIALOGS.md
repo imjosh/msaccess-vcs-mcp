@@ -445,12 +445,10 @@ always describes the box that was clicked.
   `worker_capacity_unavailable` without touching a window. Retry once Access
   answers. These threads never use capacity the Access gate needs, so gated
   tools keep answering, or return `server_busy`, on time.
-- Known gap (M44): a gated tool that is connecting to Access, loading the
-  add-in or making a synchronous add-in call does that work on the server's
-  event loop. Until it returns, a dialog or status call cannot start or
-  return. X12 measured stalls of 4 to 14 seconds during whole-database export,
-  imports, builds and test runs. Allow for that before treating a slow dialog
-  call as a blocked Access.
+- A gated tool does all its Access work on the gate's COM apartment thread,
+  including connecting, loading the add-in and synchronous add-in calls. A
+  dialog or status call therefore starts and returns on time while a gated
+  call is blocked in any of those steps.
 - Known gap (M43): `vcs_rebuild_database` attaches to an Access instance that
   is already running instead of starting its own. The build then fails ("You
   already have the database open"), and its cleanup closes that instance's

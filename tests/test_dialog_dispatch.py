@@ -251,3 +251,64 @@ def test_blocked_public_click_returns_dismissal_outcome(
             await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(scenario())
+
+
+# How long the gated call stays inside its blocking step before the other
+# tools are called. Under FAILSAFE, so the step is still blocked when they answer.
+HELD = 2.0
+GATED_ASYNC_CALLS = {
+    "vcs_export_database": lambda db, src, out: tools.vcs_export_database(db),
+    "vcs_list_objects": lambda db, src, out: tools.vcs_list_objects(db),
+    "vcs_import_objects": lambda db, src, out: tools.vcs_import_objects(db, src),
+    "vcs_run_tests": lambda db, src, out: tools.vcs_run_tests(db),
+    "vcs_rebuild_database": lambda db, src, out: tools.vcs_rebuild_database(src, out),
+}
+
+
+@pytest.mark.parametrize("name", GATED_ASYNC_CALLS)
+def test_exempt_tools_answer_while_gated_async_tool_blocks_in_com(
+    public_tools, monkeypatch, tmp_path, name,
+):
+    """A gated async tool stuck in its first COM step (connect, or the build host's
+    Access startup) must not hold the loop the dialog, status and cancel tools need."""
+    db, _addin = public_tools
+    src = tmp_path / "src"
+    src.mkdir()
+    out = str(tmp_path / "Built.accdb")
+    _install_backend(monkeypatch, BlockingBackend(block_at=None))
+    blocker = Blocker()
+
+    def blocking_com_step(*_args, **_kwargs):
+        blocker.wait()
+        raise RuntimeError("Access stopped answering")
+
+    connection = MagicMock()
+    connection.return_value.__enter__.return_value.connect.side_effect = blocking_com_step
+    monkeypatch.setattr(tools, "AccessConnection", connection)
+    monkeypatch.setattr(tools, "create_isolated_access_app", blocking_com_step)
+
+    async def scenario():
+        gated = asyncio.create_task(GATED_ASYNC_CALLS[name](db, str(src), out))
+        try:
+            await _entered(blocker)
+            await asyncio.sleep(HELD)
+            await _loop_progress(blocker, gated)
+            identity = {"pid": 10, "create_time": 1000, "timeout_seconds": 1.0}
+            listed = await asyncio.wait_for(tools.vcs_list_dialogs(db, **identity), DEADLINE)
+            assert [item["dialog_id"] for item in listed["dialogs"]] == ["hwnd:2"]
+            status = await asyncio.wait_for(tools.vcs_automation_status(db, **identity), DEADLINE)
+            assert status["success"] is True
+            assert status["ready"] is False
+            cancel = await asyncio.wait_for(tools.vcs_cancel_operation("not-running"), DEADLINE)
+            assert cancel["success"] is False
+            assert not gated.done(), "The gated call must still be blocked while the others answer"
+            blocker.release.set()
+            result = await asyncio.wait_for(gated, DEADLINE)
+            assert result["success"] is False
+            assert "Access stopped answering" in str(result)
+            assert not blocker.expired
+        finally:
+            blocker.release.set()
+            await asyncio.gather(gated, return_exceptions=True)
+
+    asyncio.run(scenario())

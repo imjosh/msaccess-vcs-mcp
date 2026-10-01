@@ -53,7 +53,7 @@ from .access_com.connection import (
 )
 from .access_com.dao_helpers import list_query_defs, list_table_defs
 from .access_com.process_qos import list_access_pids, prefer_full_power_if_created
-from .access_gate import EXEMPT_TOOLS, get_access_gate
+from .access_gate import EXEMPT_TOOLS, ServerLoopContext, get_access_gate
 from .exempt_workers import WorkerCapacityUnavailable, workers_for
 from .dialog_recovery import (
     automation_status,
@@ -1049,10 +1049,12 @@ def vcs_tool(name: str):
        the same final result.
 
     The wrapper is *always* an async coroutine. FastMCP detects this via
-    ``inspect.iscoroutinefunction`` and awaits it correctly. Sync tool
+    ``inspect.iscoroutinefunction`` and awaits it correctly. Gated tool
     bodies run in a single COM apartment thread via :mod:`access_gate` so
-    they no longer block the asyncio event loop. One Access operation runs
-    at a time across all Cursor windows sharing this server process.
+    they never block the asyncio event loop; an async body runs there in a
+    loop of its own and reports progress through ``ServerLoopContext``. One
+    Access operation runs at a time across all Cursor windows sharing this
+    server process.
     """
     def decorator(func):
         logged = with_logging(name)(func)
@@ -1088,6 +1090,11 @@ def vcs_tool(name: str):
                 param_names = list(sig.parameters.keys())
                 if param_names and param_names[0] == "database_path":
                     database = args[0]
+
+            if is_async_body and kwargs.get("ctx") is not None:
+                # The body runs on the apartment's loop; the session it reports
+                # progress through stays on this one.
+                kwargs["ctx"] = ServerLoopContext(kwargs["ctx"], asyncio.get_running_loop())
 
             gate = get_access_gate()
             claimed: dict[str, int] = {}
@@ -1277,8 +1284,6 @@ async def vcs_export_database(
             
             # Check if async export is available
             if callback_url and op_manager:
-                # Ensure operation manager uses the correct event loop (FastMCP's loop)
-                op_manager.set_event_loop(asyncio.get_running_loop())
                 # Use async path with progress callbacks
                 operation_id, queue = op_manager.register_operation(
                     database_path=str(db_path),
@@ -1697,9 +1702,6 @@ async def vcs_import_objects(
                 return mode_refusal
 
             if callback_url and op_manager:
-                # Ensure operation manager uses the correct event loop (FastMCP's loop)
-                op_manager.set_event_loop(asyncio.get_running_loop())
-
                 operation_id, queue = op_manager.register_operation(
                     database_path=str(db_path),
                     command="MergeBuild"
@@ -1862,9 +1864,6 @@ async def vcs_rebuild_database(
             
             # Check if async build is available
             if callback_url and op_manager:
-                # Ensure operation manager uses the correct event loop (FastMCP's loop)
-                op_manager.set_event_loop(asyncio.get_running_loop())
-                
                 # Use async path with progress callbacks
                 operation_id, queue = op_manager.register_operation(
                     database_path=output_path or str(src_path),
@@ -2020,7 +2019,6 @@ async def vcs_rebuild_addin(
         if callback_url:
             op_manager = _get_operation_manager()
             if op_manager:
-                op_manager.set_event_loop(asyncio.get_running_loop())
                 operation_id, callback_queue = op_manager.register_operation(
                     timeout_ms=int(timeout * 1000),
                     database_path=str(host_path),
@@ -2032,10 +2030,11 @@ async def vcs_rebuild_addin(
                     "cursor",
                 )
 
-        async def _launch() -> dict[str, Any]:
-            # Inside the gate: another window's tool call could otherwise
-            # open a fresh instance between the close and the launch, and
-            # the rebuild would refuse on a file we had just freed.
+        def _launch() -> dict[str, Any]:
+            # Inside the gate, on its COM apartment thread: another window's
+            # tool call could otherwise open a fresh instance between the
+            # close and the launch, and the rebuild would refuse on a file we
+            # had just freed.
             # Every tool call loads the add-in as a library, which locks it
             # regardless of which database that instance has open, so the
             # installed path is matched against loaded libraries too.
@@ -2054,18 +2053,18 @@ async def vcs_rebuild_addin(
                 call_args,
             )
 
-        # COM launch blocks this task until RebuildAddIn returns, so emit
+        # The COM launch reports nothing until RebuildAddIn returns, so emit
         # once beforehand rather than fake steps we cannot observe.
         await reporter.emit(ctx, message="Starting Access...")
 
-        preexisting_access_pids = list_access_pids()
+        preexisting_access_pids = await asyncio.to_thread(list_access_pids)
 
         gate = get_access_gate()
         launch = await gate.run_exclusive(
             "vcs_rebuild_addin",
             str(host_path),
             _launch,
-            True,
+            False,
         )
         if isinstance(launch, dict) and launch.get("error_pattern") == "server_busy":
             return launch
@@ -3605,7 +3604,6 @@ async def vcs_run_tests(
             op_manager = _get_operation_manager()
 
             if callback_url and op_manager:
-                op_manager.set_event_loop(asyncio.get_running_loop())
                 operation_id, _queue = op_manager.register_operation(
                     database_path=str(db_path),
                     command="RunFilteredTests",

@@ -74,6 +74,23 @@ contradictory guidance.
 
 ---
 
+## 2026-10-01 — Async gated tool bodies run on the COM apartment thread in a loop of their own (M44)
+
+**Trigger**: M44, found by X12. `AccessGate.run_exclusive` awaited an async body on the server's event loop; only sync bodies went to the apartment executor. `vcs_export_database`, `vcs_list_objects`, `vcs_import_objects`, `vcs_run_tests` and `vcs_rebuild_database` are async (they await completion callbacks and report progress), and their connect, add-in probe, synchronous API calls and build-host startup ran on that loop. X12 measured loop stalls of 4 to 14 s, during which `vcs_list_dialogs`, `vcs_automation_status` and `vcs_cancel_operation` could not start or return.
+
+**Options explored**:
+- *Wrap each blocking step in `run_in_executor` on the apartment thread*: rejected. COM objects would be created on the apartment thread but held, and finally released, on the loop thread, and every future blocking step would need the same wrapper. A missed one brings the stall back silently.
+- *Make each tool body synchronous*: rejected. The callback wait and progress reporting are naturally async, and a sync rewrite would need a second waiting mechanism.
+- *Run the whole async body on the apartment thread, in a fresh event loop (chosen)*.
+
+**Decision**: `run_exclusive` runs an async body with `asyncio.Runner` on the gate's single apartment thread, keeping the caller's context variables. Every COM object the body creates is used and released on that thread. Cancelling the caller cancels the body's task at its next await. The tool's MCP `Context` is replaced by `ServerLoopContext`, whose `report_progress` sends the notification on the server loop, which owns the client session. `OperationManager.register_operation` records the running loop on the operation, and `route_callback` posts each callback to that loop (the manager-wide loop is now only the fallback for an operation registered outside a loop). A callback for a closed loop is dropped. `vcs_rebuild_addin`'s launch step is sync, so it runs through the same executor.
+
+**What this rules out**: Touching the server-loop session (anything but `report_progress`) from a gated async body without bridging it. Using a manager-wide loop to route a callback. Sharing asyncio primitives between a gated body and server-loop code. Not covered: `vcs_get_version_info` is gate-exempt and still starts Access on the server loop.
+
+**Relevant files**: `access_gate.py`, `operation_manager.py`, `tools.py` (`vcs_tool`, `vcs_rebuild_addin`), `usage_logging.py`, `tests/test_access_gate.py`, `tests/test_dialog_dispatch.py`, `tests/test_operation_manager.py`, `docs/DIALOGS.md`, `AGENTS.md`.
+
+---
+
 ## 2026-10-01 — `vcs_export_database` exports to the add-in's configured folder; `output_dir` is verified, not a destination (X10)
 
 **Trigger**: X10 (interface review F14). `output_dir` was documented as the destination, but the add-in always exports to `Options.GetExportFolder`. The value changed only the Python return and the log lookup, so `export_path` named a folder where nothing was written.

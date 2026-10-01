@@ -89,16 +89,16 @@ def _run_held(body_result, dismiss):
     """Hold one gated call open, run ``dismiss`` off-loop, then let the call finish."""
 
     async def scenario():
-        started = asyncio.Event()
-        release = asyncio.Event()
+        started = threading.Event()
+        release = threading.Event()
 
         async def body(database_path: str):
             started.set()
-            await release.wait()
+            await asyncio.to_thread(release.wait, 5)
             return body_result
 
         task = asyncio.create_task(_register(body)(DB))
-        await started.wait()
+        assert await asyncio.to_thread(started.wait, 5)
         await asyncio.to_thread(dismiss)
         release.set()
         return await task
@@ -160,7 +160,7 @@ def test_record_is_used_up_by_the_call_it_interrupted():
     backend = FakeBackend([_runtime_error()])
 
     async def scenario():
-        started, release = asyncio.Event(), asyncio.Event()
+        started, release = threading.Event(), threading.Event()
         first = True
 
         async def body(database_path: str):
@@ -168,12 +168,12 @@ def test_record_is_used_up_by_the_call_it_interrupted():
             if first:
                 first = False
                 started.set()
-                await release.wait()
+                await asyncio.to_thread(release.wait, 5)
             return {"success": True}
 
         tool = _register(body)
         task = asyncio.create_task(tool(DB))
-        await started.wait()
+        assert await asyncio.to_thread(started.wait, 5)
         await asyncio.to_thread(_end_runtime_error, backend)
         release.set()
         return await task, await tool(DB)
@@ -453,15 +453,15 @@ def test_call_that_raises_uses_up_its_record(usage_log):
     backend = FakeBackend([_runtime_error()])
 
     async def scenario():
-        started, release = asyncio.Event(), asyncio.Event()
+        started, release = threading.Event(), threading.Event()
 
         async def body(database_path: str):
             started.set()
-            await release.wait()
+            await asyncio.to_thread(release.wait, 5)
             raise RuntimeError("handler broke")
 
         task = asyncio.create_task(_register(body)(DB))
-        await started.wait()
+        assert await asyncio.to_thread(started.wait, 5)
         await asyncio.to_thread(_end_runtime_error, backend)
         release.set()
         with pytest.raises(RuntimeError, match="handler broke"):

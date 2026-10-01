@@ -7,11 +7,18 @@ and a one-at-a-time slot so callers get a fast ``server_busy`` answer
 instead of queueing into a client-side timeout. Waiting for the slot uses no
 worker thread, so a thread pool filled by hung workers cannot delay
 ``server_busy`` past its deadline.
+
+Async tool bodies run on that apartment thread too, in an event loop of their
+own. A blocking COM step inside one (connect, add-in probe, a synchronous API
+call) then holds up only that thread, never the server loop that the dialog,
+status and cancel tools answer on, and every COM object the body creates is
+used and released on the thread that created it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import itertools
 import os
 import threading
@@ -71,6 +78,27 @@ class InFlight:
     call_id: int = 0
 
 
+class ServerLoopContext:
+    """The MCP ``Context`` handed to a tool body that runs on the apartment loop.
+
+    Progress goes out through the client session, which belongs to the server
+    loop, so each report is sent there and awaited from the body's loop.
+    """
+
+    def __init__(self, ctx: Any, loop: asyncio.AbstractEventLoop) -> None:
+        self._ctx = ctx
+        self._loop = loop
+
+    async def report_progress(
+        self, progress: float, total: float | None = None, message: str | None = None
+    ) -> None:
+        sent = asyncio.run_coroutine_threadsafe(
+            self._ctx.report_progress(progress=progress, total=total, message=message),
+            self._loop,
+        )
+        await asyncio.wrap_future(sent)
+
+
 def _busy_error(in_flight: InFlight) -> dict[str, Any]:
     elapsed_ms = round((time.perf_counter() - in_flight.started_at) * 1000, 2)
     db_hint = f" on {in_flight.database}" if in_flight.database else ""
@@ -113,6 +141,44 @@ class AccessGate:
 
     def _mark_com_initialized(self) -> None:
         self._com_initialized = True
+
+    def _note_apartment_used(self) -> None:
+        if COM_AVAILABLE and not self._com_initialized:
+            # Executor initializer runs once per worker thread; record it
+            # for tests that assert COM was initialized.
+            self._mark_com_initialized()
+
+    async def _run_on_apartment_loop(self, fn: Callable[..., Any], args: tuple, kwargs: dict) -> Any:
+        """Run an async body to completion in a fresh event loop on the apartment thread.
+
+        The body keeps the caller's context variables. Cancelling the caller
+        cancels the body at its next await; a blocking step it is inside runs on.
+        """
+        context = contextvars.copy_context()
+        body_task: dict[str, Any] = {}
+
+        async def body() -> Any:
+            body_task["loop"] = asyncio.get_running_loop()
+            body_task["task"] = asyncio.current_task()
+            if body_task.get("cancelled"):
+                raise asyncio.CancelledError
+            return await fn(*args, **kwargs)
+
+        def run() -> Any:
+            self._note_apartment_used()
+            with asyncio.Runner() as runner:
+                return runner.run(body(), context=context)
+
+        try:
+            return await asyncio.get_running_loop().run_in_executor(self._executor, run)
+        except asyncio.CancelledError:
+            body_task["cancelled"] = True
+            if "task" in body_task:
+                try:
+                    body_task["loop"].call_soon_threadsafe(body_task["task"].cancel)
+                except RuntimeError:
+                    pass  # The body finished and its loop is closed.
+            raise
 
     def current_in_flight(self) -> InFlight | None:
         with self._state_lock:
@@ -162,13 +228,10 @@ class AccessGate:
 
         try:
             if is_async:
-                return await fn(*args, **kwargs)
+                return await self._run_on_apartment_loop(fn, args, kwargs)
 
             def _run_sync() -> Any:
-                if COM_AVAILABLE and not self._com_initialized:
-                    # Executor initializer runs once per worker thread; record it
-                    # for tests that assert COM was initialized.
-                    self._mark_com_initialized()
+                self._note_apartment_used()
                 return fn(*args, **kwargs)
 
             loop = asyncio.get_running_loop()

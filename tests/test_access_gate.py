@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import threading
 import time
 from unittest.mock import patch
 
@@ -12,6 +14,7 @@ from msaccess_vcs_mcp.access_gate import (
     AccessGate,
     EXEMPT_TOOLS,
     InFlight,
+    ServerLoopContext,
     _busy_error,
     reset_access_gate,
 )
@@ -39,15 +42,117 @@ def test_run_exclusive_executes_sync_fn_in_apartment():
     assert seen == ["done"]
 
 
-def test_run_exclusive_executes_async_fn_on_loop():
+async def _until(event: threading.Event) -> None:
+    """Wait for an event set on another thread without using a worker thread."""
+    while not event.is_set():
+        await asyncio.sleep(0.005)
+
+
+def test_run_exclusive_executes_async_fn_in_apartment():
+    """An async body runs in its own loop on the apartment thread, never on the caller's."""
     gate = AccessGate()
+    seen: dict[str, object] = {}
 
     async def work():
         await asyncio.sleep(0)
+        seen["thread"] = threading.current_thread().name
+        seen["loop"] = asyncio.get_running_loop()
         return "async"
 
-    result = asyncio.run(gate.run_exclusive("vcs_test", None, work, True))
+    async def runner():
+        result = await gate.run_exclusive("vcs_test", None, work, True)
+        return result, asyncio.get_running_loop()
+
+    result, caller_loop = asyncio.run(runner())
     assert result == "async"
+    assert str(seen["thread"]).startswith("vcs-access-apartment")
+    assert seen["loop"] is not caller_loop
+
+
+def test_async_body_blocking_step_leaves_caller_loop_free():
+    gate = AccessGate()
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def work():
+        entered.set()
+        release.wait(5)  # A blocking COM step, such as connect or the add-in probe.
+        return "done"
+
+    async def runner():
+        task = asyncio.create_task(gate.run_exclusive("vcs_test", None, work, True))
+        await asyncio.wait_for(_until(entered), 1.0)
+        ticks = 0
+        started = time.monotonic()
+        while time.monotonic() - started < 0.2:
+            await asyncio.sleep(0.01)
+            ticks += 1
+        release.set()
+        return ticks, await asyncio.wait_for(task, 1.0)
+
+    ticks, result = asyncio.run(runner())
+    assert result == "done"
+    assert ticks >= 5
+
+
+def test_async_body_keeps_caller_context_variables():
+    marker = contextvars.ContextVar("marker", default="unset")
+    gate = AccessGate()
+
+    async def work():
+        return marker.get()
+
+    async def runner():
+        marker.set("caller")
+        return await gate.run_exclusive("vcs_test", None, work, True)
+
+    assert asyncio.run(runner()) == "caller"
+
+
+def test_cancelling_the_caller_cancels_the_async_body():
+    gate = AccessGate()
+    entered = threading.Event()
+    body_cancelled = threading.Event()
+
+    async def work():
+        entered.set()
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            body_cancelled.set()
+            raise
+
+    async def runner():
+        task = asyncio.create_task(gate.run_exclusive("vcs_test", None, work, True))
+        await asyncio.wait_for(_until(entered), 1.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(_until(body_cancelled), 1.0)
+
+    asyncio.run(runner())
+
+
+def test_server_loop_context_reports_progress_on_the_server_loop():
+    gate = AccessGate()
+    reports: list[tuple[object, dict]] = []
+
+    class FakeContext:
+        async def report_progress(self, **kwargs):
+            reports.append((asyncio.get_running_loop(), kwargs))
+
+    async def work(ctx):
+        await ctx.report_progress(progress=1.0, message="Exporting")
+        return "done"
+
+    async def runner():
+        loop = asyncio.get_running_loop()
+        ctx = ServerLoopContext(FakeContext(), loop)
+        return await gate.run_exclusive("vcs_test", None, work, True, ctx), loop
+
+    result, server_loop = asyncio.run(runner())
+    assert result == "done"
+    assert reports == [(server_loop, {"progress": 1.0, "total": None, "message": "Exporting"})]
 
 
 def test_run_exclusive_serializes_concurrent_calls():
@@ -83,7 +188,7 @@ def test_run_exclusive_serializes_concurrent_calls():
 
 def test_run_exclusive_returns_busy_when_slot_unavailable():
     gate = AccessGate()
-    entered = asyncio.Event()
+    entered = threading.Event()
 
     async def runner():
         async def slow():
@@ -95,7 +200,7 @@ def test_run_exclusive_returns_busy_when_slot_unavailable():
             slow_task = asyncio.create_task(
                 gate.run_exclusive("vcs_run_tests", r"C:\big.accdb", slow, True)
             )
-            await entered.wait()
+            await _until(entered)
             busy = await gate.run_exclusive(
                 "vcs_call_vba", r"C:\other.accdb", lambda: None, False
             )
@@ -128,7 +233,6 @@ def test_run_exclusive_releases_slot_after_exception():
 @pytest.mark.parametrize("slot_free", [True, False], ids=["free", "busy"])
 def test_slot_wait_needs_no_worker_thread(slot_free):
     """A default executor full of hung workers cannot delay the slot or server_busy."""
-    import threading
     from concurrent.futures import ThreadPoolExecutor
 
     gate = AccessGate()
@@ -141,14 +245,14 @@ def test_slot_wait_needs_no_worker_thread(slot_free):
         try:
             with patch("msaccess_vcs_mcp.access_gate._read_busy_wait_sec", return_value=0.1):
                 if not slot_free:
-                    entered = asyncio.Event()
+                    entered = threading.Event()
 
                     async def hold():
                         entered.set()
                         await asyncio.sleep(1.0)
 
                     holder = asyncio.create_task(gate.run_exclusive("vcs_run_tests", None, hold, True))
-                    await entered.wait()
+                    await _until(entered)
                 loop.run_in_executor(None, hung.wait, 5)
                 started = time.monotonic()
                 result = await asyncio.wait_for(

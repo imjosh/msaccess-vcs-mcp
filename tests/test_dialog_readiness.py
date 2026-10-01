@@ -7,6 +7,7 @@ the tool and assert on the returned dictionary.
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -114,7 +115,7 @@ def test_blocking_dialog_is_not_ready():
 
 def _status_while_gate_held(backend, held_database):
     gate = get_access_gate()
-    entered = asyncio.Event()
+    entered = threading.Event()
 
     async def hold():
         entered.set()
@@ -122,7 +123,7 @@ def _status_while_gate_held(backend, held_database):
 
     async def main():
         task = asyncio.create_task(gate.run_exclusive("vcs_run_tests", held_database, hold, True))
-        await entered.wait()
+        assert await asyncio.to_thread(entered.wait, 5)
         with patch("msaccess_vcs_mcp.dialog_recovery._default_backend", return_value=backend):
             result = await tools.vcs_automation_status(DB, pid=10)
         await task

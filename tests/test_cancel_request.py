@@ -326,9 +326,13 @@ def _merge_with(monkeypatch, tmp_path, manager, base, payload):
         assert _poll(base, operation_id) is False
         return {"async": True, "timeout_ms": 5000}
 
-    with _patch_import_tool(tmp_path) as (db, src, addin, _ops):
-        monkeypatch.setattr(tools, "_get_operation_manager", lambda: manager)
-        monkeypatch.setattr(tools, "get_callback_url", lambda: f"{base}/callback")
+    # patch.object, not monkeypatch: these override _patch_import_tool's own
+    # patches, and monkeypatch would restore those mocks after the test.
+    with (
+        _patch_import_tool(tmp_path) as (db, src, addin, _ops),
+        patch.object(tools, "_get_operation_manager", return_value=manager),
+        patch.object(tools, "get_callback_url", return_value=f"{base}/callback"),
+    ):
         addin.call_async.side_effect = _start
         result = asyncio.run(tools.vcs_import_objects(db, str(src), decision_policy="prefer_source"))
     assert manager.pending_count() == 0

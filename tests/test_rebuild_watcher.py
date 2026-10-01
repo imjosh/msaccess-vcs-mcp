@@ -318,8 +318,8 @@ def test_rebuild_addin_returns_refusal_without_watch(tmp_path, monkeypatch):
 
     gate = MagicMock()
 
-    async def _exclusive(_tool, _db, fn, _is_async, /, *args, **kwargs):
-        return await fn(*args, **kwargs)
+    async def _exclusive(_tool, _db, fn, is_async, /, *args, **kwargs):
+        return await fn(*args, **kwargs) if is_async else fn(*args, **kwargs)
 
     gate.run_exclusive = _exclusive
     monkeypatch.setattr(tools_module, "get_access_gate", lambda: gate)
@@ -362,8 +362,8 @@ def test_rebuild_addin_emits_starting_access_before_launch(tmp_path, monkeypatch
 
     gate = MagicMock()
 
-    async def _exclusive(_tool, _db, fn, _is_async, /, *args, **kwargs):
-        return await fn(*args, **kwargs)
+    async def _exclusive(_tool, _db, fn, is_async, /, *args, **kwargs):
+        return await fn(*args, **kwargs) if is_async else fn(*args, **kwargs)
 
     gate.run_exclusive = _exclusive
     monkeypatch.setattr(tools_module, "get_access_gate", lambda: gate)
@@ -412,8 +412,8 @@ def test_rebuild_addin_watches_after_launch(tmp_path, monkeypatch):
     gate = MagicMock()
     released = {"held": True}
 
-    async def _exclusive(_tool, _db, fn, _is_async, /, *args, **kwargs):
-        result = await fn(*args, **kwargs)
+    async def _exclusive(_tool, _db, fn, is_async, /, *args, **kwargs):
+        result = await fn(*args, **kwargs) if is_async else fn(*args, **kwargs)
         released["held"] = False
         return result
 
@@ -486,8 +486,8 @@ def test_rebuild_addin_passes_callback_identity_to_worker(tmp_path, monkeypatch)
 
     gate = MagicMock()
 
-    async def _exclusive(_tool, _db, fn, _is_async, /, *args, **kwargs):
-        return await fn(*args, **kwargs)
+    async def _exclusive(_tool, _db, fn, is_async, /, *args, **kwargs):
+        return await fn(*args, **kwargs) if is_async else fn(*args, **kwargs)
 
     gate.run_exclusive = _exclusive
     monkeypatch.setattr(tools_module, "get_access_gate", lambda: gate)

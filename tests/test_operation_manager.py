@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -222,3 +223,44 @@ def test_progress_delivery_failure_preserves_operation_outcome(terminal_type, ca
     assert failure.levelno == logging.WARNING
     assert failure.exc_info is not None
     assert "Progress reported: 2.0 - exporting modules" in caplog.text
+
+
+def test_callbacks_reach_the_loop_that_registered_the_operation():
+    """A gated tool waits on the Access apartment's loop while the manager keeps the server's."""
+    manager = OperationManager.get_instance()
+    server_loop = asyncio.new_event_loop()
+    manager.set_event_loop(server_loop)  # As at server startup.
+    registered = threading.Event()
+    box: dict = {}
+
+    async def gated_body():
+        operation_id, _queue = manager.register_operation(command="Export")
+        box["operation_id"] = operation_id
+        registered.set()
+        return await manager.wait_for_completion(operation_id, timeout_seconds=2)
+
+    def apartment():
+        box["result"] = asyncio.run(gated_body())
+
+    thread = threading.Thread(target=apartment)
+    try:
+        thread.start()
+        assert registered.wait(2)
+        # The HTTP handler thread routes the terminal callback.
+        assert manager.route_callback(box["operation_id"], {"type": "complete", "message": "done"})
+        thread.join(3)
+        assert box["result"]["success"] is True
+        assert box["result"]["message"] == "done"
+    finally:
+        thread.join(3)
+        server_loop.close()
+
+
+def test_callback_after_its_loop_closed_is_not_routed():
+    manager = OperationManager.get_instance()
+
+    async def register():
+        return manager.register_operation(command="Export")[0]
+
+    operation_id = asyncio.run(register())
+    assert manager.route_callback(operation_id, {"type": "progress", "message": "late"}) is False

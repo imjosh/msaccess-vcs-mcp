@@ -689,7 +689,7 @@ def with_logging(tool_name: str):
         # Filter out Context objects (not serializable)
         parameters = {
             k: v for k, v in parameters.items()
-            if not (hasattr(v, '__class__') and v.__class__.__name__ == 'Context')
+            if not (hasattr(v, '__class__') and v.__class__.__name__ in ('Context', 'ServerLoopContext'))
         }
 
         logged_error = error_msg or serialization_warning
