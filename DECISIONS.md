@@ -74,6 +74,25 @@ contradictory guidance.
 
 ---
 
+## 2026-10-01 — `vcs_rebuild_database` builds through `BuildAs(source, output)` and reports the add-in's output path (X09)
+
+**Trigger**: X09 (interface review). `vcs_rebuild_database(source_dir, output_path)` called `Build`, which ignores the output and opens the source-folder and save-as pickers. Before the fix it was also unreachable: every call failed in the add-in probe with RPC_E_WRONG_THREAD, because with no database open the probe thread used the main thread's proxy. A marshalled proxy got past that, but Access then exited when the add-in ran with no database open. With a host database, the live reproduction opened a "Select Source Folder" picker; cancelling it gave `cancelled: true, output_path: null`.
+
+**Options explored**:
+- **BuildAs arguments (chosen).** The add-in's `BuildAs` takes an optional source folder and output file; given both, it opens no picker and refuses a bad pair with `invalid_build_path` JSON. With none, the ribbon behaviour is unchanged.
+- **Only the default output name, verified afterwards.** Rejected: it cannot honour a caller's path, and checking the file after the build cannot stop a picker from opening first.
+- **Marshal the proxy and run with no database.** Rejected: Access exits. The call is hosted in a throwaway blank database (`_open_build_host`) and `load_addin(app, db_path=host_path)` probes through the ROT as other tools do. The full build closes that host before it writes the output. `_close_build_host` closes and quits Access, then removes the folder with retries.
+- **Probe the capability through `API("GetCapabilities")`.** Rejected after a live check: on an add-in without the method, `API` stops in a modal "Run-time error '438'" (`#32770`) inside Access and the call times out holding the gate. `Application.Run "<add-in>.NoSuchProc"` fails at once with COM error 2517 and leaves no dialog. MCP therefore runs the module procedure `APICapabilities` by name.
+
+**Decision**:
+- With `output_path`, every path (async, inline, sync fallback) calls `BuildAs(source, output)`; without it, `Build(source)`. A relative `output_path` is `invalid_build_path` before Access starts.
+- `build_as_paths_refusal` fails closed: a raise, a reply that is not `{success: true, capabilities: [...]}`, or a list without `build_as_paths` is `build_output_unsupported`, and nothing starts. The add-in version is never consulted, since a rebuild does not change it (M32/M40).
+- `output_path` in the result is the path the add-in's `complete` callback reports (`clsOperation.RecordOutputPath`), never the request. Every other result has `output_path: None`; an unconfirmed start (M35) keeps the request as `requested_output_path`. A refused async start is returned once, not dispatched again.
+
+**What this rules out**: Building to a caller's path on an add-in without `APICapabilities` (upgrade the add-in). Probing any new capability through `API`: a missing method blocks Access with a dialog. Running add-in calls with no database open. Revisit if the add-in grows a build entry that needs no host database.
+
+**Relevant files**: `addin_integration.py` (`build_from_source`, `build_as_paths_refusal`, `CAPABILITIES_PROCEDURE`), `tools.py` (`vcs_rebuild_database`, `_open_build_host`, `_close_build_host`, `_build_start_outcome`), `operation_manager.py`, `docs/DIALOGS.md`, `docs/VBA_INTEGRATION.md`, `docs/VBA_CALLBACK_API.md`, `README.md`, `tests/test_export_build_fallbacks.py`.
+
 ## 2026-10-01 — Automation test runs stay headless; `vcs_run_tests(noninteractive=False)` is refused (X11)
 
 **Trigger**: X11 (interface review F5). The tool docstring and `docs/DIALOGS.md` promised the ribbon-style console and normal prompts for `noninteractive=False`, and MCP confirmed `SetInteractionMode(0)` before dispatch. The add-in never honoured it: `modAPI` marks every API call as automation, and `ExecuteTests` then sets `blnHeadless`, forces `eimSilent`, and skips the console, whatever mode was selected.

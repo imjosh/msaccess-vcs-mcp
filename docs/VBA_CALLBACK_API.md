@@ -273,6 +273,10 @@ place of `results_path`. `vcs_run_tests` returns it as `success: false` with
 cancelled, the cancel takes precedence: `error` reports the cancellation, and
 `cancelled` and `results_error` are both kept.
 
+A full build that succeeded adds `output_path`, the database it built, to its
+`complete` callback. `vcs_rebuild_database` reports that path as its
+`output_path`, never the one it asked for.
+
 A root that ended on a runtime error adds `runtime_error` (the description) and
 `errorNumber` to its terminal callback. On a plain `error` the message is the
 error text; on `decision_required` both ride alongside `decisions`.

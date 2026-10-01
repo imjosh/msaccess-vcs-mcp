@@ -180,6 +180,7 @@ def _build_through_callback(tmp_path, payload):
 
     manager = OperationManager()
     addin = MagicMock()
+    addin.build_as_paths_refusal.return_value = None
     addin.call_async.side_effect = _drive(manager, payload)
     src = tmp_path / "src"
     src.mkdir()

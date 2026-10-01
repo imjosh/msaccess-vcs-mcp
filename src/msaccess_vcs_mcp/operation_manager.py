@@ -486,6 +486,8 @@ class OperationManager:
                             "log_path": callback.get("log_path"),
                             "results_path": callback.get("results_path"),
                             "results_error": callback.get("results_error"),
+                            # A build's report of the database it wrote.
+                            "output_path": callback.get("output_path"),
                             "log_messages": log_messages if log_messages else None,
                             "decisions": callback.get("decisions"),
                             "decision_required": callback.get("decision_required"),

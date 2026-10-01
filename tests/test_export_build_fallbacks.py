@@ -1,7 +1,7 @@
 """M35: whole-export and database-build fallbacks never invent success.
 
-Export, FullExport, ExportVBA and Build are Subs or form starts, so their API
-return is Empty. Any path without a terminal callback therefore reports M15's
+Export, FullExport, ExportVBA, Build and BuildAs are Subs or form starts, so
+their API return is Empty. Any path without a terminal callback therefore reports M15's
 ``completion_unconfirmed`` result, never ``success: true``. The tools run
 against a real ``VCSAddinIntegration`` over a fake ``Application.Run``, so each
 test asserts the add-in method that was actually dispatched.
@@ -9,6 +9,7 @@ test asserts the add-in method that was actually dispatched.
 
 import asyncio
 import json
+import os
 from contextlib import contextmanager
 from unittest.mock import MagicMock, Mock, patch
 
@@ -23,6 +24,7 @@ from msaccess_vcs_mcp.operation_manager import OperationManager
 
 REFUSED = "VCS_API_REFUSED: VCS Export refused a call to 'Export' while another API command was running."
 ASYNC_STARTED = '{"async": true, "timeout_ms": 5000}'
+CAPABLE = '{"success": true, "capabilities": ["build_as_paths"]}'
 
 EXPORT_METHODS = [(False, "Export"), (True, "FullExport")]
 
@@ -45,18 +47,33 @@ class FakeAccess:
     ``api`` and ``async_start`` are the raw returns of ``API`` and ``APIAsync``;
     an exception instance is raised instead. ``on_async`` runs after a
     successful ``APIAsync`` start, to post a terminal callback.
+    ``capabilities`` answers a direct run of ``APICapabilities``, which is
+    counted in ``probes`` rather than ``dispatched``; ``probe_names`` holds
+    the procedure names run. ``arguments`` holds each dispatched method's
+    arguments.
     """
 
-    def __init__(self, api=None, async_start=ASYNC_STARTED, on_async=None):
+    def __init__(self, api=None, async_start=ASYNC_STARTED, on_async=None, capabilities=CAPABLE):
         self.api = api
         self.async_start = async_start
         self.on_async = on_async
+        self.capabilities = capabilities
         self.dispatched: list[tuple[str, str]] = []
+        self.arguments: list[tuple] = []
+        self.probes = 0
+        self.probe_names: list[str] = []
 
     def run(self, name, *args):
         entry = name.rsplit(".", 1)[1]
+        if entry == "APICapabilities":
+            self.probes += 1
+            self.probe_names.append(name)
+            if isinstance(self.capabilities, Exception):
+                raise self.capabilities
+            return self.capabilities
         method = args[1] if entry == "APIAsync" else args[0]
         self.dispatched.append((entry, method))
+        self.arguments.append(args[2:] if entry == "APIAsync" else args[1:])
         outcome = self.async_start if entry == "APIAsync" else self.api
         if isinstance(outcome, Exception):
             raise outcome
@@ -75,10 +92,12 @@ def _addin(tmp_path, fake):
     return addin
 
 
-def _complete(manager):
+def _complete(manager, **fields):
     def post(callback_info):
         operation_id = json.loads(callback_info)["operation_id"]
-        assert manager.route_callback(operation_id, {"operation_id": operation_id, "type": "complete"})
+        assert manager.route_callback(
+            operation_id, {"operation_id": operation_id, "type": "complete", **fields}
+        )
 
     return post
 
@@ -132,7 +151,7 @@ def _export(tmp_path, fake, *, full_export=False, callback=True, complete=False)
 
 
 @contextmanager
-def _build_env(tmp_path, addin, manager, callback):
+def _build_env(tmp_path, addin, manager, callback, app=None):
     src = tmp_path / "src"
     src.mkdir(exist_ok=True)
     with (
@@ -140,7 +159,7 @@ def _build_env(tmp_path, addin, manager, callback):
         patch("msaccess_vcs_mcp.tools.validate_source_directory", return_value=src),
         patch("msaccess_vcs_mcp.tools.close_owned_instances_holding", return_value=[]),
         patch("msaccess_vcs_mcp.tools._check_database_busy", return_value=None),
-        patch("msaccess_vcs_mcp.tools.ensure_dispatch", return_value=MagicMock()),
+        patch("msaccess_vcs_mcp.tools.ensure_dispatch", return_value=app or MagicMock()),
         patch("msaccess_vcs_mcp.tools.prefer_full_power_if_created"),
         patch("msaccess_vcs_mcp.tools.ensure_access_visible"),
         patch("msaccess_vcs_mcp.tools.VCSAddinIntegration", return_value=addin),
@@ -157,15 +176,15 @@ def _build_env(tmp_path, addin, manager, callback):
         yield src
 
 
-def _build(tmp_path, fake, *, callback=True, complete=False):
+def _build(tmp_path, fake, *, callback=True, complete=False, completion=None, output=None, app=None):
     from msaccess_vcs_mcp.tools import vcs_rebuild_database
 
     manager = OperationManager()
     if complete:
-        fake.on_async = _complete(manager)
+        fake.on_async = _complete(manager, **(completion or {}))
     addin = _addin(tmp_path, fake)
-    output = str(tmp_path / "out.accdb")
-    with _build_env(tmp_path, addin, manager if callback else None, callback) as src:
+    output = str(tmp_path / "out.accdb") if output is None else output
+    with _build_env(tmp_path, addin, manager if callback else None, callback, app) as src:
         result = asyncio.run(_unwrap(vcs_rebuild_database)(str(src), output))
     assert manager.pending_count() == 0
     return result, src, output
@@ -259,13 +278,68 @@ def test_export_helpers_dispatch_the_requested_method(tmp_path, helper, expected
     _assert_unconfirmed(result)
 
 
-def test_build_helper_passes_the_source_folder_and_is_unconfirmed(tmp_path):
+def test_build_helper_passes_source_and_output_and_is_unconfirmed(tmp_path):
     fake = FakeAccess()
     addin = _addin(tmp_path, fake)
-    result = addin.build_from_source(str(tmp_path / "src"), str(tmp_path / "out.accdb"))
-    assert fake.dispatched == [("API", "Build")]
+    src, out = str(tmp_path / "src"), str(tmp_path / "out.accdb")
+    result = addin.build_from_source(src, out)
+    assert fake.dispatched == [("API", "BuildAs")]
+    assert fake.arguments == [(src, out)]
     _assert_unconfirmed(result)
-    assert result["output_path"] == str(tmp_path / "out.accdb")
+    # Nothing reported where it wrote: the request is kept apart.
+    assert result["output_path"] is None
+    assert result["requested_output_path"] == out
+
+
+def test_build_helper_without_an_output_builds_the_source(tmp_path):
+    fake = FakeAccess()
+    src = str(tmp_path / "src")
+    result = _addin(tmp_path, fake).build_from_source(src)
+    assert fake.dispatched == [("API", "Build")]
+    assert fake.arguments == [(src,)]
+    _assert_unconfirmed(result)
+    assert "requested_output_path" not in result
+
+
+@pytest.mark.parametrize("capabilities", [
+    RuntimeError("Microsoft Access cannot find the procedure 'APICapabilities.'"),
+    None,
+    "",
+    "not json",
+    '{"success": false}',
+    '{"success": true}',
+    '{"success": true, "capabilities": "build_as_paths"}',
+    '{"success": true, "capabilities": ["something_else"]}',
+], ids=["raises", "empty", "blank", "not-json", "failed", "no-list", "not-a-list", "missing-name"])
+def test_build_as_paths_refusal_fails_closed(tmp_path, capabilities):
+    refusal = _addin(tmp_path, FakeAccess(capabilities=capabilities)).build_as_paths_refusal()
+    assert refusal["success"] is False
+    assert refusal["error_pattern"] == "build_output_unsupported"
+    assert "build_as_paths" in refusal["error"]
+
+
+def test_build_as_paths_confirmed_is_no_refusal(tmp_path):
+    fake = FakeAccess()
+    assert _addin(tmp_path, fake).build_as_paths_refusal() is None
+    # Run by name, never through API: API on a missing method leaves a
+    # modal runtime-error dialog in Access instead of raising.
+    lib = os.path.splitext(os.path.abspath(tmp_path / "Version Control.accda"))[0]
+    assert fake.probe_names == [f"{lib}.APICapabilities"]
+    assert fake.dispatched == []
+
+
+def test_build_as_paths_reads_an_early_bound_tuple(tmp_path):
+    fake = FakeAccess(capabilities=(CAPABLE,))
+    assert _addin(tmp_path, fake).build_as_paths_refusal() is None
+
+
+def test_build_as_paths_refusal_without_a_loaded_addin(tmp_path):
+    fake = FakeAccess()
+    addin = _addin(tmp_path, fake)
+    addin._addin_loaded = False
+    refusal = addin.build_as_paths_refusal()
+    assert refusal["error_pattern"] == "build_output_unsupported"
+    assert fake.probes == 0
 
 
 @pytest.mark.parametrize("call", [
@@ -373,21 +447,83 @@ def test_export_sync_fallback_refusal_and_exception_fail(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_build_callback_completion_is_unchanged(tmp_path):
+def test_build_callback_reports_the_add_ins_output_path(tmp_path):
+    reported = str(tmp_path / "reported.accdb")
     fake = FakeAccess()
-    result, src, output = _build(tmp_path, fake, complete=True)
+    result, src, output = _build(tmp_path, fake, complete=True, completion={"output_path": reported})
     assert result["success"] is True
-    assert result["output_path"] == output
+    assert result["output_path"] == reported
     assert result["source_dir"] == str(src)
     assert "completion_unconfirmed" not in result
-    assert [entry for entry, _ in fake.dispatched] == ["APIAsync"]
+    assert fake.dispatched == [("APIAsync", "BuildAs")]
+    assert fake.arguments == [(str(src), output)]
+    assert fake.probes == 1
+
+
+def test_build_completion_without_a_path_does_not_echo_the_request(tmp_path):
+    result, _, _ = _build(tmp_path, FakeAccess(), complete=True)
+    assert result["success"] is True
+    assert result["output_path"] is None
+
+
+@pytest.mark.parametrize("callback", [True, False], ids=["callback", "no-callback"])
+def test_build_refused_before_start_without_the_capability(tmp_path, callback):
+    fake = FakeAccess(capabilities=RuntimeError("Method not found"))
+    result, src, _ = _build(tmp_path, fake, callback=callback)
+    assert result["success"] is False
+    assert result["error_pattern"] == "build_output_unsupported"
+    assert result["output_path"] is None
+    assert result["source_dir"] == str(src)
+    assert fake.dispatched == []
+
+
+def test_build_relative_output_is_refused_before_access_starts(tmp_path):
+    app = MagicMock()
+    fake = FakeAccess()
+    result, _, _ = _build(tmp_path, fake, output="out.accdb", app=app)
+    assert result["success"] is False
+    assert result["error_pattern"] == "invalid_build_path"
+    assert result["output_path"] is None
+    assert fake.probes == 0
+    assert fake.dispatched == []
+    app.NewCurrentDatabase.assert_not_called()
+
+
+def test_build_host_database_is_closed_and_removed(tmp_path):
+    app = MagicMock()
+    _build(tmp_path, FakeAccess(), complete=True, app=app)
+    host_path = app.NewCurrentDatabase.call_args.args[0]
+    assert os.path.basename(host_path) == "BuildHost.accdb"
+    app.CloseCurrentDatabase.assert_called_once_with()
+    app.Quit.assert_called_once_with()
+    assert not os.path.exists(os.path.dirname(host_path))
+
+
+def test_build_host_folder_removal_is_retried(tmp_path, monkeypatch):
+    from msaccess_vcs_mcp import tools
+
+    host = tmp_path / "host"
+    host.mkdir()
+    calls = []
+    real_rmtree = tools.shutil.rmtree
+
+    def held_once(path, ignore_errors=False):
+        calls.append(path)
+        if len(calls) > 1:
+            real_rmtree(path, ignore_errors=ignore_errors)
+
+    monkeypatch.setattr(tools.shutil, "rmtree", held_once)
+    tools._close_build_host(MagicMock(), str(host), delay=0)
+    assert len(calls) == 2
+    assert not host.exists()
 
 
 def test_build_inline_empty_result_is_unconfirmed_and_not_run_twice(tmp_path):
     fake = FakeAccess(async_start='{"sync": true, "result": null}')
     result, src, output = _build(tmp_path, fake)
     _assert_unconfirmed(result)
-    assert result["output_path"] == output
+    assert result["output_path"] is None
+    assert result["requested_output_path"] == output
     assert result["source_dir"] == str(src)
     assert [entry for entry, _ in fake.dispatched] == ["APIAsync"]
 
@@ -402,23 +538,36 @@ def test_build_inline_refusal_fails_with_its_pattern(tmp_path):
     assert [entry for entry, _ in fake.dispatched] == ["APIAsync"]
 
 
+def test_build_refused_async_start_is_not_dispatched_again(tmp_path):
+    fake = FakeAccess(async_start=json.dumps({"success": False, "error": "start refused"}))
+    result, _, _ = _build(tmp_path, fake)
+    assert result["success"] is False
+    assert result["error"] == "start refused"
+    assert result["output_path"] is None
+    assert "completion_unconfirmed" not in result
+    assert fake.dispatched == [("APIAsync", "BuildAs")]
+
+
 @pytest.mark.parametrize("start", [
     '{"unexpected": true}',
     RuntimeError("async start failed"),
 ], ids=["neither-marker", "async-raises"])
-def test_build_sync_fallback_is_unconfirmed(tmp_path, start):
+def test_build_sync_fallback_uses_build_as_and_is_unconfirmed(tmp_path, start):
     fake = FakeAccess(async_start=start)
-    result, _, output = _build(tmp_path, fake)
+    result, src, output = _build(tmp_path, fake)
     _assert_unconfirmed(result)
-    assert result["output_path"] == output
-    assert fake.dispatched[-1] == ("API", "Build")
+    assert result["output_path"] is None
+    assert result["requested_output_path"] == output
+    assert fake.dispatched == [("APIAsync", "BuildAs"), ("API", "BuildAs")]
+    assert fake.arguments == [(str(src), output), (str(src), output)]
 
 
 def test_build_without_a_callback_server_is_unconfirmed(tmp_path):
     fake = FakeAccess()
-    result, _, _ = _build(tmp_path, fake, callback=False)
+    result, src, output = _build(tmp_path, fake, callback=False)
     _assert_unconfirmed(result)
-    assert fake.dispatched == [("API", "Build")]
+    assert fake.dispatched == [("API", "BuildAs")]
+    assert fake.arguments == [(str(src), output)]
 
 
 def test_build_sync_fallback_refusal_and_exception_fail(tmp_path):

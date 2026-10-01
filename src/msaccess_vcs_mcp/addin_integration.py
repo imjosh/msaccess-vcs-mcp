@@ -101,6 +101,31 @@ def start_only_result(raw: Any, operation: str, log_type: str) -> dict[str, Any]
     return unconfirmed_start_result(operation, log_type)
 
 
+# APICapabilities names this when BuildAs(source, output) builds with no picker and
+# its completion callback reports output_path. A rebuild does not change the
+# add-in's version, so the version cannot say whether the build has it.
+# APICapabilities is a module procedure called by name, not an API method: Access
+# refuses a missing procedure at once (error 2517), while API on a missing method
+# stops in a modal "Run-time error '438'" inside Access.
+CAPABILITIES_PROCEDURE = "APICapabilities"
+BUILD_AS_PATHS = "build_as_paths"
+BUILD_OUTPUT_UNSUPPORTED_PATTERN = "build_output_unsupported"
+
+
+def build_output_unsupported_result(detail: str) -> dict[str, Any]:
+    """The refusal for an add-in that cannot build to a given output path."""
+    return {
+        "success": False,
+        "error_pattern": BUILD_OUTPUT_UNSUPPORTED_PATTERN,
+        "error": (
+            f"The add-in did not confirm the {BUILD_AS_PATHS} capability ({detail}); "
+            "no build started. Building to an output path needs an add-in whose "
+            "APICapabilities lists it, so that BuildAs takes the source folder and "
+            "output file without opening a picker. Upgrade the add-in."
+        ),
+    }
+
+
 def get_access_info(app) -> dict[str, Any]:
     """
     Get Access application version and bitness.
@@ -686,24 +711,72 @@ class VCSAddinIntegration:
         
         Args:
             source_folder: Path to source files folder
-            output_path: Optional path for new database (default: build in place)
-            
+            output_path: Optional path for new database (default: the name
+                the source files record). Given, it is passed to
+                ``BuildAs(source, output)``; confirm ``build_as_paths_refusal``
+                first, since an older add-in opens pickers for BuildAs.
+
         Returns:
-            Dictionary with the start result, never ``success: true``: Build is a
-            form start that returns Empty, so the outcome is unknown.
+            Dictionary with the start result, never ``success: true``: no
+            callback follows this call, so the outcome is unknown.
             - success: False
             - started / completion_unconfirmed: True when the call returned
               normally; ``error`` then says to read the log
             - error / message: The failure, for a refusal or a COM exception
-            - output_path: Path the build was asked to write to; None on failure
+            - output_path: None. Only a completion callback reports where a
+              build wrote; ``requested_output_path`` keeps the request on an
+              unconfirmed start
             - log_path: Path to Build.log, when it exists
         """
-        # Build always takes an optional source folder argument.
-        # BuildAs is interactive-only (shows file dialogs), so we use
-        # Build for both cases in headless mode.
-        result = self._start_only("Build", "build", "Build", source_folder, "Build.log", source_folder)
-        result["output_path"] = output_path if result.get("completion_unconfirmed") else None
+        if output_path:
+            args: tuple[str, ...] = (source_folder, output_path)
+            command = "BuildAs"
+        else:
+            args = (source_folder,)
+            command = "Build"
+        result = self._start_only(command, "build", "Build", source_folder, "Build.log", *args)
+        result["output_path"] = None
+        if output_path and result.get("completion_unconfirmed"):
+            result["requested_output_path"] = output_path
         return result
+
+    def build_as_paths_refusal(self) -> dict[str, Any] | None:
+        """None when the add-in confirms ``build_as_paths``, else the refusal.
+
+        Runs ``APICapabilities`` by name, never through ``API``: an older
+        add-in without it makes ``Application.Run`` raise at once, where
+        ``API`` would leave a modal runtime-error dialog in Access.
+
+        Fails closed: a raise, a reply that is not
+        ``{success: true, capabilities: [...]}``, or a list without the name
+        refuses the build before it starts.
+        """
+        if not self._addin_loaded or not self._app:
+            return build_output_unsupported_result("the add-in is not loaded")
+        procedure = (
+            f"{os.path.splitext(os.path.abspath(self.addin_path))[0]}"
+            f".{CAPABILITIES_PROCEDURE}"
+        )
+        try:
+            raw = self._app.Run(procedure)
+        except Exception as e:
+            return build_output_unsupported_result(f"{CAPABILITIES_PROCEDURE} failed: {e}")
+        if isinstance(raw, tuple):
+            raw = raw[0] if raw else None
+        reply: Any = raw
+        if isinstance(raw, str):
+            try:
+                reply = json.loads(raw)
+            except json.JSONDecodeError:
+                reply = None
+        if not isinstance(reply, dict) or reply.get("success") is not True:
+            return build_output_unsupported_result(
+                f"{CAPABILITIES_PROCEDURE} returned {raw!r}"
+            )
+        capabilities = reply.get("capabilities")
+        if not isinstance(capabilities, list) or BUILD_AS_PATHS not in capabilities:
+            return build_output_unsupported_result(f"capabilities: {capabilities!r}")
+        return None
 
     def _start_only(
         self,
