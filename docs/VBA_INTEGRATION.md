@@ -154,9 +154,15 @@ result = addin.build_from_source(source_folder, output_path)
 
 Maps to VBA:
 ```vba
-VCS().Build(source_folder)  ' via HandleRibbonCommand("btnBuild")
-VCS().BuildAs()  ' via HandleRibbonCommand("btnBuildAs")
+VCS().Build(source_folder)               ' no output_path
+VCS().BuildAs(source_folder, output_path) ' output_path given: no pickers
 ```
+
+`BuildAs()` with no arguments is the ribbon's Build As, which opens the source
+and save-as pickers. MCP calls `BuildAs` with both paths only after
+`Application.Run "<add-in>.APICapabilities"` lists `build_as_paths`. The probe
+is a module procedure, not an `API` method, so an older add-in refuses it with
+error 2517 instead of a runtime-error dialog.
 
 ## Result Handling
 

@@ -105,6 +105,8 @@ an `error`:
 | `policy_unconfirmed` | MCP could not confirm `SetOperationPolicy` (Empty, malformed, no echoed `policy`, or a different policy). Nothing starts and no clear is sent; requires an add-in whose `SetOperationPolicy` returns `{success: true, policy}`. |
 | `interaction_mode_unconfirmed` | MCP could not confirm interactive mode, including VBA Empty from an older add-in. Nothing starts; unsupported responses require an A24 or later build. |
 | `interactive_tests_unsupported` | `vcs_run_tests(noninteractive=False)`. An automation test run is always headless. Refused by MCP before any add-in call; nothing started. |
+| `build_output_unsupported` | `vcs_rebuild_database` with an `output_path`, against an add-in whose `APICapabilities` does not list `build_as_paths` (missing, returned Empty or malformed JSON, or left the name out). Refused by MCP before any build starts; upgrade the add-in. |
+| `invalid_build_path` | `vcs_rebuild_database` was given a relative `output_path` (refused by MCP), or the add-in rejected the pair: a source folder without `vcs-options.json`, an output with no folder or extension, a missing output folder, or the add-in itself. Nothing started. |
 
 The add-in's return from `MergeBuild` is a start result, not the outcome:
 the outcome arrives on the completion callback. When MCP had to start the
@@ -136,6 +138,20 @@ reason. `full_export=True` dispatches `FullExport` on the async, inline and
 sync-fallback paths. A final-result sync API in the add-in is deferred (see
 `DECISIONS.md`); until it exists, an agent that needs the outcome without the
 callback server reads the log.
+
+`vcs_rebuild_database` with an `output_path` calls `BuildAs(source, output)`
+on every path (async, inline and sync fallback), so the add-in opens neither
+the source-folder nor the save-as picker. MCP first runs the add-in's
+`APICapabilities` procedure by name and needs `build_as_paths` in its reply;
+anything else is `build_output_unsupported` and nothing starts, because an
+older add-in's `BuildAs` ignores the arguments and opens the pickers. The probe
+never goes through `API`: on an add-in without the method, `API` stops in a
+modal "Run-time error '438'" inside Access, while `Application.Run` of a
+missing procedure fails at once with error 2517 and leaves no dialog. `output_path` in the result is the path the completion callback
+reports, never the request. It is None on every other result; an unconfirmed
+start keeps the request as `requested_output_path`. The call is hosted in a
+blank temporary database (Access exits if the add-in runs with no database
+open), which is closed and removed when the call returns.
 
 `RunFilteredTests` is different: it runs the tests before it returns, and its
 return is the final results JSON (or a refusal). `vcs_run_tests` returns a

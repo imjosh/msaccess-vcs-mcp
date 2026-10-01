@@ -274,8 +274,10 @@ Creates a fresh database from source files, useful for clean builds and distribu
 
 **Args:**
 - `source_dir`: Directory containing source files
-- `output_path`: Path for the new database file
+- `output_path`: Absolute path for the new database file (its folder must exist)
 - `template_path`: Optional template database to use as starting point
+
+The add-in builds through `BuildAs(source, output)` and opens no picker. An add-in that does not list `build_as_paths` in `APICapabilities` is refused before the build starts (`error_pattern: build_output_unsupported`). `output_path` in the result is the path the add-in reports building.
 
 ```python
 vcs_rebuild_database("C:\\src\\mydb", "C:\\output\\fresh.accdb")

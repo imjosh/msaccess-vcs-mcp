@@ -32,7 +32,9 @@ import inspect
 import json
 import logging
 import os
+import shutil
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -498,19 +500,61 @@ def _build_start_outcome(
     """The ``vcs_rebuild_database`` result for a start that has no callback to follow.
 
     As ``_export_start_outcome``: an unconfirmed start or a failure, never a
-    success. An unconfirmed start reports the path the build was asked to write.
+    success. ``output_path`` is None: only the add-in's completion callback
+    says where a build wrote. An unconfirmed start keeps the request as
+    ``requested_output_path``.
     """
-    result = {k: v for k, v in start.items() if k not in ("message", "log_path", "output_path")}
+    result = {
+        k: v for k, v in start.items()
+        if k not in ("message", "log_path", "output_path", "requested_output_path")
+    }
     result["success"] = False
+    result["output_path"] = None
     if result.get("completion_unconfirmed"):
-        result["output_path"] = output_path
+        if output_path:
+            result["requested_output_path"] = output_path
         result["source_dir"] = str(src_path)
-    else:
-        result["output_path"] = None
     return _attach_log_context(
         result, src_path, "Build", start,
         call_started_at=call_started_at, executed=start.get("started") is True,
     )
+
+
+def _open_build_host(app) -> tuple[str, str]:
+    """Open a blank database in a new temp folder to host a database build.
+
+    Returns ``(folder, database path)``. The caller removes the folder.
+    """
+    host_dir = tempfile.mkdtemp(prefix="vcs-build-host-")
+    host_path = os.path.join(host_dir, "BuildHost.accdb")
+    try:
+        app.NewCurrentDatabase(host_path)
+    except Exception:
+        shutil.rmtree(host_dir, ignore_errors=True)
+        raise
+    return host_dir, host_path
+
+
+def _close_build_host(app, host_dir: str | None, *, attempts: int = 10, delay: float = 0.2) -> None:
+    """Close the database a build left open, quit Access, and remove the host folder.
+
+    Access can hold the host database for a moment after ``Quit``, so the
+    folder removal is retried briefly. A folder that still will not go is
+    left in the temp directory rather than failing the call.
+    """
+    for close in (app.CloseCurrentDatabase, app.Quit):
+        try:
+            close()
+        except Exception:
+            pass
+    if not host_dir:
+        return
+    for attempt in range(attempts):
+        shutil.rmtree(host_dir, ignore_errors=True)
+        if not os.path.exists(host_dir):
+            return
+        if attempt < attempts - 1:
+            time.sleep(delay)
 
 
 def _scoped_types_arg(object_types: list[str]) -> str | list[str]:
@@ -1663,17 +1707,28 @@ async def vcs_rebuild_database(
     
     Args:
         source_dir: Directory containing source files
-        output_path: Path for new database file
+        output_path: Absolute path for the new database file. Its folder must
+            exist, and it must not be the add-in itself.
         template_path: Optional template database to start from
-    
+
+    The add-in builds ``source_dir`` into ``output_path`` through
+    ``BuildAs(source, output)`` and opens no picker. An add-in whose
+    ``APICapabilities`` does not list ``build_as_paths`` is refused before
+    anything starts, with ``error_pattern: build_output_unsupported``. A
+    relative ``output_path``, or one the add-in rejects, is
+    ``invalid_build_path``.
+
     Returns:
         Dictionary with build results, plus ``log_path`` for this run's log
         and ``log_excerpt`` (tail of the log) on failure. ``success: true``
-        comes only from the add-in's completion callback. Without one the
-        result is ``success: false`` with ``started: true`` and
-        ``completion_unconfirmed: true``: the build may have finished either
-        way, so do not retry it blindly. Read ``log_path``, or call
-        ``vcs_get_recent_calls()`` and ``vcs_get_log(log_type="Build")``.
+        comes only from the add-in's completion callback, and ``output_path``
+        is the database that callback reports writing (None when it reports
+        none). Without a callback the result is ``success: false`` with
+        ``started: true``, ``completion_unconfirmed: true``,
+        ``output_path: None`` and the request in ``requested_output_path``:
+        the build may have finished either way, so do not retry it blindly.
+        Read ``log_path``, or call ``vcs_get_recent_calls()`` and
+        ``vcs_get_log(log_type="Build")``.
         
     The add-in gitignores its ``logs`` folder, so Glob/Grep will not find
     these files. Open ``log_path`` directly, or call vcs_get_log("Build").
@@ -1690,6 +1745,14 @@ async def vcs_rebuild_database(
         # Validate source directory
         src_path = validate_source_directory(source_dir)
         
+        if output_path and not os.path.isabs(output_path):
+            return {
+                "success": False,
+                "error_pattern": "invalid_build_path",
+                "error": f"output_path must be an absolute path: {output_path!r}",
+                "output_path": None,
+            }
+
         # Check if target database is already busy (if it exists)
         if output_path:
             close_owned_instances_holding([output_path])
@@ -1707,12 +1770,26 @@ async def vcs_rebuild_database(
         # prompt it raises has to be visible to be answerable.
         ensure_access_visible(app)
         
+        host_dir = None
         try:
+            # The add-in cannot run with no database open (Access exits), so
+            # host the call in a throwaway blank database. The full build
+            # closes it before it creates the output.
+            host_dir, host_path = _open_build_host(app)
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin.load_addin(app, db_path=None)
+            addin.load_addin(app, db_path=host_path)
             
-            # Determine command
-            command = "BuildAs" if output_path else "Build"
+            # BuildAs with both paths builds without a picker. An add-in that
+            # does not confirm it would open one, so it is refused here.
+            if output_path:
+                refusal = addin.build_as_paths_refusal()
+                if refusal:
+                    return {**refusal, "output_path": None, "source_dir": str(src_path)}
+                command = "BuildAs"
+                build_args = (str(src_path), output_path)
+            else:
+                command = "Build"
+                build_args = (str(src_path),)
             
             # Check if async build is available
             if callback_url and op_manager:
@@ -1730,10 +1807,7 @@ async def vcs_rebuild_database(
                 
                 try:
                     completion = None
-                    if command == "Build":
-                        async_result = addin.call_async(callback_info, command, str(src_path))
-                    else:
-                        async_result = addin.call_async(callback_info, command)
+                    async_result = addin.call_async(callback_info, command, *build_args)
                     
                     if async_result.get("async"):
                         timeout_ms = async_result.get("timeout_ms", 600000)  # 10 min for builds
@@ -1759,6 +1833,14 @@ async def vcs_rebuild_database(
                         return _build_start_outcome(
                             start_only_result(async_result.get("result"), "build", "Build"),
                             src_path, output_path,
+                            call_started_at=call_started_at,
+                        )
+                    elif async_result.get("success") is False:
+                        # The async start itself was refused: nothing ran, and
+                        # a second dispatch would only be refused again.
+                        op_manager.unregister_operation(operation_id)
+                        return _build_start_outcome(
+                            async_result, src_path, output_path,
                             call_started_at=call_started_at,
                         )
                     else:
@@ -1789,16 +1871,15 @@ async def vcs_rebuild_database(
                     call_started_at=call_started_at,
                 )
             
+            # The path comes from the add-in's report of what it built, never
+            # from the request.
             return _attach_log_context({
                 "success": True,
-                "output_path": output_path,
+                "output_path": completion.get("output_path") or None,
                 "source_dir": str(src_path),
             }, src_path, "Build", completion, call_started_at=call_started_at, executed=True)
         finally:
-            try:
-                app.Quit()
-            except Exception:
-                pass
+            _close_build_host(app, host_dir)
     
     except PermissionError as e:
         return {
