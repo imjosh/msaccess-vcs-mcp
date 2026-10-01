@@ -211,6 +211,26 @@ def test_inline_async_envelope_refusal_gets_the_pattern(command):
     assert is_start_refusal(result)
 
 
+SELF_DISPATCH = API_REFUSED_PREFIX + (
+    "VCS API refused a call to 'X': the call was dispatched to the installed add-in "
+    "and arrived back in the project that sent it, so it refused itself."
+)
+
+
+def test_self_dispatch_refusal_has_its_own_pattern():
+    app = MagicMock()
+    app.Run.return_value = SELF_DISPATCH
+    addin = _integration(app)
+    parsed = json.loads(addin.call_sync("GetOption", "x"))
+    assert parsed["success"] is False
+    assert parsed["error_pattern"] == "api_self_dispatch"
+    assert parsed["api_refused"] is True
+    asynced = addin.call_async("{}", "Export")
+    assert asynced["error_pattern"] == "api_self_dispatch"
+    app.Run.return_value = json.dumps({"success": False, "error": SELF_DISPATCH})
+    assert addin.call_async("{}", "Export")["error_pattern"] == "api_self_dispatch"
+
+
 def test_call_async_bare_refusal_string():
     app = MagicMock()
     app.Run.return_value = REFUSAL

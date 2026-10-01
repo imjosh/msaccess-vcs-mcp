@@ -26,18 +26,24 @@ from .usage_logging import log_addin_probe
 # modAPI.API_REFUSED_PREFIX.
 API_REFUSED_PREFIX = "VCS_API_REFUSED: "
 # Same meaning as the add-in's own refusal of a nested start: another API
-# command is still running. A self-dispatch refusal uses the same pattern;
-# its text says what happened.
+# command is still running.
 API_REFUSED_PATTERN = "operation_already_running"
+# The add-in's self-dispatch refusal: the call arrived back in the project that
+# sent it. This is an add-in defect, so waiting and retrying cannot help.
+API_SELF_DISPATCH_PATTERN = "api_self_dispatch"
+_SELF_DISPATCH_TEXT = "arrived back in the project that sent it"
 
 
 def api_refusal_payload(value: Any) -> dict[str, Any] | None:
     """The structured failure for a dispatcher refusal string, else None."""
     if isinstance(value, str) and value.startswith(API_REFUSED_PREFIX):
+        text = value[len(API_REFUSED_PREFIX):]
         return {
             "success": False,
-            "error": value[len(API_REFUSED_PREFIX):],
-            "error_pattern": API_REFUSED_PATTERN,
+            "error": text,
+            "error_pattern": (
+                API_SELF_DISPATCH_PATTERN if _SELF_DISPATCH_TEXT in text else API_REFUSED_PATTERN
+            ),
             "api_refused": True,
         }
     return None
@@ -744,7 +750,8 @@ class VCSAddinIntegration:
             RuntimeError: If call fails
 
         A dispatcher refusal (``VCS_API_REFUSED: ...``) is returned as a JSON
-        failure object with ``error_pattern`` ``operation_already_running``, so
+        failure object with ``error_pattern`` ``operation_already_running`` (or
+        ``api_self_dispatch`` for the add-in's self-dispatch defect), so
         every consumer sees ``success: false`` instead of a truthy string.
         """
         result = self._call_addin_function(command, *args)
