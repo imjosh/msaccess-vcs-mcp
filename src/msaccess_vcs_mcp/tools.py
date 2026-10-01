@@ -471,6 +471,57 @@ def _attach_log_context(
     return result
 
 
+def _same_folder(a: str | os.PathLike[str], b: str | os.PathLike[str]) -> bool:
+    """True when two folder paths resolve to the same place (case and trailing slash ignored)."""
+    return os.path.normcase(str(Path(a).resolve())) == os.path.normcase(str(Path(b).resolve()))
+
+
+def _export_folder_refusal(error_pattern: str, error: str, **extra: Any) -> dict[str, Any]:
+    """A ``vcs_export_database`` refusal: nothing was exported, so there is no ``export_path``."""
+    return {
+        "success": False,
+        "error_pattern": error_pattern,
+        "error": error,
+        "exported_count": 0,
+        "export_path": None,
+        "objects_by_type": {},
+        **extra,
+    }
+
+
+def _resolve_export_folder(addin: Any, output_dir: str | None) -> tuple[Path | None, dict | None]:
+    """The add-in's configured export folder, or a refusal when ``output_dir`` is not that folder.
+
+    The add-in always exports to ``Options.GetExportFolder``; ``GetExportFolder``
+    reports it. ``output_dir`` is a claim about that folder, never a destination.
+    Runs before anything is exported or created.
+    """
+    try:
+        raw = addin.call_sync("GetExportFolder")
+    except Exception as exc:
+        return None, _export_folder_refusal(
+            "export_folder_unavailable",
+            f"The add-in's export folder could not be read, so nothing was exported: {exc}",
+        )
+    folder = raw.strip() if isinstance(raw, str) else ""
+    if not folder or folder.startswith(("{", "VCS_API_REFUSED")):
+        return None, _export_folder_refusal(
+            "export_folder_unavailable",
+            "The add-in did not report an export folder, so nothing was exported."
+            + (f" Reply: {folder}" if folder else ""),
+        )
+    if output_dir and not _same_folder(output_dir, folder):
+        return None, _export_folder_refusal(
+            "export_folder_mismatch",
+            f"output_dir {output_dir!r} is not the add-in's export folder {folder!r}. "
+            "The add-in exports only to its configured folder, so nothing was exported. "
+            "Omit output_dir, pass that folder, or change the export folder option.",
+            requested_output_dir=output_dir,
+            configured_export_folder=folder,
+        )
+    return Path(folder), None
+
+
 def _export_start_outcome(
     start: dict[str, Any], export_path: str | os.PathLike[str],
     *, call_started_at: float | None = None,
@@ -1084,7 +1135,7 @@ def vcs_tool(name: str):
 @vcs_tool("vcs_export_database")
 async def vcs_export_database(
     database_path: str,
-    output_dir: str,
+    output_dir: str | None = None,
     object_types: list[str] | None = None,
     full_export: bool = False,
     ctx: Context = None
@@ -1101,24 +1152,32 @@ async def vcs_export_database(
     written, deletions within them are reconciled, and the call is
     synchronous (no progress reporting). Prefer ``vcs_export_object`` for a
     single named object.
+
+    The add-in writes only to its configured export folder (the project's
+    export-folder option); it cannot export elsewhere. ``output_dir`` is
+    therefore optional and defaults to that folder. A different ``output_dir``
+    is refused before anything is exported, with ``error_pattern:
+    export_folder_mismatch`` and ``configured_export_folder`` naming the real
+    folder. ``export_path`` in the result is where the files were written.
+    ``export_folder_unavailable`` means the add-in did not report its folder.
     
     Examples:
         # Export entire database (quick/fast save - only changed objects)
-        vcs_export_database("C:\\\\db.accdb", "C:\\\\src\\\\mydb")
-        
+        vcs_export_database("C:\\\\db.accdb")
+
         # Full export (all objects, regardless of changes)
-        vcs_export_database("C:\\\\db.accdb", "C:\\\\src\\\\mydb", full_export=True)
+        vcs_export_database("C:\\\\db.accdb", full_export=True)
         
         # Export only queries and modules
         vcs_export_database(
             "C:\\\\db.accdb", 
-            "C:\\\\src\\\\mydb",
             object_types=["queries", "modules"]
         )
     
     Args:
         database_path: Path to Access database (.accdb, .accda, .mdb)
-        output_dir: Directory to export source files to
+        output_dir: Optional. Must be the add-in's configured export folder if
+            given; defaults to it.
         object_types: Optional categories to export (e.g. ``["queries"]``,
             ``["modules", "forms"]``). If None, exports the entire project.
         full_export: If True, export all objects in scope; if False (default),
@@ -1154,7 +1213,7 @@ async def vcs_export_database(
     try:
         # Validate paths
         db_path = validate_database_path(database_path)
-        export_path = validate_export_directory(output_dir, allow_create=True)
+        export_path = None  # the add-in's configured export folder, read once it is loaded
         
         # Get configuration
         config = get_config()
@@ -1185,10 +1244,17 @@ async def vcs_export_database(
                     "success": False,
                     "error": f"Add-in not responsive (may have a dialog open): {e}",
                     "exported_count": 0,
-                    "export_path": str(export_path),
+                    "export_path": None,
                     "objects_by_type": {},
                     "hint": "Check if Access has any open dialogs or message boxes"
                 }
+
+            # The add-in exports only to its configured folder. Refuse a different
+            # output_dir before anything is exported.
+            export_path, refusal = _resolve_export_folder(addin, output_dir)
+            if refusal:
+                return refusal
+            export_path = validate_export_directory(str(export_path), allow_create=True)
 
             # Category-scoped export: sync ExportByType (no progress callbacks).
             if object_types:

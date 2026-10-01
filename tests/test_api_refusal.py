@@ -44,6 +44,7 @@ class FakeApp:
         self.refused = refused
         self.tuple_return = tuple_return
         self.calls = []
+        self.export_folder = ""
 
     def CurrentDb(self):
         return MagicMock()
@@ -55,6 +56,9 @@ class FakeApp:
                 return json.dumps({"success": False, "error": REFUSAL})
             return json.dumps({"sync": True, "result": json.dumps({"success": True})})
         method = args[0]
+        if method == "GetExportFolder":
+            # The folder lookup before an export is not the call under test.
+            return (self.export_folder, None) if self.tuple_return else self.export_folder
         self.calls.append(method)
         if method == self.refused:
             result = REFUSAL
@@ -88,6 +92,7 @@ def _tool_env(tmp_path, app):
     conn.__exit__ = MagicMock(return_value=False)
     conn.connect.return_value = (MagicMock(), MagicMock())
     addin = _integration(app)
+    app.export_folder = str(src)
     with (
         patch("msaccess_vcs_mcp.tools.AccessConnection", return_value=conn),
         patch("msaccess_vcs_mcp.tools.VCSAddinIntegration", return_value=addin),

@@ -74,6 +74,27 @@ contradictory guidance.
 
 ---
 
+## 2026-10-01 — `vcs_export_database` exports to the add-in's configured folder; `output_dir` is verified, not a destination (X10)
+
+**Trigger**: X10 (interface review F14). `output_dir` was documented as the destination, but the add-in always exports to `Options.GetExportFolder`. The value changed only the Python return and the log lookup, so `export_path` named a folder where nothing was written.
+
+**Options explored**:
+- **(a) The add-in accepts a destination.** Rejected: it moves the export folder, the index and the options file, a much larger change for a convenience nobody needs.
+- **(b) MCP verifies `output_dir` against the configured folder (chosen).** `output_dir` is optional and defaults to that folder.
+
+**Decision**:
+- After the add-in probe and before any export, MCP reads the folder with the add-in's existing `GetExportFolder` API (`clsVersionControl.GetExportFolder`, upstream since January 2026). No add-in change was needed, so X10 is MCP-only.
+- A given `output_dir` that resolves elsewhere (case and trailing separator ignored) is refused with `export_folder_mismatch`: `success: false`, `export_path: None`, `exported_count: 0`, plus `configured_export_folder` and `requested_output_dir`. Nothing is exported and the requested folder is not created.
+- A folder that cannot be read (raise, dispatcher refusal, empty or JSON reply) is `export_folder_unavailable`; nothing is exported.
+- Otherwise `export_path` is the configured folder, on the whole-export, category (`ExportByType`) and sync-fallback paths alike.
+- Import's `source_dir` is unchanged and out of scope.
+
+**What this rules out**: Exporting to an arbitrary folder through MCP. To export elsewhere, change the project's export-folder option first. The lookup goes through `API("GetExportFolder")`, so an add-in that predates the method would open a run-time-error dialog (see X09); every add-in with the dialog-handling APIs has it.
+
+**Relevant files**: `tools.py` (`vcs_export_database`, `_resolve_export_folder`), `docs/DIALOGS.md`, `README.md`, `tests/test_export_build_fallbacks.py`.
+
+---
+
 ## 2026-10-01 — `vcs_rebuild_database` builds through `BuildAs(source, output)` and reports the add-in's output path (X09)
 
 **Trigger**: X09 (interface review). `vcs_rebuild_database(source_dir, output_path)` called `Build`, which ignores the output and opens the source-folder and save-as pickers. Before the fix it was also unreachable: every call failed in the add-in probe with RPC_E_WRONG_THREAD, because with no database open the probe thread used the main thread's proxy. A marshalled proxy got past that, but Access then exited when the add-in ran with no database open. With a host database, the live reproduction opened a "Select Source Folder" picker; cancelling it gave `cancelled: true, output_path: null`.
