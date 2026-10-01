@@ -130,6 +130,9 @@ def _build_mocks(tmp_path, call_sync_return=None):
     mock_addin.addin_path = str(addin_file)
     mock_addin.load_addin.return_value = True
     mock_addin.call_sync.return_value = call_sync_return
+    mock_addin.call_sync.side_effect = lambda command, *args: (
+        json.dumps({"success": True}) if command == "SetOption" else call_sync_return
+    )
 
     return mock_app, mock_conn, mock_addin
 

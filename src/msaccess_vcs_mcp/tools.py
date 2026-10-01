@@ -3125,7 +3125,13 @@ def vcs_set_option(
             # Register session so the add-in scopes the override file correctly
             session_id = get_session_id()
             if session_id:
-                addin.call_sync("RegisterSession", session_id)
+                registration = _addin_json_result(
+                    addin.call_sync("RegisterSession", session_id)
+                )
+                if registration.get("success") is not True:
+                    registration["success"] = False
+                    registration.setdefault("error", "RegisterSession did not confirm success")
+                    return registration
             
             result_json = addin.call_sync("SetOption", option_name, value)
             
@@ -3352,7 +3358,13 @@ async def vcs_run_tests(
                 return mode_refusal
 
             # Set the filter option (session-scoped, does not modify user's vcs-options.json)
-            addin.call_sync("SetOption", "DefaultTestFilter", filter or "")
+            filter_result = _addin_json_result(
+                addin.call_sync("SetOption", "DefaultTestFilter", filter or "")
+            )
+            if filter_result.get("success") is not True:
+                filter_result["success"] = False
+                filter_result.setdefault("error", "SetOption did not confirm success")
+                return filter_result
 
             callback_url = get_callback_url()
             op_manager = _get_operation_manager()
