@@ -218,6 +218,8 @@ VBA may reset `progress`/`total` at each category (28/30 queries, then 1/50 modu
 
 Cursor 3.13 often shows only "Running..." for those notifications. The `msaccess-vcs` CLI prints each update to stdout as it arrives (`rebuild-addin`, `export`, `merge`, `rebuild-database`, `run-tests`). For `run-tests`, the CLI turns each start-of-test progress callback into a pytest-style dot and prints a named line only for tests ≥ 1s and for FAIL/ERROR/EMPTY.
 
+When troubleshooting missing progress, the server's Python module logs report whether the operation has a context with `report_progress`; debug logs record delivered or skipped updates. A failed notification emits a warning with a traceback, but callback processing continues and the tool returns the actual operation outcome. These messages use Python module logging, separate from the structured usage and diagnostic JSONL streams. Judge completion from the final tool result rather than progress delivery; no add-in changes are needed for these diagnostics.
+
 ### Add-in self-rebuild
 
 `vcs_rebuild_addin` registers an ordinary callback operation before calling
