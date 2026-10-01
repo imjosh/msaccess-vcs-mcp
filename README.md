@@ -206,7 +206,7 @@ fast save by default (only changed objects).
 
 **Args:**
 - `database_path`: Path to Access database (.accdb, .accda, .mdb)
-- `output_dir`: Optional. The add-in writes only to its configured export folder, so this must be that folder if given, and defaults to it. A different folder is refused before anything is exported (`error_pattern: export_folder_mismatch`, with `configured_export_folder`); an unreadable folder is `export_folder_unavailable`.
+- `output_dir`: Deprecated; omit it. The add-in writes only to its configured export folder. Kept for existing callers: if given, it must be that folder. A different folder is refused before anything is exported (`error_pattern: export_folder_mismatch`, with `configured_export_folder`); an unreadable folder is `export_folder_unavailable`.
 - `object_types`: Optional list of categories (defaults to entire project)
 - `full_export`: If True, export all objects in scope (not just changed ones)
 

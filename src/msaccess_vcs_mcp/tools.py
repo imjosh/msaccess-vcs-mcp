@@ -1176,8 +1176,10 @@ async def vcs_export_database(
     
     Args:
         database_path: Path to Access database (.accdb, .accda, .mdb)
-        output_dir: Optional. Must be the add-in's configured export folder if
-            given; defaults to it.
+        output_dir: Deprecated; omit it. The export always goes to the add-in's
+            configured export folder, so this adds nothing. Kept so existing
+            callers still work: if given, it must be that folder, otherwise
+            the call is refused with ``export_folder_mismatch``.
         object_types: Optional categories to export (e.g. ``["queries"]``,
             ``["modules", "forms"]``). If None, exports the entire project.
         full_export: If True, export all objects in scope; if False (default),
