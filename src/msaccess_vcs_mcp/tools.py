@@ -72,6 +72,7 @@ from .decision_policy import (
     is_start_refusal,
     noninteractive_policy,
     normalize_import_result,
+    normalize_terminal_result,
     parse_addin_payload,
     policy_args,
     run_import_merge,
@@ -383,15 +384,8 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
     if completion.get("success") and not completion.get("error"):
         return {"success": False, "error": _TEST_NO_RESULTS_ERROR}
 
-    result: dict[str, Any] = {
-        "success": False,
-        "error": completion.get("error")
-        or completion.get("message")
-        or "Test run failed",
-    }
-    if runtime_error:
-        result["runtime_error"] = runtime_error
-        _copy_error_number(result, completion)
+    # A refusal or error with no results: keep its pattern, decisions and error number.
+    result = normalize_terminal_result({**completion, "success": False}, "Test run failed")
     if completion.get("log_path"):
         result["log_path"] = completion["log_path"]
     return result
@@ -1124,13 +1118,10 @@ async def vcs_export_database(
                             timeout_seconds=timeout_ms / 1000
                         )
                         
-                        if not completion.get("success"):
+                        if not completion.get("success") or is_decision_required(completion):
                             return _attach_log_context({
-                                "success": False,
-                                "error": (
-                                    completion.get("error")
-                                    or completion.get("message")
-                                    or "Export failed"
+                                **normalize_terminal_result(
+                                    {**completion, "success": False}, "Export failed"
                                 ),
                                 "exported_count": 0,
                                 "export_path": str(export_path),
@@ -1666,13 +1657,10 @@ async def vcs_rebuild_database(
                             timeout_seconds=timeout_ms / 1000
                         )
                         
-                        if not completion.get("success"):
+                        if not completion.get("success") or is_decision_required(completion):
                             return _attach_log_context({
-                                "success": False,
-                                "error": (
-                                    completion.get("error")
-                                    or completion.get("message")
-                                    or "Build failed"
+                                **normalize_terminal_result(
+                                    {**completion, "success": False}, "Build failed"
                                 ),
                                 "output_path": None,
                             }, src_path, "Build", completion)

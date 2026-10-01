@@ -241,11 +241,14 @@ _MERGE_COMPLETION_UNCONFIRMED_ERROR = (
 )
 
 
-def normalize_import_result(payload: dict[str, Any]) -> dict[str, Any]:
-    """Interpret a merge completion or refusal, leaving response formatting to the tool.
+def normalize_terminal_result(payload: dict[str, Any], default_error: str) -> dict[str, Any]:
+    """Interpret an add-in completion or refusal, leaving response formatting to the tool.
 
-    Decisions override success. An unconfirmed start retains its metadata and
-    guidance, and never reports success. Log aliases stay with the handler.
+    Keeps ``error_pattern``, ``decisions``, ``decision_required``, ``cancelled``,
+    ``runtime_error`` and ``errorNumber`` from the payload. Decisions override
+    success. An unconfirmed start retains its metadata and guidance, and never
+    reports success. ``default_error`` names the failure when the payload has no
+    text. Log aliases stay with the handler.
     """
     unconfirmed = bool(payload.get("completion_unconfirmed"))
     success = payload.get("success") is True and not unconfirmed
@@ -257,12 +260,19 @@ def normalize_import_result(payload: dict[str, Any]) -> dict[str, Any]:
         result["completion_unconfirmed"] = True
         result["error"] = _MERGE_COMPLETION_UNCONFIRMED_ERROR
     elif not success:
-        result["error"] = payload.get("error") or payload.get("message") or "Import failed"
+        result["error"] = payload.get("error") or payload.get("message") or default_error
     if payload.get("error_pattern"):
         result["error_pattern"] = payload["error_pattern"]
     if payload.get("runtime_error"):
         result["runtime_error"] = payload["runtime_error"]
+    if payload.get("errorNumber") is not None:
+        result["errorNumber"] = payload["errorNumber"]
     return apply_decision_result(result, payload)
+
+
+def normalize_import_result(payload: dict[str, Any]) -> dict[str, Any]:
+    """Interpret a merge completion or refusal."""
+    return normalize_terminal_result(payload, "Import failed")
 
 
 async def run_import_merge(
