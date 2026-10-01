@@ -82,6 +82,18 @@ def test_arguments_for_each_subcommand():
     )
 
 
+def test_run_tests_has_no_interactive_flag(capsys):
+    """X11: an automation test run is always headless, so the CLI offers no console flag."""
+    parser = build_parser()
+    try:
+        parser.parse_args(["run-tests", r"C:\db.accda", "--interactive"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("run-tests accepted --interactive")
+    assert "--interactive" in capsys.readouterr().err
+
+
 def test_startup_message():
     assert startup_message("rebuild-addin") == "Starting rebuild-addin..."
     assert startup_message("export") == "Starting export..."

@@ -41,6 +41,26 @@ def invalid_policy_result(exc: InvalidDecisionPolicy, **extra: Any) -> dict[str,
     return {"success": False, "error": str(exc), "error_pattern": exc.error_pattern, **extra}
 
 
+def interactive_tests_unsupported_result() -> dict[str, Any]:
+    """The refusal for ``vcs_run_tests(noninteractive=False)``; returned before any add-in call.
+
+    The add-in marks every API call as automation and ``ExecuteTests`` then runs
+    headless whatever mode was selected, so an interactive run cannot be had
+    through the tool (X11). Refusing is better than a flag that does nothing,
+    or worse, shows a prompt that holds the Access gate.
+    """
+    return {
+        "success": False,
+        "error_pattern": "interactive_tests_unsupported",
+        "error": (
+            "vcs_run_tests is always headless: an automation test run shows no console and "
+            "answers prompts unattended, so noninteractive=False is refused and nothing was "
+            "started. Run with noninteractive=True and a decision_policy, or run the tests "
+            "from the add-in's ribbon for the interactive console."
+        ),
+    }
+
+
 def noninteractive_policy(noninteractive: bool, decision_policy: str | None) -> str | None:
     """Return the add-in policy name, or None to keep interactive behavior.
 

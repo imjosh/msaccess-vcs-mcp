@@ -103,11 +103,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Wait timeout in seconds (default 10 minutes from the add-in)",
     )
     run_tests.add_argument(
-        "--interactive",
-        action="store_true",
-        help="Show the add-in test console. The default is noninteractive.",
-    )
-    run_tests.add_argument(
         "--decision-policy",
         default="block",
         help="block, prefer_source, prefer_database, skip, or decline",
@@ -149,7 +144,7 @@ def arguments_for(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
             payload["filter"] = args.filter
         if args.timeout_seconds is not None:
             payload["timeout_seconds"] = args.timeout_seconds
-        payload["noninteractive"] = not args.interactive
+        payload["noninteractive"] = True
         payload["decision_policy"] = args.decision_policy
         return "vcs_run_tests", payload
     raise ValueError(f"Unknown command: {args.command}")

@@ -12,7 +12,6 @@ from msaccess_vcs_mcp.access_gate import reset_access_gate
 from msaccess_vcs_mcp.usage_logging import reset_logging
 from tests.interaction_mode_contract import INTERACTIVE_CONFIRMED, INTERACTIVE_REFUSED
 from tests.test_scoped_sync import _patch_import_tool
-from tests.test_run_tests import SAMPLE_RESULTS_ALL_PASS
 
 
 @pytest.mark.parametrize("response", [
@@ -51,22 +50,20 @@ def public_runtime(monkeypatch, tmp_path):
 
 @pytest.fixture(params=[
     "scoped_import", "import_object", "export_object",
-    "merge_async", "merge_sync", "tests_async", "tests_sync",
+    "merge_async", "merge_sync",
 ])
 def interactive_tool(request, public_runtime):
     path = request.param
     command = {
         "scoped_import": "ImportByType", "import_object": "ImportObject",
         "export_object": "ExportObject",
-    }.get(path, "RunFilteredTests" if path.startswith("tests") else "MergeBuild")
+    }.get(path, "MergeBuild")
 
     def run(db, src):
         if path == "scoped_import":
             call = tools.vcs_import_objects(db, str(src), object_types=["forms"], noninteractive=False)
         elif path in {"import_object", "export_object"}:
             call = getattr(tools, "vcs_" + path)(db, "form", "frmExample", noninteractive=False)
-        elif path.startswith("tests"):
-            call = tools.vcs_run_tests(db, noninteractive=False)
         else:
             call = tools.vcs_import_objects(db, str(src), noninteractive=False)
         with patch.object(tools, "get_callback_url", return_value=None if path.endswith("sync") else "http://localhost:1/cb"):
@@ -99,15 +96,11 @@ def test_public_tool_starts_after_confirmed_interactive_mode(tmp_path, interacti
     with _patch_import_tool(tmp_path) as (db, src, addin, ops):
         def sync(name, *args):
             events.append(name)
-            return json.dumps(INTERACTIVE_CONFIRMED if name == "SetInteractionMode" else (
-                SAMPLE_RESULTS_ALL_PASS if name == "RunFilteredTests" else {"success": True}
-            ))
+            return json.dumps(INTERACTIVE_CONFIRMED if name == "SetInteractionMode" else {"success": True})
 
         def async_call(*args):
             events.append(args[1])
-            return {"sync": True, "result": json.dumps(
-                SAMPLE_RESULTS_ALL_PASS if command == "RunFilteredTests" else {"success": True}
-            )}
+            return {"sync": True, "result": json.dumps({"success": True})}
 
         def merge(*args):
             events.append("MergeBuild")

@@ -67,6 +67,7 @@ from .decision_policy import (
     apply_decision_result,
     call_under_policy,
     coerce_decisions,
+    interactive_tests_unsupported_result,
     invalid_policy_result,
     is_decision_required,
     is_start_refusal,
@@ -698,8 +699,10 @@ mcp = FastMCP(
         "vcs_run_tests, vcs_import_objects, vcs_import_object and vcs_export_object default to "
         "`noninteractive=True` with `decision_policy=\"block\"`: the add-in shows no message box, "
         "and a prompt the policy does not cover returns `error_pattern: decision_required` with "
-        "`decisions` instead of a dialog. Pass `noninteractive=False` for the add-in's normal "
-        "prompts; an A24 or later add-in must confirm interactive mode before anything starts. "
+        "`decisions` instead of a dialog. Pass `noninteractive=False` to the three import and "
+        "export tools for the add-in's normal prompts; an A24 or later add-in must confirm "
+        "interactive mode before anything starts. vcs_run_tests is always headless and refuses "
+        "`noninteractive=False` (`interactive_tests_unsupported`). "
         "A dialog the add-in cannot prevent (VBA MsgBox, Access errors, runtime and "
         "compile errors) is handled with the four dialog tools above, which stay callable while "
         "another call is blocked. Do not retry a mutation until vcs_automation_status reports "
@@ -3352,14 +3355,16 @@ async def vcs_run_tests(
 
     Headless here means no add-in UI (no web runner, no console form, no
     message boxes) -- not a hidden Access window. The host instance stays
-    visible. ``noninteractive`` defaults to True and is scoped to the run:
-    the add-in restores its interaction mode when the run finishes,
-    fails, or is cancelled. Pass ``noninteractive=False`` to select interactive
-    mode explicitly and get the ribbon-style console. This requires an A24 or
-    later add-in to confirm interactive mode; refused or unconfirmed selection
-    starts nothing. ``decision_policy`` (default ``block``) answers confirmations;
-    an uncovered prompt returns ``error_pattern: decision_required`` instead
-    of a dialog.
+    visible. A test run through this tool is always headless: the add-in treats
+    every API call as automation, so it shows no console and answers prompts
+    unattended. ``noninteractive`` is scoped to the run: the add-in restores its
+    interaction mode when the run finishes, fails, or is cancelled.
+    ``noninteractive=False`` is refused with ``error_pattern:
+    interactive_tests_unsupported`` before any add-in call, because no
+    interactive test run exists to select (for a console, run the tests from the
+    add-in's ribbon). ``decision_policy`` (default ``block``) answers
+    confirmations; an uncovered prompt returns ``error_pattern:
+    decision_required`` instead of a dialog.
 
     **Live output:** MCP progress is best-effort in Cursor. For a live stream
     (dots for fast passes, names for tests ≥ 1s, FAIL lines, then a human
@@ -3404,11 +3409,10 @@ async def vcs_run_tests(
             all tests.
         timeout_seconds: How long to wait for the async run (default from the
             add-in's timeout_ms, 10 minutes). Unused on the sync fallback.
-        noninteractive: Suppress add-in dialogs and the test console for this
-            run (default True).
+        noninteractive: Must be True (the default). False is refused with
+            ``interactive_tests_unsupported`` and nothing is called.
         decision_policy: ``block`` (default), ``prefer_source``,
-            ``prefer_database``, ``skip``, or ``decline``. Ignored when
-            ``noninteractive`` is False.
+            ``prefer_database``, ``skip``, or ``decline``.
 
     Returns:
         Dictionary with ``success`` (True when the add-in's ``allPassed`` is
@@ -3419,6 +3423,8 @@ async def vcs_run_tests(
         is never a success. The verdict is the same on every transport.
     """
     try:
+        if not noninteractive:
+            return interactive_tests_unsupported_result()
         policy = noninteractive_policy(noninteractive, decision_policy)
         db_path = validate_database_path(database_path)
 
@@ -3434,11 +3440,7 @@ async def vcs_run_tests(
             addin.load_addin(app, db_path=str(db_path))
 
             # The add-in scopes noninteractive mode inside RunFilteredTests and
-            # restores it when the run ends. Do not set a process-wide mode
-            # here; only an interactive run selects its mode explicitly.
-            mode_refusal = select_interactive_mode(addin, policy)
-            if mode_refusal:
-                return mode_refusal
+            # restores it when the run ends. Do not set a process-wide mode here.
 
             # Set the filter option (session-scoped, does not modify user's vcs-options.json)
             filter_result = _addin_json_result(

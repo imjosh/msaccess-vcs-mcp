@@ -24,7 +24,8 @@ vcs_export_object(r"C:\db.accdb", "form", "frmMain")
 ```
 
 `noninteractive` defaults to true on all four tools. `decision_policy`
-defaults to `block`. On `vcs_import_object` and `vcs_export_object` an
+defaults to `block`. `vcs_run_tests` accepts only true: an automation test run
+is always headless (see "Test runs are always headless" below). On `vcs_import_object` and `vcs_export_object` an
 add-in error that would have been a message box (for example "Merging not
 supported for add-in forms") comes back as `success: false` with the
 message in `error` and the run's `log_path`.
@@ -37,9 +38,10 @@ message in `error` and the run's `log_path`.
 | `prefer_database` | Still `decision_required`. | Keep the database object. Same as `skip`. |
 | `skip` | Still `decision_required`. | Keep the database object and skip the source file. |
 
-Pass `noninteractive=False` to select interactive mode explicitly and show
-the normal prompts. MCP sends the mode before the operation starts, so the
-run does not depend on the mode the add-in was last left in. All four tools
+Pass `noninteractive=False` to `vcs_import_objects`, `vcs_import_object` and
+`vcs_export_object` to select interactive mode explicitly and show the normal
+prompts. MCP sends the mode before the operation starts, so the run does not
+depend on the mode the add-in was last left in. All three tools
 require `SetInteractionMode(0)` to confirm `success: true` and numeric
 `effective_mode: 0` before dispatching any operation or registering its callback.
 The A24 add-in contract returns a JSON string:
@@ -102,6 +104,7 @@ an `error`:
 | `interaction_mode_refused` | The add-in could not make interactive mode effective. Its enclosing scope or active operation must be released by its owner; nothing starts. |
 | `policy_unconfirmed` | MCP could not confirm `SetOperationPolicy` (Empty, malformed, no echoed `policy`, or a different policy). Nothing starts and no clear is sent; requires an add-in whose `SetOperationPolicy` returns `{success: true, policy}`. |
 | `interaction_mode_unconfirmed` | MCP could not confirm interactive mode, including VBA Empty from an older add-in. Nothing starts; unsupported responses require an A24 or later build. |
+| `interactive_tests_unsupported` | `vcs_run_tests(noninteractive=False)`. An automation test run is always headless. Refused by MCP before any add-in call; nothing started. |
 
 The add-in's return from `MergeBuild` is a start result, not the outcome:
 the outcome arrives on the completion callback. When MCP had to start the
@@ -160,7 +163,30 @@ VCS.RunFilteredTests "decline"
 
 `VCS.MergeBuild` and `VCS.RunTests` with no policy stay interactive.
 `VCS.RunTests` still uses silent mode internally so test code does not stop
-on add-in message boxes, and it still shows the console.
+on add-in message boxes, and it still shows the console. That is the add-in's
+own behaviour for a person at the ribbon; a call that arrives through the MCP
+server is automation and is headless (next section).
+
+## Test runs are always headless
+
+The add-in treats every API call as automation, and `ExecuteTests` forces a
+headless run for that source whatever interaction mode was selected: no
+console, no web runner, and `MsgBox2` prompts answered unattended. So
+`vcs_run_tests(noninteractive=False)` cannot give an interactive run, and a
+flag that did nothing would be a lie. It is refused before any add-in call
+(no Access connection, no `SetInteractionMode`) with
+`error_pattern: interactive_tests_unsupported` and `success: false`. Pass
+`noninteractive=True` (the default) with a `decision_policy`, or run the tests
+from the add-in's ribbon for the console. The `msaccess-vcs run-tests` CLI has
+no `--interactive` flag for the same reason. Other tools' `noninteractive=False`
+is unchanged. The decision is recorded as X11 in `DECISIONS.md`.
+
+Live check (disposable blank database): with the helper missing,
+the add-in's preflight installs `modTestAssert`, but under an ambient
+interactive mode it then showed a "Test Helper Installed" `MsgBox2` that held the
+call until it was dismissed. That is why the flag is refused rather than
+documented as "headless but permissive": a visible prompt on an unattended call
+holds the Access gate.
 
 ## What the add-in can prevent
 
@@ -219,7 +245,7 @@ Closing the window of a noninteractive run cancels that run without any
 confirmation prompt. `action=cancel` posts a close to the add-in window as a
 cancel request and reports `cancel_requested: true`, not `interrupted`. While
 an operation runs the add-in keeps its window open. An interactive run
-(`noninteractive=False`, and `vcs_export_database`) also asks
+(`noninteractive=False` on the import and export tools, and `vcs_export_database`) also asks
 "Cancel Current Operation?": Yes stops it, No resumes it. The window staying
 open can make the dismissal `dismiss_uncertain` even though the close was
 posted. The waiting call's own result says how the request ended (see below).

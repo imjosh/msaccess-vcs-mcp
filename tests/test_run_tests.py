@@ -6,7 +6,6 @@ import os
 from unittest.mock import Mock, MagicMock, patch, call
 
 import pytest
-from tests.interaction_mode_contract import INTERACTIVE_REFUSED
 
 
 SAMPLE_RESULTS_ALL_PASS = {
@@ -359,22 +358,28 @@ class TestRunTestsCallOrder:
 
         mock_addin.load_addin.assert_called_once()
 
-    def test_refused_interactive_mode_is_the_result_and_tests_do_not_run(self, tmp_path):
-        refusal = INTERACTIVE_REFUSED
-        result, _, mock_addin = _call_run_tests(
-            tmp_path,
-            call_sync_return=None,
-            call_sync_side_effect=lambda c, *a: (
-                json.dumps(refusal) if c == "SetInteractionMode"
-                else json.dumps(SAMPLE_RESULTS_ALL_PASS)
-            ),
-            noninteractive=False,
-        )
+    @pytest.mark.parametrize("callback_url", [None, "http://localhost:1/cb"])
+    def test_interactive_request_is_refused_before_any_add_in_call(self, callback_url):
+        """X11: an automation test run is always headless, so False is refused up front."""
+        from msaccess_vcs_mcp.tools import vcs_run_tests
+
+        with (
+            patch("msaccess_vcs_mcp.tools.AccessConnection") as connection,
+            patch("msaccess_vcs_mcp.tools.VCSAddinIntegration") as addin,
+            patch("msaccess_vcs_mcp.tools.validate_database_path") as validate,
+            patch("msaccess_vcs_mcp.tools._check_database_busy") as busy,
+            patch("msaccess_vcs_mcp.tools.get_callback_url", return_value=callback_url),
+        ):
+            result = asyncio.run(vcs_run_tests(
+                r"C:\db.accdb", filter="modTestFoo", noninteractive=False,
+                decision_policy="prefer_source",
+            ))
 
         assert result["success"] is False
-        assert result == refusal
-        assert mock_addin.call_sync.call_args_list == [call("SetInteractionMode", 0)]
-        mock_addin.call_async.assert_not_called()
+        assert result["error_pattern"] == "interactive_tests_unsupported"
+        assert "headless" in result["error"]
+        for untouched in (connection, addin, validate, busy):
+            untouched.assert_not_called()
 
 
 def _call_run_tests_async(

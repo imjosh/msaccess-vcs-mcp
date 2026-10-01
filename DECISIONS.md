@@ -74,6 +74,23 @@ contradictory guidance.
 
 ---
 
+## 2026-10-01 — Automation test runs stay headless; `vcs_run_tests(noninteractive=False)` is refused (X11)
+
+**Trigger**: X11 (interface review F5). The tool docstring and `docs/DIALOGS.md` promised the ribbon-style console and normal prompts for `noninteractive=False`, and MCP confirmed `SetInteractionMode(0)` before dispatch. The add-in never honoured it: `modAPI` marks every API call as automation, and `ExecuteTests` then sets `blnHeadless`, forces `eimSilent`, and skips the console, whatever mode was selected.
+
+**Options explored**:
+- **A. The add-in honours the confirmed mode.** After `SetInteractionMode(0)` an automation `RunFilteredTests` would show the console and `MsgBox2` prompts. Matches the old docs, but an unattended call could then be held by a visible prompt on the Access gate. Rejected: it makes the least safe path reachable from a flag, and needs an add-in change plus more live cases.
+- **B1. Document `False` as "no decision-policy scope; still headless".** Keeps the signature working. Rejected: a flag that does nothing invites callers to rely on it, and the live check below shows it is not even silent.
+- **B2. Refuse `False` (chosen).** `vcs_run_tests` returns `success: false, error_pattern: interactive_tests_unsupported` before the path is validated, before `AccessConnection`, and before any add-in call. The CLI `run-tests` loses `--interactive`.
+
+**Live check** (disposable blank database, `vcs_run_tests(noninteractive=False, timeout_seconds=60)`): the call timed out at 60s. `vcs_list_dialogs` showed one blocking `NUIDialog` (`vba_msgbox`) "Test Helper Installed: The modTestAssert module has been added to your project." The preflight installed the missing helper silently, as traced, but `InstallTestAssertModule` then raised an info `MsgBox2`. With no policy scope the ambient (interactive) mode is in force during the preflight, because `eimSilent` is only selected after it. So the "silent and headless" trace is wrong for that prompt, and a `False` call could hold the gate. Dismissing the box with `vcs_dismiss_dialog` (OK) released it. This is also the reproduction that no console is promised or wanted.
+
+**Decision**: An automation test run is always headless and runs under a decision-policy scope. `noninteractive=False` on the other three tools (`vcs_import_objects`, `vcs_import_object`, `vcs_export_object`) is unchanged: it still sends `SetInteractionMode(0)` and requires confirmation first. No add-in code changed. The shared dialog table keeps the interactive `MsgBox2` row for those tools only.
+
+**What this rules out**: An interactive test console through MCP (use the ribbon). Revisit if a caller needs a visible, watchable run: that is option A, add-in first, with a live case for the prompt holding the gate. The add-in's preflight prompts when called through the API with no policy (the helper-installed box above) remain; MCP no longer reaches them.
+
+**Relevant files**: `tools.py` (`vcs_run_tests`), `decision_policy.py` (`interactive_tests_unsupported_result`), `cli.py`, `docs/DIALOGS.md`, `AGENTS.md`, `tests/test_run_tests.py`, `tests/test_interactive_mode.py`, `tests/test_cli.py`.
+
 ## 2026-09-30 — A posted cancel close is a request; the held call's result decides it (M38)
 
 **Trigger**: M38 (interface review F8). `vcs_dismiss_dialog action=cancel` reserved an interruption, posted `WM_CLOSE`, and settled it as confirmed once the post returned, so the held call became `success: false, execution_interrupted: true` whatever happened next. While an interactive operation runs, `frmVCSMain.Form_Unload` always cancels the unload and asks "Cancel Current Operation?", and No resumes the run. A live run on a disposable database (add-in 5.1.0, MCP `adbe1ce`) showed both cases. After No, the 400-query whole export finished with a `complete` callback, yet the call returned `execution_interrupted`. After Yes, the result was `cancelled: true` plus `execution_interrupted`.
