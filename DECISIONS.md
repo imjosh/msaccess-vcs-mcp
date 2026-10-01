@@ -74,6 +74,14 @@ contradictory guidance.
 
 ---
 
+## 2026-10-01 — A compile-gated test run is an explicit add-in failure (A31)
+
+**Decision**: A test run stopped by the add-in's compile check carries `success: false`, `cancelled: false`, `error_pattern: project_not_compiled`, and the translated "Project has compile errors. Please resolve before running tests." It is a runner failure with no assertions, distinct from an errored test or a confirmed cancellation. The add-in saves these fields in results JSON and posts them on its error callback. The existing `_test_run_verdict` preserves the explicit failure through callback and synchronous transports; MCP needs no code change.
+
+**What this rules out**: Replacing the add-in's compile explanation with generic cancellation text, deriving success from an empty summary, or parsing translated error text for classification. Real cancellation retains `cancelled: true`. See the add-in A31 decision and combined spec section 2.
+
+---
+
 ## 2026-10-01 — Version probes use a bounded COM-initialized exempt worker (M45)
 
 **Trigger**: M45, the gate-exempt `vcs_get_version_info` still called
