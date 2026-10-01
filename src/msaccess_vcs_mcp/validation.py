@@ -13,7 +13,7 @@ from typing import Any
 from . import __version__
 from .access_com.connection import (
     ensure_access_visible,
-    ensure_dispatch,
+    create_isolated_access_app,
     open_current_database,
 )
 from .addin_integration import VCSAddinIntegration, get_access_info
@@ -148,21 +148,15 @@ def validate_components(load_addin: bool = True) -> dict[str, Any]:
                     # Can't verify - assume it's correct since GetObject(target_db) succeeded
                     pass
             except Exception:
-                # Database not open in any Access instance - create our own instance
-                # Use EnsureDispatch for early binding (fixes Application.Run issues)
-                app = ensure_dispatch("Access.Application")
+                # GetObject failed; do not borrow another user's window.
+                app = create_isolated_access_app()
                 owns_app = True
                 db_was_already_open = False
         else:
-            # No target database configured, just create/get Access instance
-            # Use EnsureDispatch for early binding (fixes Application.Run issues)
-            try:
-                app = ensure_dispatch("Access.Application")
-                owns_app = False
-            except Exception:
-                app = ensure_dispatch("Access.Application")
-                owns_app = True
-        
+            # A standalone add-in/installation probe owns an isolated host.
+            app = create_isolated_access_app()
+            owns_app = True
+
         # Get Access info
         access_info = get_access_info(app)
         result.update(access_info)

@@ -168,7 +168,7 @@ def _build_env(tmp_path, addin, manager, callback, app=None):
         patch("msaccess_vcs_mcp.tools.validate_source_directory", return_value=src),
         patch("msaccess_vcs_mcp.tools.close_owned_instances_holding", return_value=[]),
         patch("msaccess_vcs_mcp.tools._check_database_busy", return_value=None),
-        patch("msaccess_vcs_mcp.tools.ensure_dispatch", return_value=app or MagicMock()),
+        patch("msaccess_vcs_mcp.tools.create_isolated_access_app", return_value=app or MagicMock()),
         patch("msaccess_vcs_mcp.tools.prefer_full_power_if_created"),
         patch("msaccess_vcs_mcp.tools.ensure_access_visible"),
         patch("msaccess_vcs_mcp.tools.VCSAddinIntegration", return_value=addin),

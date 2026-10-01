@@ -1496,3 +1496,16 @@ That started as an `Err.Raise` and had to be changed after testing. An error rai
 **What this rules out**: Session IDs don't persist across server restarts â€” the agent must re-set options if the server restarts. Stale override files are auto-cleaned after 30 days on the add-in side.
 
 **Relevant files**: `tools.py` (`vcs_set_option`, `vcs_end_session`), `main.py` (session ID, atexit), `config.py` (`get_session_id`). Add-in side: see `DECISIONS.md` in `msaccess-vcs-addin`.
+
+
+## 2026-10-01 — Database rebuild owns an isolated host (M43)
+
+**Trigger**: X12 found `vcs_rebuild_database` using `EnsureDispatch`, which can return a user's running Access window. Build host creation then failed and cleanup closed the user's database and quit their process.
+
+**Decision**: Standalone hosts use `create_isolated_access_app` (`DispatchEx`, shared with `AccessConnection`'s isolated path), with no attach fallback. Rebuild protects setup immediately after creation with `try/finally`, including performance and visibility setup. A busy output is refused; rebuild does not close pre-existing holders, even ones owned by another MCP call. Only the application reference created by this rebuild is passed to `_close_build_host`.
+
+A new `NewCurrentDatabase` host has no ROT file moniker. Rebuild passes its exact application to `load_addin` without a database lookup. The no-path probe marshals that application's IDispatch into its worker apartment rather than sharing a proxy created on another thread. This supersedes the earlier lifecycle decision's best-effort shared-proxy fallback; timeout and pending-worker guard behavior stay intact.
+
+**Caller audit**: `AccessConnection._create_or_reuse_instance` keeps `ensure_dispatch` because it explicitly supports attachment and determines ownership from process identity. Standalone installation validation and the fallback/no-target version probe use isolated dispatch too. Version validation's successful target-specific `GetObject` attachment remains non-owned and is never quit.
+
+**Validation**: Ownership regression tests failed on the previous implementation. Fault injection covers dispatch, performance setup, visibility, host creation, add-in loading and build dispatch; a failed dispatch never reaches cleanup. An integration test builds a disposable module beside another user-controlled Access database, checks distinct PIDs, output content, and preservation of process creation time, database, UserControl and query. Probe tests check marshaling of the exact supplied host.

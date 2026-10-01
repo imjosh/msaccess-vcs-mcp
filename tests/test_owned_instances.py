@@ -384,32 +384,23 @@ def test_rebuild_addin_closes_owned_holders(tmp_path, monkeypatch):
     assert order == ["gate", "close", "launch"]
 
 
-def test_rebuild_database_closes_owned_output(tmp_path, monkeypatch):
+def test_rebuild_database_refuses_busy_output_without_closing_it(tmp_path, monkeypatch):
     source = tmp_path / "src"
     source.mkdir()
     output = str(tmp_path / "out.accdb")
-    captured: list[list[str]] = []
-
+    busy = {"success": False, "error_pattern": "database_busy", "error": "output is open"}
+    captured = []
     monkeypatch.setattr(tools_module, "check_write_permission", lambda _c: None)
-    monkeypatch.setattr(
-        tools_module,
-        "close_owned_instances_holding",
-        lambda paths, *_a: captured.append(list(paths)) or [],
-    )
-    monkeypatch.setattr(tools_module, "_check_database_busy", lambda _p: None)
-    monkeypatch.setattr(
-        tools_module,
-        "ensure_dispatch",
-        lambda _id: (_ for _ in ()).throw(RuntimeError("stop after pre-flight")),
-    )
+    monkeypatch.setattr(tools_module, "close_owned_instances_holding",
+                        lambda paths, *_a: captured.append(list(paths)))
+    monkeypatch.setattr(tools_module, "_check_database_busy", lambda _p: busy)
+    def unexpected_creation():
+        raise AssertionError("a busy output must be refused before creating a host")
+    monkeypatch.setattr(tools_module, "create_isolated_access_app", unexpected_creation)
 
-    result = asyncio.run(
-        _unwrap(tools_module.vcs_rebuild_database)(str(source), output)
-    )
-
-    assert captured == [[output]]
-    assert result["success"] is False
-    assert "stop after pre-flight" in result["error"]
+    result = asyncio.run(_unwrap(tools_module.vcs_rebuild_database)(str(source), output))
+    assert captured == []
+    assert result == busy
 
 
 def test_session_cleanup_skips_when_access_is_not_live(monkeypatch):

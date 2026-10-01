@@ -117,6 +117,17 @@ def ensure_dispatch(prog_id: str):
             raise
 
 
+def create_isolated_access_app():
+    """Start a new Access COM server, never attach to an existing window.
+
+    Return immediately after DispatchEx so the caller can protect all later
+    setup with its own cleanup scope. Do not fall back to EnsureDispatch.
+    """
+    if not COM_AVAILABLE:
+        raise ImportError("pywin32 is required for Access COM automation")
+    return win32com.client.DispatchEx("Access.Application")
+
+
 def _paths_match(a: str, b: str) -> bool:
     """Case-insensitive, normalised path comparison."""
     try:
@@ -610,7 +621,7 @@ class AccessConnection:
         ``open_current_database`` for why it has to be lowered again while a
         database opens.
         """
-        app = win32com.client.DispatchEx("Access.Application")
+        app = create_isolated_access_app()
         app.UserControl = True
         return app
     

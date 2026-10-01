@@ -25,6 +25,21 @@ def _clear_active_probe_thread():
     VCSAddinIntegration._active_probe_thread = None
 
 
+@pytest.fixture(autouse=True)
+def _mock_probe_marshaling():
+    # These tests use Mock Access objects. Model COM stream consumption while
+    # retaining their existing Run behavior, without passing mocks to pywin32.
+    with (
+        patch("msaccess_vcs_mcp.addin_integration.pythoncom.CoMarshalInterThreadInterfaceInStream",
+              side_effect=lambda iid, interface: interface),
+        patch("msaccess_vcs_mcp.addin_integration.pythoncom.CoGetInterfaceAndReleaseStream",
+              side_effect=lambda stream, iid: stream),
+        patch("msaccess_vcs_mcp.addin_integration.win32com.client.Dispatch",
+              side_effect=lambda interface: interface._mock_parent),
+    ):
+        yield
+
+
 class TestVCSAddinIntegration:
     """Tests for VCSAddinIntegration class."""
     
@@ -438,3 +453,27 @@ class TestLoadAddinProbeTimeout:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_probe_marshals_exact_host_into_worker():
+    app = Mock()
+    worker_app = Mock()
+    stream = object()
+    interface = object()
+    addin = VCSAddinIntegration("C:/fixture/Version Control.accda")
+    with (
+        patch("msaccess_vcs_mcp.addin_integration.pythoncom.CoMarshalInterThreadInterfaceInStream",
+              return_value=stream) as marshal,
+        patch("msaccess_vcs_mcp.addin_integration.pythoncom.CoGetInterfaceAndReleaseStream",
+              return_value=interface) as unmarshal,
+        patch("msaccess_vcs_mcp.addin_integration.win32com.client.Dispatch",
+              return_value=worker_app) as dispatch,
+        patch.object(addin, "_find_access_in_rot") as find,
+    ):
+        addin._probe_with_timeout(app, None, 1)
+    assert marshal.call_args.args[1] is app._oleobj_
+    assert unmarshal.call_args.args[0] is stream
+    dispatch.assert_called_once_with(interface)
+    worker_app.Run.assert_called_once()
+    app.Run.assert_not_called()
+    find.assert_not_called()

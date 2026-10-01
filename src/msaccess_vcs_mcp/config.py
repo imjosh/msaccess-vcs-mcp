@@ -531,7 +531,7 @@ def validate_access_installation() -> None:
         RuntimeError: If Access COM automation is not available
     """
     try:
-        from .access_com.connection import ensure_dispatch
+        from .access_com.connection import create_isolated_access_app
     except ImportError:
         raise ImportError(
             "pywin32 is required for Access COM automation. "
@@ -541,28 +541,13 @@ def validate_access_installation() -> None:
     # Try to create Access application object
     try:
         # This will fail if Access is not installed
-        # Use EnsureDispatch for early binding (fixes Application.Run issues)
-        # Deliberately left hidden, unlike instances that hold a database: no
-        # database is opened here and the instance is quit immediately, so a
-        # window would only flash on screen with nothing to act on.
-        app = ensure_dispatch("Access.Application")
-        
-        # Check if this is the user's instance (has a database open)
-        # If so, do NOT quit - we'd close their work!
-        has_user_db = False
+        # Always create an isolated probe: an empty user window is still
+        # user-owned. No database opens here, so leave this probe hidden.
+        app = create_isolated_access_app()
         try:
-            current_db = app.CurrentDb()
-            if current_db is not None:
-                has_user_db = True
+            app.Quit()
         except Exception:
             pass
-        
-        # Only quit if we created a new empty instance
-        if not has_user_db:
-            try:
-                app.Quit()
-            except Exception:
-                pass
     except Exception as e:
         raise RuntimeError(
             f"Microsoft Access COM automation not available. "

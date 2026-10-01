@@ -49,7 +49,7 @@ from .access_com.connection import (
     access_instance_is_live,
     close_owned_instances_holding,
     ensure_access_visible,
-    ensure_dispatch,
+    create_isolated_access_app,
 )
 from .access_com.dao_helpers import list_query_defs, list_table_defs
 from .access_com.process_qos import list_access_pids, prefer_full_power_if_created
@@ -1779,6 +1779,9 @@ async def vcs_rebuild_database(
             exist, and it must not be the add-in itself.
         template_path: Optional template database to start from
 
+    The build uses a new, isolated Access instance and closes only that
+    instance. An already-open output is refused without closing its holder.
+
     The add-in builds ``source_dir`` into ``output_path`` through
     ``BuildAs(source, output)`` and opens no picker. An add-in whose
     ``APICapabilities`` does not list ``build_as_paths`` is refused before
@@ -1823,29 +1826,27 @@ async def vcs_rebuild_database(
 
         # Check if target database is already busy (if it exists)
         if output_path:
-            close_owned_instances_holding([output_path])
             busy_error = _check_database_busy(output_path)
             if busy_error:
                 return busy_error
         
-        # We need Access running to call the add-in, but no database is
-        # open yet -- the add-in's build process creates it.  Create a
-        # bare Access instance (no AccessConnection, which requires a
-        # database path) and manage its lifecycle with try/finally.
-        app = ensure_dispatch("Access.Application")
-        prefer_full_power_if_created(app)
-        # The build creates and populates a database in this instance, so any
-        # prompt it raises has to be visible to be answerable.
-        ensure_access_visible(app)
-        
+        # This host belongs to this call. EnsureDispatch can attach to a
+        # user's window, so use the same isolated path as AccessConnection.
+        app = create_isolated_access_app()
         host_dir = None
         try:
+            prefer_full_power_if_created(app)
+            # Build prompts must be visible and the window interactive.
+            ensure_access_visible(app)
+            app.UserControl = True
             # The add-in cannot run with no database open (Access exits), so
             # host the call in a throwaway blank database. The full build
             # closes it before it creates the output.
             host_dir, host_path = _open_build_host(app)
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin.load_addin(app, db_path=host_path)
+            # A fresh NewCurrentDatabase host has no ROT file moniker yet.
+            # Probe the exact application proxy rather than looking it up.
+            addin.load_addin(app)
             
             # BuildAs with both paths builds without a picker. An add-in that
             # does not confirm it would open one, so it is refused here.

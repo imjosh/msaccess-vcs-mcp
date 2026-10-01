@@ -240,8 +240,8 @@ class VCSAddinIntegration:
                   * the worker thread re-acquires Access via the Running
                     Object Table for proper cross-apartment timeout
                     enforcement.  When ``None``, the worker falls back to
-                    sharing the main thread's ``app`` proxy (best-effort
-                    timeout).
+                    marshaling the supplied ``app`` proxy into the worker
+                    apartment, preserving the exact host instance.
         
         Returns:
             True if add-in can be called successfully.
@@ -363,23 +363,29 @@ class VCSAddinIntegration:
         addin_lib_name = os.path.splitext(addin_path_abs)[0]
         api_function_name = f'{addin_lib_name}.API'
         
+        # A new build host may not have registered in the ROT. Marshal its
+        # exact application proxy rather than sharing an STA proxy across
+        # apartments or looking up an unrelated Access window.
+        app_stream = None
+        if db_path is None:
+            app_stream = pythoncom.CoMarshalInterThreadInterfaceInStream(
+                pythoncom.IID_IDispatch, app._oleobj_
+            )
+
         result_box: dict[str, Any] = {}
         
         def worker() -> None:
             try:
                 pythoncom.CoInitialize()
                 try:
-                    # When db_path is known, re-acquire Access via the ROT
-                    # so the worker has its own apartment-local proxy --
-                    # sharing the main thread's STA proxy across apartments
-                    # either fails to marshal or serializes back to the main
-                    # thread (which defeats the timeout).  When db_path is
-                    # None we fall back to the main proxy: best-effort, the
-                    # timeout may not fire reliably but behavior is no
-                    # worse than before.
-                    worker_app = (
-                        self._find_access_in_rot(db_path) if db_path else app
-                    )
+                    if db_path:
+                        worker_app = self._find_access_in_rot(db_path)
+                    else:
+                        worker_app = win32com.client.Dispatch(
+                            pythoncom.CoGetInterfaceAndReleaseStream(
+                                app_stream, pythoncom.IID_IDispatch
+                            )
+                        )
                     if worker_app is None:
                         raise RuntimeError(
                             f"Cannot find Access instance for {db_path} "
