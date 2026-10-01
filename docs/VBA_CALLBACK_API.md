@@ -202,6 +202,14 @@ End Function
 | `complete` | Operation succeeded | (none) | At end of successful operation (ends wait) |
 | `cancelled` | Operation was cancelled | (none) | When operation aborts due to cancellation (ends wait) |
 
+Every method the add-in runs on its timer through `APIAsync` (`Export`,
+`FullExport`, `ExportVBA`, `Build`, `BuildAs`, `MergeBuild`, `RunFilteredTests`)
+posts exactly one terminal callback (`complete`, `error` or `cancelled`). That
+includes a call that fails before it acquires a root: it posts an `error`
+callback with the method's JSON fields, and a Sub that started nothing posts an
+`error` saying so (A27). MCP never waits out its timeout for a call that failed
+early.
+
 ### Progress Callback
 
 ```json
@@ -292,6 +300,13 @@ error text; on `decision_required` both ride alongside `decisions`.
 }
 ```
 
+An `error` callback from the add-in can also carry `success: false`,
+`error_pattern`, `error`, `decision_required`, `decisions`, `runtime_error`,
+`errorNumber` and `log_path`. `vcs_run_tests`, `vcs_export_database` and
+`vcs_rebuild_database` return those fields unchanged, as import does (M34). A
+refusal such as `operation_already_running` reads the same whether it arrived
+on the callback or inline.
+
 ### Cancelled Callback
 
 ```json
@@ -323,6 +338,26 @@ MCP Server                              VBA Add-in
     |<-- POST /callback {type:"cancelled"} -|
     |                                       |
 ```
+
+What each side actually does (M37, A28; see `docs/DIALOGS.md` for the tool
+results):
+
+- `vcs_cancel_operation` only records a request and returns
+  `cancel_requested: true`. The poll is the single channel: MCP makes no direct
+  `Cancel` COM call.
+- `/cancel-status/{operation_id}` answers `cancelled: true` for the requested id
+  only, and false once that operation's terminal callback has arrived, so an old
+  request never cancels a later operation.
+- The add-in polls at one checkpoint, `Operation.CheckCancelRequest`, at most
+  once every 500 ms and only while a root is running: before each test, after
+  each export category scan and object, and after each fast-imported file and
+  component of the build loop. Single calls such as `ImportObject`,
+  `ExportObject`, `ImportByType` and `ExportByType` have no checkpoint and run
+  to the end.
+- The original call reports `cancelled: true` only when the add-in confirms it
+  (a `cancelled` terminal callback, or `cancelled` in its final JSON). A run
+  that ends `complete` or `error` while a request was outstanding returns its
+  real outcome plus `cancel_not_honored: true`.
 
 ### Check Cancellation (VBA)
 

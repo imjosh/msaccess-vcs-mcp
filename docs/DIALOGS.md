@@ -98,7 +98,9 @@ an `error`:
 | `error_pattern` | Meaning |
 | --- | --- |
 | `invalid_decision_policy` | Unknown policy name. The message lists the valid names. MCP also refuses this before calling Access. |
-| `operation_already_running` | Another add-in operation is running. Setting a policy or starting a merge is refused and nothing changed. A normal refusal, not a cleanup failure. |
+| `operation_already_running` | Another add-in operation is running. Setting a policy or starting a merge is refused and nothing changed. A normal refusal, not a cleanup failure. The add-in's dispatcher refusal of a reentrant call (`VCS_API_REFUSED: ...` from `API`, or the marked `{success: false}` envelope from `APIAsync`) uses this pattern too, with `api_refused: true`, on every hard-coded call; no dependent call follows. |
+| `api_self_dispatch` | The dispatcher refused a call that arrived back in the project that sent it. This is an add-in defect, so waiting and retrying cannot help. Also carries `api_refused: true`. |
+| `invalid_addin_response` | A JSON-contract method (`ExportByType`, `ImportByType`, `ExportObject`, `ImportObject`, `ExecuteSQL`, `RunVBA`, `SetOption`) returned something that is not JSON. Never a success. Raw-contract calls (`GetOption` values, `GetLogContent` text, `vcs_call_vba`) still wrap a plain value as success. |
 | `merge_not_available` | The database has no merge to run (for example a blank database). It is not retried. Run a full build (`vcs_rebuild_database`). |
 | `decision_required` | A prompt or merge conflict the policy did not cover. Carries `decisions`. |
 | `interaction_mode_refused` | The add-in could not make interactive mode effective. Its enclosing scope or active operation must be released by its owner; nothing starts. |
@@ -229,7 +231,10 @@ These are not prevented by the add-in. Use the inspector below:
 - VBA break mode. That is a paused project, not a dialog.
 - Trust-center and macro-security prompts.
 - "Save changes?" and other destructive confirms. They are never clicked
-  automatically.
+  automatically. When `vcs_export_object` or `vcs_import_object` has to close
+  an open object and its native save prompt is answered Cancel, the call stops
+  without touching the object and returns `success: false`, an `error` naming
+  the object, `cancelled: true` and the log path (A30).
 
 `ListAddinDialogs` / `DismissAddinDialog` on the add-in can see open `frmVCS*`
 forms only while Access is responsive. A modal dialog blocks that call.
@@ -440,3 +445,13 @@ always describes the box that was clicked.
   `worker_capacity_unavailable` without touching a window. Retry once Access
   answers. These threads never use capacity the Access gate needs, so gated
   tools keep answering, or return `server_busy`, on time.
+- Known gap (M44): a gated tool that is connecting to Access, loading the
+  add-in or making a synchronous add-in call does that work on the server's
+  event loop. Until it returns, a dialog or status call cannot start or
+  return. X12 measured stalls of 4 to 14 seconds during whole-database export,
+  imports, builds and test runs. Allow for that before treating a slow dialog
+  call as a blocked Access.
+- Known gap (M43): `vcs_rebuild_database` attaches to an Access instance that
+  is already running instead of starting its own. The build then fails ("You
+  already have the database open"), and its cleanup closes that instance's
+  database and quits it. Close other Access windows before a rebuild.
