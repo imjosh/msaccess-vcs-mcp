@@ -107,6 +107,8 @@ an `error`:
 | `interactive_tests_unsupported` | `vcs_run_tests(noninteractive=False)`. An automation test run is always headless. Refused by MCP before any add-in call; nothing started. |
 | `build_output_unsupported` | `vcs_rebuild_database` with an `output_path`, against an add-in whose `APICapabilities` does not list `build_as_paths` (missing, returned Empty or malformed JSON, or left the name out). Refused by MCP before any build starts; upgrade the add-in. |
 | `invalid_build_path` | `vcs_rebuild_database` was given a relative `output_path` (refused by MCP), or the add-in rejected the pair: a source folder without `vcs-options.json`, an output with no folder or extension, a missing output folder, or the add-in itself. Nothing started. |
+| `export_folder_mismatch` | `vcs_export_database` was given an `output_dir` that is not the add-in's configured export folder. Refused by MCP before anything is exported; the result carries `configured_export_folder` and `requested_output_dir`, and `export_path` is `None`. |
+| `export_folder_unavailable` | `vcs_export_database` could not read the add-in's export folder (`GetExportFolder` raised, was refused, or returned nothing or JSON). Nothing is exported. |
 
 The add-in's return from `MergeBuild` is a start result, not the outcome:
 the outcome arrives on the completion callback. When MCP had to start the

@@ -164,6 +164,7 @@ def _export_through_callback(tmp_path, payload):
         patch("msaccess_vcs_mcp.tools.VCSAddinIntegration", return_value=addin),
         patch("msaccess_vcs_mcp.tools.validate_database_path", return_value=db),
         patch("msaccess_vcs_mcp.tools.validate_export_directory", return_value=out),
+        patch("msaccess_vcs_mcp.tools._resolve_export_folder", return_value=(out, None)),
         patch("msaccess_vcs_mcp.tools._check_database_busy", return_value=None),
         patch("msaccess_vcs_mcp.tools.get_callback_url", return_value="http://localhost:1/cb"),
         patch("msaccess_vcs_mcp.tools._get_operation_manager", return_value=manager),

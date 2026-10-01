@@ -62,6 +62,8 @@ class FakeAccess:
         self.arguments: list[tuple] = []
         self.probes = 0
         self.probe_names: list[str] = []
+        self.export_folder: object = ""
+        self.folder_queries = 0
 
     def run(self, name, *args):
         entry = name.rsplit(".", 1)[1]
@@ -72,6 +74,11 @@ class FakeAccess:
                 raise self.capabilities
             return self.capabilities
         method = args[1] if entry == "APIAsync" else args[0]
+        if entry == "API" and method == "GetExportFolder":
+            self.folder_queries += 1
+            if isinstance(self.export_folder, Exception):
+                raise self.export_folder
+            return self.export_folder
         self.dispatched.append((entry, method))
         self.arguments.append(args[2:] if entry == "APIAsync" else args[1:])
         outcome = self.async_start if entry == "APIAsync" else self.api
@@ -141,6 +148,8 @@ def _export(tmp_path, fake, *, full_export=False, callback=True, complete=False)
     manager = OperationManager()
     if complete:
         fake.on_async = _complete(manager)
+    if fake.export_folder == "":
+        fake.export_folder = str(tmp_path / "export") + os.sep
     addin = _addin(tmp_path, fake)
     with _export_env(tmp_path, addin, manager if callback else None, callback) as (db, out):
         result = asyncio.run(
@@ -580,3 +589,63 @@ def test_build_sync_fallback_refusal_and_exception_fail(tmp_path):
     assert raised["success"] is False
     assert "boom" in raised["error"]
     assert "completion_unconfirmed" not in raised
+
+
+# --- X10: the export destination is the add-in's configured folder ---------------
+
+
+def _export_to(tmp_path, fake, output_dir, *, object_types=None, callback=True):
+    from msaccess_vcs_mcp.tools import vcs_export_database
+
+    manager = OperationManager()
+    fake.on_async = _complete(manager)
+    addin = _addin(tmp_path, fake)
+    with _export_env(tmp_path, addin, manager if callback else None, callback) as (db, out):
+        kwargs = {"object_types": object_types} if object_types else {}
+        args = (str(db),) if output_dir is None else (str(db), str(output_dir))
+        result = asyncio.run(_unwrap(vcs_export_database)(*args, **kwargs))
+    return result, out
+
+
+@pytest.mark.parametrize("object_types", [None, ["queries"]])
+def test_export_to_another_folder_is_refused_before_anything_is_exported(tmp_path, object_types):
+    fake = FakeAccess()
+    fake.export_folder = str(tmp_path / "configured") + os.sep
+    elsewhere = tmp_path / "elsewhere"
+    result, _ = _export_to(tmp_path, fake, elsewhere, object_types=object_types)
+    assert result["success"] is False
+    assert result["error_pattern"] == "export_folder_mismatch"
+    assert result["export_path"] is None
+    assert result["exported_count"] == 0
+    assert result["configured_export_folder"] == fake.export_folder
+    assert result["requested_output_dir"] == str(elsewhere)
+    assert fake.dispatched == []
+    assert not elsewhere.exists()
+
+
+@pytest.mark.parametrize("object_types", [None, ["queries"]])
+@pytest.mark.parametrize("given", ["same", "omitted", "case_and_slash"])
+def test_export_to_the_configured_folder_reports_it_as_export_path(tmp_path, object_types, given):
+    fake = FakeAccess(api='{"success": true}')
+    configured = tmp_path / "export"
+    fake.export_folder = str(configured) + os.sep
+    output_dir = {
+        "same": configured,
+        "omitted": None,
+        "case_and_slash": str(configured).upper() + os.sep,
+    }[given]
+    result, out = _export_to(tmp_path, fake, output_dir, object_types=object_types)
+    assert result["success"] is True
+    assert result["export_path"] == str(out)
+    assert fake.dispatched[0][1] == ("ExportByType" if object_types else "Export")
+
+
+@pytest.mark.parametrize("folder", ["", "{}", REFUSED, RuntimeError("boom")])
+def test_export_with_no_readable_folder_is_refused(tmp_path, folder):
+    fake = FakeAccess()
+    fake.export_folder = folder
+    result, _ = _export_to(tmp_path, fake, None)
+    assert result["success"] is False
+    assert result["error_pattern"] == "export_folder_unavailable"
+    assert result["export_path"] is None
+    assert fake.dispatched == []

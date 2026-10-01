@@ -196,7 +196,7 @@ The server prints diagnostics to stderr at startup (visible in Cursor's MCP serv
 
 ### Database-Level Operations
 
-#### `vcs_export_database(database_path, output_dir, object_types, full_export)`
+#### `vcs_export_database(database_path, output_dir=None, object_types=None, full_export=False)`
 
 Export Access database objects to source files via the VCS add-in.
 
@@ -206,16 +206,16 @@ fast save by default (only changed objects).
 
 **Args:**
 - `database_path`: Path to Access database (.accdb, .accda, .mdb)
-- `output_dir`: Directory to export source files to
+- `output_dir`: Optional. The add-in writes only to its configured export folder, so this must be that folder if given, and defaults to it. A different folder is refused before anything is exported (`error_pattern: export_folder_mismatch`, with `configured_export_folder`); an unreadable folder is `export_folder_unavailable`.
 - `object_types`: Optional list of categories (defaults to entire project)
 - `full_export`: If True, export all objects in scope (not just changed ones)
 
-**Returns:** `success`, `exported_count`, `export_path`, `objects_by_type`, `log_path`
+**Returns:** `success`, `exported_count`, `export_path` (where the files were written), `objects_by_type`, `log_path`
 
 ```python
-vcs_export_database("C:\\db.accdb", "C:\\src\\mydb")
+vcs_export_database("C:\\db.accdb")
 
-vcs_export_database("C:\\db.accdb", "C:\\src\\mydb", object_types=["modules"])
+vcs_export_database("C:\\db.accdb", object_types=["modules"])
 ```
 
 #### `vcs_list_objects(database_path)`
@@ -575,7 +575,7 @@ All files use **UTF-8 with BOM** encoding, which is critical for proper import b
 
 ```python
 # 1. Export database to source
-vcs_export_database("C:\\db.accdb", "C:\\src\\db")
+vcs_export_database("C:\\db.accdb")
 
 # 2. Initialize git (if not already done)
 # cd C:\src\db && git init && git add . && git commit -m "Initial export"
@@ -586,7 +586,7 @@ vcs_export_database("C:\\db.accdb", "C:\\src\\db")
 vcs_diff_database("C:\\db.accdb", "C:\\src\\db")
 
 # 5. Export changes
-vcs_export_database("C:\\db.accdb", "C:\\src\\db")
+vcs_export_database("C:\\db.accdb")
 
 # 6. Commit changes
 # git add . && git commit -m "Updated customer queries"
@@ -620,7 +620,7 @@ db_list_tables(database="legacy")
 db_list_views(database="legacy")
 
 # 2. Export to version control (msaccess-vcs-mcp)
-vcs_export_database("C:\\legacy.accdb", "C:\\src\\legacy-db")
+vcs_export_database("C:\\legacy.accdb")
 
 # 3. Run queries against the database (msaccess-vcs-mcp)
 vcs_execute_sql("C:\\legacy.accdb", "SELECT * FROM Customers WHERE Active = True")
