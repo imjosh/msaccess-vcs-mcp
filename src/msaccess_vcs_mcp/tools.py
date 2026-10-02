@@ -1235,6 +1235,8 @@ async def vcs_export_database(
     finished either way, so do not retry it blindly. Read ``log_path``, or call
     ``vcs_get_recent_calls()`` and ``vcs_get_log(log_type="Export")``.
     ``full_export=True`` runs ``FullExport`` on every one of those paths.
+    An explicit async start refusal returns its error, pattern and decision
+    fields once; it unregisters the callback and never falls back to sync.
 
     The add-in gitignores its ``logs`` folder, so Glob/Grep will not find
     these files. Open ``log_path`` directly, or call vcs_get_log("Export").
@@ -1359,10 +1361,17 @@ async def vcs_export_database(
                                 "export_path": str(export_path),
                                 "objects_by_type": {},
                             }, export_path, "Export", completion, call_started_at=call_started_at, executed=True)
+                    elif is_start_refusal(async_result):
+                        # An explicit refusal is terminal. Drop its duplicate
+                        # callback and keep the original metadata without retry.
+                        op_manager.unregister_operation(operation_id)
+                        return _export_start_outcome(
+                            async_result,
+                            export_path,
+                            call_started_at=call_started_at,
+                        )
                     else:
-                        # Neither marker: the add-in never started the operation,
-                        # so run it synchronously rather than reporting success
-                        # for work that never happened.
+                        # Unknown start: preserve the documented sync fallback.
                         op_manager.unregister_operation(operation_id)
                         return _export_start_outcome(
                             addin.export_source(
