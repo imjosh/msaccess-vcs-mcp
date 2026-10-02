@@ -103,7 +103,11 @@ from .usage_logging import (
     with_logging,
 )
 from .rebuild_watcher import get_rebuild_timeout, wait_for_rebuild_status
-from .operation_manager import MonotonicProgressReporter
+from .operation_manager import (
+    ERROR_DIAGNOSTIC_FIELDS,
+    INLINE_TEST_RESULT_FIELDS,
+    MonotonicProgressReporter,
+)
 from .vba_worker_manager import get_call_vba_timeout, run_vba_resilient
 
 logger = logging.getLogger(__name__)
@@ -350,6 +354,12 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
     runtime_error = completion.get("runtime_error")
     loaded = _load_test_results_file(completion.get("results_path"))
     if loaded is not None:
+        for key in ERROR_DIAGNOSTIC_FIELDS:
+            if completion.get(key) is not None:
+                loaded[key] = completion[key]
+        if completion.get("completion_error"):
+            loaded["success"] = False
+            loaded.setdefault("error", completion.get("error") or completion["completion_error"])
         if completion.get("cancelled"):
             loaded["cancelled"] = True
         if runtime_error:
@@ -364,6 +374,15 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
     if raw not in (None, ""):
         return _parse_test_runner_json(raw)
 
+    if "summary" in completion or "tests" in completion:
+        # A35: SaveResults may fail. The add-in then carries available results
+        # inline beside its primary decision and secondary runner diagnostics.
+        fields = INLINE_TEST_RESULT_FIELDS + ERROR_DIAGNOSTIC_FIELDS + (
+            "success", "error", "error_pattern", "log_path", "results_error",
+        )
+        partial = {key: completion[key] for key in fields if completion.get(key) is not None}
+        return _test_run_verdict(apply_decision_result(partial, completion))
+
     if (
         completion.get("results_error")
         or completion.get("cancelled")
@@ -373,8 +392,8 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
         # could not write it: say so, with the add-in's error, instead of
         # blaming a missing modTestAssert.
         terminal: dict[str, Any] = {"success": False}
-        for key in ("cancelled", "results_error", "log_path"):
-            if completion.get(key):
+        for key in ("cancelled", "results_error", "log_path") + ERROR_DIAGNOSTIC_FIELDS:
+            if completion.get(key) is not None:
                 terminal[key] = completion[key]
         if runtime_error:
             terminal["runtime_error"] = runtime_error
@@ -389,6 +408,9 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
 
     # A refusal or error with no results: keep its pattern, decisions and error number.
     result = normalize_terminal_result({**completion, "success": False}, "Test run failed")
+    for key in ERROR_DIAGNOSTIC_FIELDS + ("cancelled",):
+        if completion.get(key) is not None:
+            result[key] = completion[key]
     if completion.get("log_path"):
         result["log_path"] = completion["log_path"]
     return result

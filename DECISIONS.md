@@ -74,6 +74,23 @@ contradictory guidance.
 
 ---
 
+## 2026-10-02 — Preserve A35 secondary errors and inline partial test results
+
+**Trigger**: The add-in's repaired completion preserved compile and construction diagnostics, but the operation-manager and test-tool allowlists discarded them. A passing saved results file also concealed a completion-construction failure.
+
+**Options explored**:
+- Change only the add-in: rejected after public-boundary tests showed missing diagnostics in the MCP result.
+- Copy every callback field: rejected because callback envelope fields and future unreviewed payloads should not become the public result implicitly.
+- Extend explicit allowlists with the shared contract fields and inline test-result fields: chosen; preserves the seam without changing unrelated callback behavior.
+
+**Decision**: Preserve `run_error`, `run_error_pattern`, `completion_error`, and `completion_error_number` alongside existing runtime fields. Keep available inline test results when no results file was written. Decision-required precedence remains primary on callback and sync paths. A completion-construction failure forces failure even when saved or inline assertions passed; results remain available as evidence. Compile failure alone retains `project_not_compiled`, `success: false`, and `cancelled: false`.
+
+**What this rules out**: Treating secondary compile errors as runtime exceptions, deriving success solely from a saved test summary, or throwing away partial results because persistence failed. The A31 compile-only contract remains unchanged; combined failures require this MCP counterpart to the add-in A35 change.
+
+**Relevant files**: `operation_manager.py`, `tools.py`, `tests/test_blocked_compile_completion.py`, `docs/DIALOGS.md`; shared spec section 2, add-in A35 decision, and [A35 verification](../../verification/A35/README.md).
+
+---
+
 ## 2026-10-01 — A compile-gated test run is an explicit add-in failure (A31)
 
 **Decision**: A test run stopped by the add-in's compile check carries `success: false`, `cancelled: false`, `error_pattern: project_not_compiled`, and the translated "Project has compile errors. Please resolve before running tests." It is a runner failure with no assertions, distinct from an errored test or a confirmed cancellation. The add-in saves these fields in results JSON and posts them on its error callback. The existing `_test_run_verdict` preserves the explicit failure through callback and synchronous transports; MCP needs no code change.

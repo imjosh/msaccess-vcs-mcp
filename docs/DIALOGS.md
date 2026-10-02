@@ -163,6 +163,20 @@ refusal once, normalised, and does not call `RunFilteredTests` a second time.
 A `runtime_error` in the results, or on the completion callback when the
 run went async, is kept on the result with its `errorNumber`.
 
+When a blocked decision and compile failure occur together (A35), the primary
+result is `decision_required: true`, `error_pattern: decision_required`,
+`success: false`, and `cancelled: false`. The translated decision text stays in
+`error`; `run_error` retains the compile explanation and `run_error_pattern`
+is `project_not_compiled`. These are runner diagnostics, separate from
+`runtime_error`/`errorNumber`. Compile failure alone keeps the compile text and
+`project_not_compiled` as the primary error, with `cancelled: false`.
+Both transports preserve the decision journal, the operation's `log_path` and
+`logPath`, results path or available inline partial results, and `results_error`.
+If completion construction fails, `completion_error` and
+`completion_error_number` retain that secondary fault; even passing saved
+assertions cannot turn it into success. The add-in restores its owned state
+before making its single terminal delivery attempt.
+
 `vcs_run_tests` gives the same verdict whether the result came by callback,
 as an inline sync marker, or through the sync fallback. Highest precedence
 first: `decision_required`; a runtime error or the add-in's own

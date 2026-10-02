@@ -17,6 +17,14 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 TERMINAL_CALLBACK_TYPES = frozenset({"complete", "error", "cancelled"})
+ERROR_DIAGNOSTIC_FIELDS = (
+    "runtime_error", "errorNumber", "run_error", "run_error_pattern",
+    "completion_error", "completion_error_number",
+)
+INLINE_TEST_RESULT_FIELDS = (
+    "runAt", "databasePath", "addinVersion", "durationMs", "cancelled",
+    "allPassed", "summary", "tests",
+)
 
 
 def _cancel_not_honored_field(operation: "PendingOperation") -> dict[str, Any]:
@@ -28,15 +36,11 @@ def _cancel_not_honored_field(operation: "PendingOperation") -> dict[str, Any]:
     return {"cancel_not_honored": True} if operation.cancel_not_honored else {}
 
 
-def _runtime_error_fields(callback: dict) -> dict[str, Any]:
-    """The add-in's ``runtime_error`` and ``errorNumber``, when the callback has them.
-
-    The error text is otherwise only in the add-in's sync return, which the
-    async path never reads.
-    """
+def _completion_fields(callback: dict) -> dict[str, Any]:
+    """Preserve secondary errors and partial test results on the shared seam."""
     return {
         key: callback[key]
-        for key in ("runtime_error", "errorNumber")
+        for key in ERROR_DIAGNOSTIC_FIELDS + INLINE_TEST_RESULT_FIELDS
         if callback.get(key) is not None
     }
 
@@ -505,7 +509,7 @@ class OperationManager:
                             "decisions": callback.get("decisions"),
                             "decision_required": callback.get("decision_required"),
                             "error_pattern": callback.get("error_pattern"),
-                            **_runtime_error_fields(callback),
+                            **_completion_fields(callback),
                             **_cancel_not_honored_field(operation),
                         }
 
@@ -524,7 +528,7 @@ class OperationManager:
                             "decisions": callback.get("decisions"),
                             "decision_required": callback.get("decision_required"),
                             "error_pattern": callback.get("error_pattern"),
-                            **_runtime_error_fields(callback),
+                            **_completion_fields(callback),
                             **_cancel_not_honored_field(operation),
                         }
 
@@ -542,7 +546,7 @@ class OperationManager:
                             "decisions": callback.get("decisions"),
                             "decision_required": callback.get("decision_required"),
                             "error_pattern": callback.get("error_pattern"),
-                            **_runtime_error_fields(callback),
+                            **_completion_fields(callback),
                         }
 
                     else:
