@@ -42,7 +42,7 @@ Which windows are the server's own is recorded on disk, keyed by process id *and
 
 ## Prerequisites
 
-- **Python**: 3.10 or higher
+- **Python**: 3.11 or higher
 - **Microsoft Access**: Installed on Windows (for COM automation)
 - **pywin32**: Python COM interface (installed automatically)
 

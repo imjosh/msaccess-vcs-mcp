@@ -4,7 +4,7 @@ This guide covers testing procedures for the MCP tool, including unit tests, int
 
 ## Virtual Environment
 
-All test commands assume the project virtual environment is activated. Activate it before running any tests:
+Use Python 3.11 or later. All test commands assume the project virtual environment is activated. Activate it before running any tests:
 
 ```powershell
 cd C:\path\to\msaccess-vcs-mcp
