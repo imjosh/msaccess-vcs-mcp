@@ -615,15 +615,23 @@ def resolve_target(
     titled = {window.pid for window in listed if _titled(window)}
     title_pids = {item for item in titled if _ident(item).is_access}
     unconfirmed_pids = {item for item in titled if not _ident(item).name}
-    owned_pids: set[int] = set()
     try:
-        for record in list_owned():
-            if _same_path(record.database_path, database_path):
-                owned_pids.add(record.pid)
+        owned_records = [
+            record for record in list_owned() if _same_path(record.database_path, database_path)
+        ]
     except Exception:
-        owned_pids = set()
-    dead_owned = {item for item in owned_pids if _ident(item).running is False}
-    owned_pids = {item for item in owned_pids if _ident(item).is_access}
+        owned_records = []
+    dead_owned = {record.pid for record in owned_records if _ident(record.pid).running is False}
+    # Pruning retains uncertain records for bookkeeping. Only a matching,
+    # readable creation stamp proves that the recorded database still owns this PID.
+    owned_pids = {
+        record.pid
+        for record in owned_records
+        if _ident(record.pid).is_access
+        and record.create_time is not None
+        and _ident(record.pid).create_time is not None
+        and record.create_time == _ident(record.pid).create_time
+    }
 
     # Prefer the intersection when both sources agree on a live window.
     both = title_pids & owned_pids

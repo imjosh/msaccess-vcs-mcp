@@ -7,6 +7,7 @@ the fake window backend recorded (clicks, closes).
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import patch
 
 from msaccess_vcs_mcp import dialog_recovery
@@ -14,6 +15,7 @@ from msaccess_vcs_mcp import dialog_recovery
 import pytest
 
 from msaccess_vcs_mcp import tools
+from msaccess_vcs_mcp.access_com import instance_registry
 from msaccess_vcs_mcp.access_gate import reset_access_gate
 from msaccess_vcs_mcp.dialog_recovery import (
     CLICK_DELIVERED,
@@ -103,6 +105,135 @@ def _call(tool, backend, *args, **kwargs):
 def _dismiss(backend, **kwargs):
     kwargs.setdefault("button", "OK")
     return _call(tools.vcs_dismiss_dialog, backend, DB, "hwnd:2", **kwargs)
+
+
+@pytest.fixture
+def retained_registry(tmp_path, monkeypatch):
+    """Use a disposable registry whose records survive a failed process query."""
+    path = tmp_path / "owned-instances.json"
+    monkeypatch.setenv("ACCESS_VCS_OWNED_INSTANCES_PATH", str(path))
+    monkeypatch.setattr(instance_registry, "list_access_pids_or_none", lambda: None)
+    with patch.object(dialog_recovery, "list_owned", side_effect=instance_registry.list_owned):
+        def write_record(stamp):
+            record = {"pid": 10, "database_path": DB}
+            if stamp != "missing":
+                record["create_time"] = stamp
+            path.write_text(json.dumps({"instances": [record]}), encoding="utf-8")
+
+        yield write_record
+
+
+def _registry_call(backend, tool, **kwargs):
+    if tool == "list":
+        return _call(tools.vcs_list_dialogs, backend, DB, **kwargs)
+    if tool == "status":
+        return _call(tools.vcs_automation_status, backend, DB, **kwargs)
+    if tool == "recover":
+        return _call(tools.vcs_recover_dialogs, backend, DB, policy="safe", **kwargs)
+    if tool == "dismiss":
+        return _dismiss(backend, **kwargs)
+    return _dismiss(backend, button=None, action=tool, **kwargs)
+
+
+def _registry_backend(tool, identity=ACCESS, title="Other : Database"):
+    main = _main(title=title)
+    if tool in {"close", "cancel"}:
+        dialog = WindowInfo(hwnd=2, pid=10, title="MSAccessVCS", class_name="OForm")
+    else:
+        dialog = _msgbox()
+    windows = [main] if tool == "status" else [main, dialog]
+    backend = ScriptedBackend(windows, {10: identity})
+    backend.script_windows(windows, windows, [main])
+    return backend
+
+
+@pytest.mark.parametrize("tool", ["list", "status", "dismiss", "recover", "close", "cancel"])
+@pytest.mark.parametrize(
+    "stored_stamp, observed_stamp",
+    [(999, 1000), ("missing", 1000), (None, 1000), ("unreadable", 1000), (1000, None)],
+    ids=["reused-pid", "missing-stored", "null-stored", "unreadable-stored", "unreadable-observed"],
+)
+def test_uncertain_registry_record_cannot_target_unrelated_access(
+    retained_registry, tool, stored_stamp, observed_stamp
+):
+    retained_registry(stored_stamp)
+    backend = _registry_backend(tool, ProcessIdentity("MSACCESS.EXE", observed_stamp, True))
+    result = _registry_call(backend, tool)
+    assert backend.clicked == []
+    assert backend.closed == []
+    assert result["success"] is False
+    assert result["error_pattern"] == "access_not_found"
+
+
+@pytest.mark.parametrize("tool", ["list", "status", "dismiss", "recover", "close", "cancel"])
+def test_matching_registry_stamp_permits_public_dialog_tools(retained_registry, tool):
+    retained_registry(1000)
+    backend = _registry_backend(tool)
+    result = _registry_call(backend, tool)
+    assert result["success"] is True
+    assert result["pid"] == 10
+    assert result["create_time"] == 1000
+    if tool in {"dismiss", "recover"}:
+        assert backend.clicked == [21]
+        assert backend.closed == []
+    elif tool in {"close", "cancel"}:
+        assert backend.clicked == []
+        assert backend.closed == [2]
+    else:
+        assert result["identity_confirmed"] is True
+        assert backend.clicked == backend.closed == []
+        if tool == "status":
+            assert result["ready"] is True
+
+
+@pytest.mark.parametrize("tool", ["dismiss", "recover", "close"])
+@pytest.mark.parametrize("selection", ["title", "explicit"])
+@pytest.mark.parametrize("stored_stamp", [999, "missing"])
+def test_uncertain_registry_preserves_independent_target_selection(
+    retained_registry, tool, selection, stored_stamp
+):
+    retained_registry(stored_stamp)
+    backend = _registry_backend(
+        tool, title="Northwind : Database" if selection == "title" else "Other : Database"
+    )
+    kwargs = {"pid": 10, "create_time": 1000} if selection == "explicit" else {}
+    result = _registry_call(backend, tool, **kwargs)
+    assert result["success"] is True
+    assert result["create_time"] == 1000
+    assert backend.closed == ([2] if tool == "close" else [])
+    assert backend.clicked == ([] if tool == "close" else [21])
+
+
+@pytest.mark.parametrize("stored_stamp", [999, 1000])
+def test_only_confirmed_registry_can_resolve_title_ambiguity(retained_registry, stored_stamp):
+    retained_registry(stored_stamp)
+    main, dialog, other = _main(), _msgbox(), _main(hwnd=3, pid=20)
+    backend = ScriptedBackend(
+        [main, dialog, other],
+        {20: ProcessIdentity("MSACCESS.EXE", 2000, True)},
+    )
+    backend.script_windows([main, dialog, other], [main, dialog, other], [main, other])
+    result = _dismiss(backend)
+    if stored_stamp == 1000:
+        assert result["success"] is True
+        assert result["pid"] == 10
+        assert backend.clicked == [21]
+    else:
+        assert result["error_pattern"] == "ambiguous_instance"
+        assert {item["pid"] for item in result["candidates"]} == {10, 20}
+        assert backend.clicked == []
+    assert backend.closed == []
+
+
+@pytest.mark.parametrize("tool", ["dismiss", "recover", "close"])
+def test_registry_identity_is_reverified_before_action(retained_registry, tool):
+    retained_registry(1000)
+    backend = _registry_backend(tool)
+    backend.script_identity(10, ACCESS, ACCESS, ProcessIdentity("MSACCESS.EXE", 2000, True))
+    result = _registry_call(backend, tool)
+    assert result["success"] is False
+    assert result["error_pattern"] == "dialog_changed"
+    assert backend.clicked == backend.closed == []
 
 
 def test_unreadable_creation_time_refuses_click():

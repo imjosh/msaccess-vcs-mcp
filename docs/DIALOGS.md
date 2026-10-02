@@ -403,6 +403,13 @@ If two Access windows match the database, the tools return
 match that process, the tools return `process_identity_mismatch` and click
 nothing.
 
+An ownership-registry record selects a target only when its database path matches
+and its stored creation time is readable and equals the Access process's observed
+creation time. Records retained after a failed process query are bookkeeping,
+not proof of identity. A missing, unreadable or different stamp cannot select a
+registry-only target (`access_not_found`); title matching and explicit
+PID/creation-time selection still follow their own identity checks.
+
 Right before each click or close, the tools list windows again. The dialog
 must still belong to the same process (PID and creation time), and its class,
 title, full text, kind and buttons must match what the call inspected. Windows
