@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "msaccess-vcs-mcp"
-version = "0.1.0"
+dynamic = ["version"]
 description = "MCP server for Microsoft Access database version control"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -47,8 +47,11 @@ msaccess-vcs = "msaccess_vcs_mcp.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.dynamic]
+version = {attr = "msaccess_vcs_mcp.__version__"}
+
 [tool.setuptools.package-data]
-msaccess_vcs_mcp = [".env.example"]
+msaccess_vcs_mcp = [".env.example", "workflow_requirement.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -57,4 +60,5 @@ python_classes = "Test*"
 python_functions = "test_*"
 markers = [
     "integration: marks tests as integration tests (require Access installed)",
+    "version_gate: exercises X16 admission without the existing unit installation fake",
 ]

@@ -54,6 +54,10 @@ from .access_com.connection import (
 from .access_com.dao_helpers import list_query_defs, list_table_defs
 from .access_com.process_qos import list_access_pids, prefer_full_power_if_created
 from .access_gate import EXEMPT_TOOLS, ServerLoopContext, get_access_gate
+from .compatibility import (
+    ADDIN_DEPENDENT_TOOLS, compatibility_result, inspect_installed_addin,
+    server_metadata, workflow_preflight_instructions,
+)
 from .exempt_workers import WorkerCapacityUnavailable, workers_for
 from .dialog_recovery import (
     automation_status,
@@ -693,6 +697,7 @@ def _check_database_busy(database_path: str) -> dict[str, Any] | None:
 mcp = FastMCP(
     name="msaccess-vcs-mcp",
     instructions=(
+        workflow_preflight_instructions() +
         "Microsoft Access version control MCP server. "
         "Export Access database objects to source files, import them back, "
         "rebuild databases from source, and track changes. "
@@ -1010,6 +1015,8 @@ async def _run_exempt_in_worker(name: str, logged, args: tuple, kwargs: dict) ->
     requested = kwargs.get("timeout_seconds")
     ceiling = dialog_timeout_sec(requested if isinstance(requested, (int, float)) else None)
     ceiling += EXEMPT_WORKER_MARGIN_SEC
+    if name == "addin_compatibility":
+        ceiling = 15.0  # DAO's 10-second subprocess limit plus parent cleanup.
     if name == "vcs_get_version_info":
         # Cold Access startup and the add-in probe need more than a UI timeout.
         ceiling = VERSION_INFO_WORKER_TIMEOUT_SEC
@@ -1086,8 +1093,33 @@ def vcs_tool(name: str):
     server process.
     """
     def decorator(func):
-        logged = with_logging(name)(func)
         is_async_body = inspect.iscoroutinefunction(func)
+
+        if is_async_body:
+            @functools.wraps(func)
+            async def admitted(*args, **kwargs):
+                if name in ADDIN_DEPENDENT_TOOLS:
+                    if name in EXEMPT_TOOLS:
+                        admission = await _run_exempt_in_worker(
+                            "addin_compatibility", inspect_installed_addin, (), {}
+                        )
+                    else:
+                        admission = inspect_installed_addin()
+                    if not admission.get("success"):
+                        if "component" not in admission:
+                            return compatibility_result(None, detail=admission.get("error"))
+                        return admission
+                return await func(*args, **kwargs)
+        else:
+            @functools.wraps(func)
+            def admitted(*args, **kwargs):
+                if name in ADDIN_DEPENDENT_TOOLS:
+                    admission = inspect_installed_addin()
+                    if not admission["success"]:
+                        return admission
+                return func(*args, **kwargs)
+
+        logged = with_logging(name)(admitted)
 
         @functools.wraps(func)
         async def with_refresh(*args, **kwargs):
@@ -1140,7 +1172,7 @@ def vcs_tool(name: str):
             # The interruption is applied inside the logging layer, so the
             # usage entry records the result the client gets.
             finished = with_logging(name)(
-                _then(func, lambda result: finish_gated_call(claimed.get("call_id"), result))
+                _then(admitted, lambda result: finish_gated_call(claimed.get("call_id"), result))
             )
 
             def cleanup() -> None:
@@ -1889,12 +1921,8 @@ async def vcs_rebuild_database(
             # Probe the exact application proxy rather than looking it up.
             addin.load_addin(app)
             
-            # BuildAs with both paths builds without a picker. An add-in that
-            # does not confirm it would open one, so it is refused here.
+            # Named-output BuildAs is part of the admitted release contract.
             if output_path:
-                refusal = addin.build_as_paths_refusal()
-                if refusal:
-                    return {**refusal, "output_path": None, "source_dir": str(src_path)}
                 command = "BuildAs"
                 build_args = (str(src_path), output_path)
             else:
@@ -2299,23 +2327,17 @@ def _with_rebuild_fields(
 
 
 def _probe_version_info() -> dict[str, Any]:
-    """Keep attach, probe and cleanup in one COM apartment, even after cancellation.
-
-    The bounded exempt worker retains ownership until validation's finally has
-    quit its own host. Only plain result data returns to the server loop.
-    """
-    from .validation import COM_AVAILABLE, get_version_info_safe
-
-    if not COM_AVAILABLE:
-        return get_version_info_safe()
-
-    import pythoncom
-
-    pythoncom.CoInitialize()
-    try:
-        return get_version_info_safe()
-    finally:
-        pythoncom.CoUninitialize()
+    """Read installed metadata without attaching to Access or opening a target."""
+    admission = inspect_installed_addin()
+    return {
+        **server_metadata(), "success": True,
+        "vcs_version": admission["installed_version"],
+        "addin_path": admission["addin_path"], "addin_compatibility": admission,
+        "access_version": None, "bitness": None,
+        "target_database": get_config().get("ACCESS_VCS_DATABASE"),
+        "errors": [],
+        "warnings": ["Access version/bitness are not probed: this read-only check never starts or attaches to Access."],
+    }
 
 
 @vcs_tool("vcs_get_version_info")
@@ -2329,8 +2351,7 @@ async def vcs_get_version_info(
     compatibility issues, including:
     - MCP server version
     - VCS add-in version
-    - Access application version
-    - Access bitness (32-bit or 64-bit)
+    - Preserved Access version/bitness fields (null; no Access attach is made)
     - Configured target database path
     - Add-in file path
     - Callback server status (for async operations)
@@ -2344,8 +2365,10 @@ async def vcs_get_version_info(
         - success: Boolean indicating if info was retrieved
         - mcp_version: Version of the MCP server (e.g., "0.1.0")
         - vcs_version: Version of the VCS add-in (e.g., "4.1.4")
-        - access_version: Access application version (e.g., "16.0")
-        - bitness: "32-bit" or "64-bit"
+        - access_version: None; this metadata check never starts/attaches to Access
+        - bitness: None, for the same reason
+        - supported_addin_range: Consumer-owned server requirement
+        - addin_compatibility: Installed add-in admission verdict when obtainable
         - target_database: Configured database path from ACCESS_VCS_DATABASE
         - addin_path: Path to the VCS add-in file
         - callback_url: URL for async callbacks (None if not available)
@@ -2370,6 +2393,7 @@ async def vcs_get_version_info(
         "vcs_get_version_info", _probe_version_info, (), {}
     )
 
+    result.update(server_metadata())
     callback_url = get_callback_url()
     op_manager = _get_operation_manager()
 

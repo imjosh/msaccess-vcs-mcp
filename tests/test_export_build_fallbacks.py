@@ -466,7 +466,7 @@ def test_build_callback_reports_the_add_ins_output_path(tmp_path):
     assert "completion_unconfirmed" not in result
     assert fake.dispatched == [("APIAsync", "BuildAs")]
     assert fake.arguments == [(str(src), output)]
-    assert fake.probes == 1
+    assert fake.probes == 0
 
 
 def test_build_completion_without_a_path_does_not_echo_the_request(tmp_path):
@@ -476,14 +476,12 @@ def test_build_completion_without_a_path_does_not_echo_the_request(tmp_path):
 
 
 @pytest.mark.parametrize("callback", [True, False], ids=["callback", "no-callback"])
-def test_build_refused_before_start_without_the_capability(tmp_path, callback):
+def test_admitted_build_dispatches_without_a_capability_probe(tmp_path, callback):
     fake = FakeAccess(capabilities=RuntimeError("Method not found"))
-    result, src, _ = _build(tmp_path, fake, callback=callback)
-    assert result["success"] is False
-    assert result["error_pattern"] == "build_output_unsupported"
-    assert result["output_path"] is None
+    result, src, _ = _build(tmp_path, fake, callback=callback, complete=True)
+    assert fake.probes == 0
+    assert fake.dispatched == [("APIAsync" if callback else "API", "BuildAs")]
     assert result["source_dir"] == str(src)
-    assert fake.dispatched == []
 
 
 def test_build_relative_output_is_refused_before_access_starts(tmp_path):

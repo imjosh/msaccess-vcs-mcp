@@ -64,6 +64,11 @@ msaccess-vcs-mcp/
 
 ## Architecture
 
+Before database work, follow the required read-only compatibility preflight in
+[docs/AGENT_WORKFLOWS.md](docs/AGENT_WORKFLOWS.md#required-compatibility-preflight).
+Release requirements, discovery, errors and update steps are documented in
+[docs/RELEASE_COMPATIBILITY.md](docs/RELEASE_COMPATIBILITY.md).
+
 All tools are registered with the `@vcs_tool("name")` decorator in `tools.py`, which composes three concerns in order:
 
 1. **Config reload** — `load_config()` re-reads `.env` when it changes
@@ -201,7 +206,7 @@ No tool accepts the installed add-in as `database_path`, `output_path`, or `temp
 
 The comparison ignores the file extension, mirroring the add-in's `modInstall.PathsMatchIgnoringExtension`: a compiled install is a `.accde` built from the same `.accda`, and only one of the two is ever named in `ACCESS_VCS_ADDIN_PATH`. Folder parameters (`source_dir`, `output_dir`) are not checked — an export folder beside the install is not the install.
 
-**Resolving the install path.** With `ACCESS_VCS_ADDIN_PATH` unset, `get_default_addin_path()` reads `HKCU\Software\VB and VBA Program Settings\MSAccessVCS\Install`, which is the only place to read it from — the add-in's own `GetInstalledAddInFileName` is built from exactly these two values. `Install Folder` is present only for a folder the user chose (the installer deletes it when the folder is the default, so absence means `%AppData%\MSAccessVCS`, not "not installed"), and `Compile accde` decides the extension. Do not reconstruct the path from `%AppData%` alone or assume `.accda`. The result is cached for the life of the process; `reset_addin_path_cache()` clears it.
+**Resolving the install path.** With `ACCESS_VCS_ADDIN_PATH` unset, `get_default_addin_path()` reads `HKCU\Software\VB and VBA Program Settings\MSAccessVCS\Install`, which is the only place to read it from — the add-in's own `GetInstalledAddInFileName` is built from exactly these two values. `Install Folder` is present only for a folder the user chose (the installer deletes it when the folder is the default, so absence means `%AppData%\MSAccessVCS`, not "not installed"), and `Compile accde` decides the extension. Do not reconstruct the path from `%AppData%` alone or assume `.accda`. Installer settings are re-read on every call so reinstalling or moving the library cannot retain an old compatibility decision; `reset_addin_path_cache()` remains a legacy helper.
 
 Run these tests **through this server**, never from the add-in's own window. `modTestAssert.TestAssert` routes through `Application.Run` to the *installed* add-in path, while the runner singleton that records assertions lives in whichever project received `RunTests`. Invoking them from a development copy puts those in different projects: assertions are discarded and every test reports `EMPTY`. Treat an all-`EMPTY` result as a broken harness, not a pass.
 

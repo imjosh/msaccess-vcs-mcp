@@ -76,6 +76,46 @@ contradictory guidance.
 
 ---
 
+## 2026-10-02 — Consumer-owned SemVer gates before database work (X16)
+
+**Trigger**: Josh requires agent -> server -> installed add-in compatibility,
+before dependent work. Josh assigned add-in >=5.2.0 <6.0.0 and workflow server
+>=0.2.0 <0.3.0, with explicit development identities. Publication remains open.
+
+**Options explored**:
+- Retain mandatory feature probing: rejected; it does not define a release contract.
+- Read version through Access/VBA after opening the target: rejected; AutoExec,
+  target mutation and callbacks could precede refusal; modal dialogs block discovery.
+- Read installed DAO AppVersion in a bounded hidden subprocess: chosen; the same
+  property as GetVCSVersion, shared/read-only, without an Access application host.
+
+**Decision**: The workflow requirement ships in workflow_requirement.json;
+current MCP instructions and AGENT_WORKFLOWS distribute its preflight. The
+independent server requirement lives in compatibility.ADDIN_REQUIREMENT. The
+public wrapper admits add-in-dependent MCP and CLI calls before their bodies;
+rebuild is checked before callback registration. Strict SemVer, bounded major
+zero, enumerated prereleases, and structured errors replace capability admission.
+Mode/policy acknowledgments retain their per-call role. Discovery re-reads on
+every call; changed files or paths do not retain cached admission. Installer
+registry settings are also re-read. Metadata returns server identity/requirements
+even when the library or worker is unavailable; Access version/bitness retain
+their public keys but are null without attaching.
+
+**What this rules out**: Treating an unchanged stable development number as
+publication evidence, automatic upgrades after refusal, bypass via CLI/rebuild,
+and attaching to user Access for version metadata. The DAO subprocess uses DEVNULL stdin so it cannot inherit the MCP protocol
+pipe (real stdio discovery otherwise timed out). Only that subprocess is
+terminated on timeout. Win32/status/recent-call/cancel recovery stays callable.
+An incompatible install needs a user-authorized manual install/build path.
+No M52, verification gate 1, X13 or result-transport waiver is granted.
+
+**Relevant files**: compatibility.py, version_probe.py, workflow_requirement.json,
+tools.py, config.py, tests/test_version_compatibility.py,
+docs/RELEASE_COMPATIBILITY.md; tracker verification/X16.
+
+
+---
+
 ## 2026-10-02 — Preserve A35 secondary errors and inline partial test results
 
 **Trigger**: The add-in's repaired completion preserved compile and construction diagnostics, but the operation-manager and test-tool allowlists discarded them. A passing saved results file also concealed a completion-construction failure.
@@ -102,6 +142,8 @@ contradictory guidance.
 ---
 
 ## 2026-10-01 — Version probes use a bounded COM-initialized exempt worker (M45)
+
+> **Partially superseded** (2026-10-02): X16 retains bounded exempt workers but replaces Access attach/create/probe with isolated read-only DAO metadata. Access cleanup and target overlap no longer occur in metadata. Historical M45 evidence is unchanged.
 
 **Trigger**: M45, the gate-exempt `vcs_get_version_info` still called
 `get_version_info_safe()` on the server loop after M44. Access startup or a

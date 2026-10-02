@@ -49,6 +49,8 @@ Which windows are the server's own is recorded on disk, keyed by process id *and
 If MCP startup fails with a `CLSIDToClassMap` / `win32com.gen_py` error, the server deletes the stale type-library folder under `%TEMP%\gen_py` and retries once automatically. If it still fails after that, Microsoft Access is probably not installed or not registered for COM automation.
 - **MSAccess VCS Add-in**: Must be installed ([download latest release](https://github.com/joyfullservice/msaccess-vcs-integration/releases/latest))
 
+Before database work, agents must follow the [compatibility preflight](docs/AGENT_WORKFLOWS.md#required-compatibility-preflight). See [release compatibility](docs/RELEASE_COMPATIBILITY.md) for assigned ranges, development identities and update steps.
+
 ## Getting Started
 
 The quickest way to get running is with [uvx](https://docs.astral.sh/uv/guides/tools/) (the tool runner from uv). No cloning or virtual environments needed.

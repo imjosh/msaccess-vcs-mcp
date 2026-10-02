@@ -102,6 +102,11 @@ def _cleanup_session() -> None:
             )
             return
         config = get_config()
+        from .compatibility import inspect_installed_addin
+        admission = inspect_installed_addin(config.get("ACCESS_VCS_ADDIN_PATH"))
+        if not admission["success"]:
+            print(f"Session cleanup skipped: {admission['error']}", file=sys.stderr)
+            return
         with AccessConnection(db_path) as conn:
             app, db = conn.connect()
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))

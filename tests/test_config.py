@@ -63,12 +63,12 @@ class TestInstalledAddInPath:
 
         assert get_default_addin_path().endswith("Version Control.accda")
 
-    def test_result_is_cached(self, monkeypatch):
+    def test_install_location_changes_without_reconnection(self, monkeypatch):
         self._settings(monkeypatch, folder=r"D:\Tools\VCS")
         first = get_default_addin_path()
 
         self._settings(monkeypatch, folder=r"E:\Elsewhere")
-        assert get_default_addin_path() == first
+        assert get_default_addin_path() != first
 
         config_module.reset_addin_path_cache()
         assert get_default_addin_path() != first

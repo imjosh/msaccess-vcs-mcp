@@ -9,6 +9,21 @@ import pytest
 from msaccess_vcs_mcp import exempt_workers
 
 
+@pytest.fixture(autouse=True)
+def _mock_existing_unit_installation(request, monkeypatch):
+    """Existing unit seams use fake Access/add-ins, never the user's installation.
+
+    X16 boundary tests opt out and exercise real admission with controlled DAO
+    replies. Integration tests always inspect the real installation.
+    """
+    if request.node.get_closest_marker("integration") or request.node.get_closest_marker("version_gate"):
+        return
+    from msaccess_vcs_mcp import compatibility, tools
+    def accepted():
+        return {**compatibility.compatibility_result("5.2.0"), "addin_path": "mock-install.accda"}
+    monkeypatch.setattr(tools, "inspect_installed_addin", accepted)
+
+
 @pytest.fixture(params=[
     "raw-busy", "raw-self-dispatch", "wrapped-busy", "wrapped-self-dispatch",
     "busy-with-decisions", "decision-required",

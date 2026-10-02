@@ -405,18 +405,17 @@ def get_default_addin_path() -> str:
     ``.accde`` and deletes the ``.accda``, which is why the extension cannot be
     assumed.
 
-    Cached: the install location does not change while the server runs, and every
-    tool call consults it.
+    Re-read installer settings on every call: an installation can be replaced or
+    moved while the server runs, and an old path must not retain admission.
     """
     global _cached_addin_path
 
-    if _cached_addin_path is None:
-        folder = _read_install_setting("Install Folder")
-        if not folder:
-            folder = os.path.join(os.environ.get("APPDATA", ""), _INSTALL_FOLDER_NAME)
-        compiled = _read_install_setting("Compile accde") not in (None, "", "0")
-        extension = ".accde" if compiled else ".accda"
-        _cached_addin_path = os.path.join(folder, _ADDIN_BASENAME + extension)
+    folder = _read_install_setting("Install Folder")
+    if not folder:
+        folder = os.path.join(os.environ.get("APPDATA", ""), _INSTALL_FOLDER_NAME)
+    compiled = _read_install_setting("Compile accde") not in (None, "", "0")
+    extension = ".accde" if compiled else ".accda"
+    _cached_addin_path = os.path.join(folder, _ADDIN_BASENAME + extension)
     return _cached_addin_path
 
 

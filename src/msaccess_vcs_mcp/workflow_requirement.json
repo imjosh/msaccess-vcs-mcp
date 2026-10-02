@@ -1,0 +1,7 @@
+{
+  "component": "mcp_server",
+  "minimum": "0.2.0",
+  "maximum": "0.3.0",
+  "prereleases": ["0.2.0-dev.16"],
+  "release_status": "assigned_unpublished"
+}

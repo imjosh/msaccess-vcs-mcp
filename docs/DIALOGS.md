@@ -2,6 +2,10 @@
 
 > Release compatibility policy (owner decision, 2026-10-02): every add-in release changes its version. The supported release version defines the API contract; capability probing is not required to establish release compatibility. The spec assumes the server checks the installed add-in version and refuses unsupported releases before starting operations. The minimum supported release version must be stated when the release is assigned; do not infer it from a development rebuild. Per-call mode and policy acknowledgments still confirm the requested state and remain required. This policy supersedes earlier statements requiring capability checks instead of a version gate. It is a specification change, not evidence that version enforcement is already implemented.
 
+X16 implements the version gate before add-in-dependent tool bodies. See
+[release compatibility](RELEASE_COMPATIBILITY.md) for assigned unpublished ranges,
+development identities, stable errors and recovery exceptions.
+
 Agent calls default to a scoped noninteractive mode. Interactive ribbon and
 Immediate Window use is unchanged unless a decision policy is passed.
 
@@ -109,7 +113,8 @@ an `error`:
 | `policy_unconfirmed` | MCP could not confirm `SetOperationPolicy` (Empty, malformed, no echoed `policy`, or a different policy). Nothing starts and no clear is sent; requires an add-in whose `SetOperationPolicy` returns `{success: true, policy}`. |
 | `interaction_mode_unconfirmed` | MCP could not confirm interactive mode, including VBA Empty from an older add-in. Nothing starts; unsupported responses require an A24 or later build. |
 | `interactive_tests_unsupported` | `vcs_run_tests(noninteractive=False)`. An automation test run is always headless. Refused by MCP before any add-in call; nothing started. |
-| `build_output_unsupported` | `vcs_rebuild_database` with an `output_path`, against an add-in whose `APICapabilities` does not list `build_as_paths` (missing, returned Empty or malformed JSON, or left the name out). Refused by MCP before any build starts; upgrade the add-in. |
+| `version_incompatible` | The installed add-in is outside the server range or is an unadmitted prerelease. Carries installed version, required range, component and recovery action. |
+| `version_unconfirmed` | Installed version is unknown, invalid or unreadable. No dependent work starts; metadata and Win32 recovery remain available. |
 | `invalid_build_path` | `vcs_rebuild_database` was given a relative `output_path` (refused by MCP), or the add-in rejected the pair: a source folder without `vcs-options.json`, an output with no folder or extension, a missing output folder, or the add-in itself. Nothing started. |
 | `export_folder_mismatch` | `vcs_export_database` was given an `output_dir` that is not the add-in's configured export folder. Refused by MCP before anything is exported; the result carries `configured_export_folder` and `requested_output_dir`, and `export_path` is `None`. |
 | `export_folder_unavailable` | `vcs_export_database` could not read the add-in's export folder (`GetExportFolder` raised, was refused, or returned nothing or JSON). Nothing is exported. |
@@ -158,13 +163,10 @@ is attributable, `log_path` is null and `log_excerpt` is absent.
 
 `vcs_rebuild_database` with an `output_path` calls `BuildAs(source, output)`
 on every path (async, inline and sync fallback), so the add-in opens neither
-the source-folder nor the save-as picker. MCP first runs the add-in's
-`APICapabilities` procedure by name and needs `build_as_paths` in its reply;
-anything else is `build_output_unsupported` and nothing starts, because an
-older add-in's `BuildAs` ignores the arguments and opens the pickers. The probe
-never goes through `API`: on an add-in without the method, `API` stops in a
-modal "Run-time error '438'" inside Access, while `Application.Run` of a
-missing procedure fails at once with error 2517 and leaves no dialog. `output_path` in the result is the path the completion callback
+the source-folder nor the save-as picker. The server version gate establishes
+this release contract before target creation or callbacks; it no longer requires
+an `APICapabilities` probe. Per-call acknowledgments remain mandatory.
+`output_path` in the result is the path the completion callback
 reports, never the request. It is None on every other result; an unconfirmed
 start keeps the request as `requested_output_path`. The call is hosted in a
 blank temporary database (Access exits if the add-in runs with no database
