@@ -114,8 +114,8 @@ def start_only_result(raw: Any, operation: str, log_type: str) -> dict[str, Any]
 
 
 # APICapabilities names this when BuildAs(source, output) builds with no picker and
-# its completion callback reports output_path. A rebuild does not change the
-# add-in's version, so the version cannot say whether the build has it.
+# its completion callback reports output_path. This is the existing feature
+# probe; the release contract now permits compatibility checks by release version.
 # APICapabilities is a module procedure called by name, not an API method: Access
 # refuses a missing procedure at once (error 2517), while API on a missing method
 # stops in a modal "Run-time error '438'" inside Access.

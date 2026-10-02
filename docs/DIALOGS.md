@@ -1,5 +1,7 @@
 # Dialogs and noninteractive Access automation
 
+> Release compatibility policy (owner decision, 2026-10-02): every add-in release changes its version. The supported release version defines the API contract; capability probing is not required to establish release compatibility. The spec assumes the server checks the installed add-in version and refuses unsupported releases before starting operations. The minimum supported release version must be stated when the release is assigned; do not infer it from a development rebuild. Per-call mode and policy acknowledgments still confirm the requested state and remain required. This policy supersedes earlier statements requiring capability checks instead of a version gate. It is a specification change, not evidence that version enforcement is already implemented.
+
 Agent calls default to a scoped noninteractive mode. Interactive ribbon and
 Immediate Window use is unchanged unless a decision policy is passed.
 
@@ -61,8 +63,8 @@ Explicit interactive requests require an **A24 build or later**. Earlier builds
 return VBA `Empty` (Python `None`), which cannot confirm acceptance. Empty,
 missing, malformed, or otherwise unconfirmed responses return
 `success: false, error_pattern: interaction_mode_unconfirmed` without starting
-work. Upgrade the add-in for unsupported responses. This is capability detection,
-not a numeric version gate: rebuilding does not increment the add-in version.
+work. Upgrade the add-in for unsupported responses. These checks confirm the
+requested interaction state; they do not replace the release-version contract.
 The add-in documents the same contract in
 [`docs/noninteractive-dialogs.md`](../../msaccess-vcs-addin/docs/noninteractive-dialogs.md).
 
@@ -82,7 +84,7 @@ MCP dispatches a noninteractive operation only after `SetOperationPolicy`
 returns `{success: true, policy: <the requested policy>}`. An add-in refusal is
 the tool result unchanged; Empty, malformed JSON, a missing or different
 `policy` is `error_pattern: policy_unconfirmed`. Nothing starts and no clear is
-sent. This is capability detection, not a numeric version gate. A policy method
+sent. This acknowledgment confirms the requested policy. A policy method
 that throws is a separate case and not handled.
 
 If the add-in refuses the interaction-mode request (for example while an

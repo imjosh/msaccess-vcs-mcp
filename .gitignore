@@ -85,3 +85,5 @@ logs/
 
 # Cursor project-specific
 .cursor/
+
+.pytest**/
