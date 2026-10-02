@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from msaccess_vcs_mcp import tools
-from msaccess_vcs_mcp.access_gate import reset_access_gate
+from msaccess_vcs_mcp.access_gate import get_access_gate, reset_access_gate
 from msaccess_vcs_mcp.dialog_recovery import reset_interruptions
+from msaccess_vcs_mcp.operation_manager import OperationManager
 
 from .test_dialog_recovery import FakeBackend, _button, _win
 
@@ -75,6 +78,7 @@ def public_tools(monkeypatch, tmp_path):
     monkeypatch.setattr(tools, "load_config", lambda: {})
     monkeypatch.setattr(tools, "get_config", lambda: {})
     monkeypatch.setenv("ACCESS_VCS_ENABLE_LOGGING", "false")
+    monkeypatch.setenv("ACCESS_VCS_DISABLE_DIAGNOSTIC_LOG", "true")
     monkeypatch.setenv("ACCESS_VCS_BUSY_WAIT_SEC", "0.05")
     connection = MagicMock()
     connection.return_value.__enter__.return_value.connect.return_value = (object(), object())
@@ -310,5 +314,265 @@ def test_exempt_tools_answer_while_gated_async_tool_blocks_in_com(
         finally:
             blocker.release.set()
             await asyncio.gather(gated, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_public_async_worker_cleans_up_its_original_operation(
+    public_tools, monkeypatch,
+):
+    """Forward cancellation at the next await, without retiring identity in COM."""
+    db, addin = public_tools
+    work = Blocker()
+    cleanup = Blocker()
+    manager = OperationManager()
+    monkeypatch.setattr(tools, "_get_operation_manager", lambda: manager)
+    monkeypatch.setattr(tools, "get_callback_url", lambda: "http://fake-callback")
+    addin.call_sync.return_value = '{"success":true}'
+    operation_ids = []
+
+    def launch(callback_info, *_args):
+        operation_ids.append(json.loads(callback_info)["operation_id"])
+        work.wait()
+        return {"async": True}
+
+    addin.call_async.side_effect = launch
+    connection = MagicMock()
+    connection.return_value.__enter__.return_value.connect.return_value = (object(), object())
+    connection.return_value.__exit__.side_effect = lambda *_args: cleanup.wait()
+    monkeypatch.setattr(tools, "AccessConnection", connection)
+    backend = FakeBackend([
+        _win(hwnd=1, title="Northwind : Database", class_name="OMain"),
+        _win(hwnd=2, title="Microsoft Visual Basic", texts=("Run-time error '13':",),
+             buttons=(_button(21, "End"), _button(22, "Debug"))),
+    ])
+    _install_backend(monkeypatch, backend)
+    identity = {"pid": 10, "create_time": 1000, "timeout_seconds": 1.0}
+    gate = get_access_gate()
+    gate._slot = slot = CountedSlot()
+    runner_cleanup = threading.Event()
+    release_runner = threading.Event()
+    original_wait = manager.wait_for_completion
+
+    async def child():
+        try:
+            await asyncio.sleep(5)
+        finally:
+            runner_cleanup.set()
+            while not release_runner.is_set():
+                await asyncio.sleep(0.005)
+
+    async def wait_for_completion(*args, **kwargs):
+        asyncio.create_task(child())
+        return await original_wait(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "wait_for_completion", wait_for_completion)
+
+    async def scenario():
+        task = asyncio.create_task(tools.vcs_run_tests(db))
+        try:
+            await _entered(work)
+            owner = gate.current_in_flight()
+            operation_id, = operation_ids
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert gate.current_in_flight() is owner
+            assert manager.pending_count() == 1
+            requested = await asyncio.wait_for(tools.vcs_cancel_operation(operation_id), DEADLINE)
+            assert requested["success"] is True
+            assert requested["operation_id"] == operation_id
+            assert requested["cancel_requested"] is True
+            assert (await tools.vcs_cancel_operation("refused-caller"))["success"] is False
+            # An interruption arriving AFTER caller cancellation still names the worker.
+            dismissed = await asyncio.wait_for(
+                tools.vcs_dismiss_dialog(db, "hwnd:2", button="End", **identity), DEADLINE,
+            )
+            assert dismissed["last_interruption"]["busy_with"]["tool"] == "vcs_run_tests"
+            work.release.set()
+            await _entered(cleanup)
+            assert manager.pending_count() == 0  # Cancellation reached the apartment's await.
+            assert gate.current_in_flight() is owner
+            assert slot.releases == 0
+            busy = await asyncio.wait_for(tools.vcs_get_option(db, "ShowDebug"), DEADLINE)
+            assert busy["error_pattern"] == "server_busy"
+            cleanup.release.set()
+            async def until(event):
+                while not event.is_set():
+                    await asyncio.sleep(0.005)
+            await asyncio.wait_for(until(runner_cleanup), DEADLINE)
+            # Runner is cleaning up a child after the tool body has unwound.
+            # A new dialog action must still belong to the original gate owner.
+            assert gate.current_in_flight() is owner
+            assert slot.releases == 0
+            backend.windows.append(_win(
+                hwnd=2, title="Microsoft Visual Basic", texts=("Run-time error '13':",),
+                buttons=(_button(21, "End"), _button(22, "Debug")),
+            ))
+            dismissed = await asyncio.wait_for(
+                tools.vcs_dismiss_dialog(db, "hwnd:2", button="End", **identity), DEADLINE,
+            )
+            assert dismissed["last_interruption"]["busy_with"]["tool"] == "vcs_run_tests"
+            release_runner.set()
+            async def released():
+                while gate.current_in_flight() is not None:
+                    await asyncio.sleep(0.005)
+            await asyncio.wait_for(released(), DEADLINE)
+            assert slot.releases == 1
+            report = await tools.vcs_automation_status(db, **identity)
+            assert report["ready"] is True
+            assert report["last_interruption"] is None
+            assert (await tools.vcs_cancel_operation(operation_id))["success"] is False
+        finally:
+            work.release.set()
+            cleanup.release.set()
+            release_runner.set()
+            await asyncio.gather(task, return_exceptions=True)
+            gate._executor.shutdown(wait=True)
+            assert not work.expired
+            assert not cleanup.expired
+
+    asyncio.run(scenario())
+
+
+class CountedSlot:
+    """Observe releases while retaining the real nonblocking lock behavior."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.releases = 0
+
+    def acquire(self, *, blocking):
+        return self.lock.acquire(blocking=blocking)
+
+    def release(self):
+        self.releases += 1
+        self.lock.release()
+
+
+@pytest.mark.parametrize("tool", [tools.vcs_get_option, tools.vcs_run_tests], ids=["sync", "async"])
+@pytest.mark.parametrize("stop", ["cancel", "timeout"])
+@pytest.mark.parametrize("fail", [False, True], ids=["returns", "fails"])
+def test_cancelled_public_caller_retains_worker_gate_and_interruptions(
+    public_tools, monkeypatch, tool, stop, fail,
+):
+    """Caller completion is independent of blocked COM and connection cleanup."""
+    db, addin = public_tools
+    work = Blocker()
+    cleanup = Blocker()
+    gate = get_access_gate()
+    gate._slot = slot = CountedSlot()
+    backend = FakeBackend([
+        _win(hwnd=1, title="Northwind : Database", class_name="OMain"),
+        _win(hwnd=2, title="Microsoft Visual Basic", texts=("Run-time error '13':",),
+             buttons=(_button(21, "End"), _button(22, "Debug"))),
+    ])
+    _install_backend(monkeypatch, backend)
+    logs = []
+    monkeypatch.setattr("msaccess_vcs_mcp.usage_logging._initialize_logging", lambda: True)
+    monkeypatch.setattr("msaccess_vcs_mcp.usage_logging.log_tool_call", lambda **entry: logs.append(entry))
+    monkeypatch.setattr(tools, "get_callback_url", lambda: None)
+    monkeypatch.setattr(tools, "_get_operation_manager", lambda: None)
+
+    def connect():
+        work.wait()
+        if fail:
+            raise RuntimeError("fake COM failure")
+        return object(), object()
+
+    connection = MagicMock()
+    conn = connection.return_value.__enter__.return_value
+    conn.connect.side_effect = connect
+    connection.return_value.__exit__.side_effect = lambda *_args: cleanup.wait()
+    monkeypatch.setattr(tools, "AccessConnection", connection)
+    addin.call_sync.side_effect = lambda name, *_args: (
+        '{"success":true}' if name == "SetOption" else
+        '{"allPassed":true,"summary":{"passed":1}}' if name == "RunFilteredTests" else
+        "fake option value"
+    )
+    identity = {"pid": 10, "create_time": 1000, "timeout_seconds": 1.0}
+
+    async def status():
+        return await asyncio.wait_for(tools.vcs_automation_status(db, **identity), DEADLINE)
+
+    async def assert_held(owner):
+        started = time.monotonic()
+        busy = await asyncio.wait_for(tools.vcs_get_option(db, "ShowDebug"), 0.5)
+        assert busy["error_pattern"] == "server_busy"
+        assert busy["busy_with"]["tool"] == tool.__name__
+        assert busy["busy_with"]["database"] == db
+        assert 0.04 <= time.monotonic() - started < 0.5
+        assert gate.current_in_flight() is owner
+        assert slot.releases == 0
+        report = await status()
+        assert report["gate_busy"] is True
+        assert report["ready"] is False
+        assert report["operation"]["tool"] == tool.__name__
+        assert report["last_interruption"]["busy_with"]["tool"] == tool.__name__
+
+    async def scenario():
+        call = tool(db, "ShowDebug") if tool is tools.vcs_get_option else tool(db)
+        task = asyncio.create_task(call)
+        try:
+            await _entered(work)
+            owner = gate.current_in_flight()
+            assert owner is not None
+            # Reserve through the public dialog wrapper against the original call.
+            dismissed = await asyncio.wait_for(
+                tools.vcs_dismiss_dialog(db, "hwnd:2", button="End", **identity), DEADLINE,
+            )
+            assert dismissed["execution_interrupted"] is True
+            if stop == "cancel":
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(task, 0.01)
+            await assert_held(owner)
+            listed = await asyncio.wait_for(tools.vcs_list_dialogs(db, **identity), DEADLINE)
+            assert listed["success"] is True
+            recovered = await asyncio.wait_for(
+                tools.vcs_recover_dialogs(db, policy="report", **identity), DEADLINE,
+            )
+            assert recovered["success"] is True
+            cancel = await asyncio.wait_for(tools.vcs_cancel_operation("not-running"), DEADLINE)
+            assert cancel["success"] is False
+            # A second cancellation of the finished caller cannot release the worker.
+            task.cancel()
+            work.release.set()
+            await _entered(cleanup)
+            await assert_held(owner)
+            cleanup.release.set()
+            async def released():
+                while gate.current_in_flight() is not None:
+                    await asyncio.sleep(0.005)
+            await asyncio.wait_for(released(), DEADLINE)
+            assert slot.releases == 1
+            report = await status()
+            assert report["gate_busy"] is False
+            assert report["ready"] is True
+            assert report["last_interruption"] is None
+            original_logs = [entry for entry in logs if entry["tool_name"] == tool.__name__]
+            assert len(original_logs) == 1
+            if tool is tools.vcs_get_option:
+                assert original_logs[0]["result"]["execution_interrupted"] is True
+            # Use a fresh connection so later work has no fake blockers.
+            later_connection = MagicMock()
+            later_connection.return_value.__enter__.return_value.connect.return_value = (object(), object())
+            monkeypatch.setattr(tools, "AccessConnection", later_connection)
+            later = await asyncio.wait_for(tools.vcs_get_option(db, "ShowDebug"), DEADLINE)
+            assert later["success"] is True, later
+            assert "execution_interrupted" not in later
+            assert slot.releases == 2
+            assert gate.current_in_flight() is None
+        finally:
+            work.release.set()
+            cleanup.release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            # Drain the actual apartment work before restoring monkeypatches.
+            gate._executor.shutdown(wait=True)
+            assert not work.expired
+            assert not cleanup.expired
 
     asyncio.run(scenario())

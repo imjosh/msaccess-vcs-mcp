@@ -1118,26 +1118,27 @@ def vcs_tool(name: str):
                 _then(func, lambda result: finish_gated_call(claimed.get("call_id"), result))
             )
 
+            def cleanup() -> None:
+                # Uses up the records of a call that raised, and any reserved
+                # after the handler returned: those did not interrupt it. A
+                # busy answer never runs this body. Cleanup belongs to the
+                # worker, even when its caller has already stopped waiting.
+                finish_gated_call(claimed.get("call_id"), None)
+
             def body(*a, **kw):
-                # One closure for both kinds: for an async tool this returns
-                # the coroutine, which the gate awaits (``is_async_body``).
+                # For an async tool the gate awaits the returned coroutine.
                 _claim_call()
                 return finished(*a, **kw)
 
-            try:
-                return await gate.run_exclusive(
-                    name,
-                    str(database) if database is not None else None,
-                    body,
-                    is_async_body,
-                    *args,
-                    **kwargs,
-                )
-            finally:
-                # Uses up the records of a call that raised, and any reserved
-                # after the handler returned: those did not interrupt it. A
-                # busy answer never ran the body, so nothing was claimed.
-                finish_gated_call(claimed.get("call_id"), None)
+            return await gate.run_exclusive(
+                name,
+                str(database) if database is not None else None,
+                body,
+                is_async_body,
+                *args,
+                on_worker_finished=cleanup,
+                **kwargs,
+            )
 
         return mcp.tool()(with_refresh)
     return decorator

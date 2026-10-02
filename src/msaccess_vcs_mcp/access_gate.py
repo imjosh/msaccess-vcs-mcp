@@ -13,6 +13,9 @@ own. A blocking COM step inside one (connect, add-in probe, a synchronous API
 call) then holds up only that thread, never the server loop that the dialog,
 status and cancel tools answer on, and every COM object the body creates is
 used and released on the thread that created it.
+
+Caller cancellation ends the wait, not ownership. The worker keeps its slot
+and call identity until the body and apartment-loop cleanup actually finish.
 """
 
 from __future__ import annotations
@@ -149,37 +152,30 @@ class AccessGate:
             # for tests that assert COM was initialized.
             self._mark_com_initialized()
 
-    async def _run_on_apartment_loop(self, fn: Callable[..., Any], args: tuple, kwargs: dict) -> Any:
+    def _run_on_apartment_loop(
+        self, fn: Callable[..., Any], args: tuple, kwargs: dict,
+        context: contextvars.Context, body_task: dict[str, Any], task_lock: threading.Lock,
+    ) -> Any:
         """Run an async body to completion in a fresh event loop on the apartment thread.
 
         The body keeps the caller's context variables. Cancelling the caller
         cancels the body at its next await; a blocking step it is inside runs on.
         """
-        context = contextvars.copy_context()
-        body_task: dict[str, Any] = {}
-
         async def body() -> Any:
-            body_task["loop"] = asyncio.get_running_loop()
-            body_task["task"] = asyncio.current_task()
-            if body_task.get("cancelled"):
-                raise asyncio.CancelledError
+            with task_lock:
+                body_task["loop"] = asyncio.get_running_loop()
+                body_task["task"] = asyncio.current_task()
+                if body_task.get("cancelled"):
+                    raise asyncio.CancelledError
             return await fn(*args, **kwargs)
 
-        def run() -> Any:
-            self._note_apartment_used()
-            with asyncio.Runner() as runner:
-                return runner.run(body(), context=context)
+        with asyncio.Runner() as runner:
+            return runner.run(body(), context=context)
 
-        try:
-            return await asyncio.get_running_loop().run_in_executor(self._executor, run)
-        except asyncio.CancelledError:
-            body_task["cancelled"] = True
-            if "task" in body_task:
-                try:
-                    body_task["loop"].call_soon_threadsafe(body_task["task"].cancel)
-                except RuntimeError:
-                    pass  # The body finished and its loop is closed.
-            raise
+    def _release_slot(self) -> None:
+        with self._state_lock:
+            self._in_flight = None
+            self._slot.release()
 
     def current_in_flight(self) -> InFlight | None:
         with self._state_lock:
@@ -207,8 +203,14 @@ class AccessGate:
         is_async: bool,
         /,
         *args: Any,
+        on_worker_finished: Callable[[], None] | None = None,
         **kwargs: Any,
     ) -> Any:
+        """Hold the slot through worker completion, independently of the caller.
+
+        ``on_worker_finished`` runs on the apartment after body/loop cleanup,
+        before releasing ownership. It is skipped if no worker starts.
+        """
         if not await self._acquire_slot(_read_busy_wait_sec()):
             current = self.current_in_flight()
             if current is not None:
@@ -227,20 +229,45 @@ class AccessGate:
                 call_id=next(_call_ids),
             )
 
-        try:
-            if is_async:
-                return await self._run_on_apartment_loop(fn, args, kwargs)
+        context = contextvars.copy_context()
+        body_task: dict[str, Any] = {}
+        task_lock = threading.Lock()
 
-            def _run_sync() -> Any:
+        def run() -> Any:
+            try:
                 self._note_apartment_used()
+                if is_async:
+                    return self._run_on_apartment_loop(fn, args, kwargs, context, body_task, task_lock)
                 return fn(*args, **kwargs)
+            finally:
+                if on_worker_finished is not None:
+                    on_worker_finished()
 
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(self._executor, _run_sync)
-        finally:
-            with self._state_lock:
-                self._in_flight = None
-            self._slot.release()
+        try:
+            worker = self._executor.submit(run)
+        except BaseException:
+            self._release_slot()  # Submission failed; no worker owns the slot.
+            raise
+        # The concurrent future finishes only after the body AND Runner cleanup.
+        # Its callback needs no caller loop, which may already have closed. It
+        # also releases a submitted future cancelled before it starts.
+        worker.add_done_callback(lambda _worker: self._release_slot())
+        pending = asyncio.wrap_future(worker)
+        # A detached worker can fail after the caller leaves. Retrieve its
+        # exception even then so the loop never reports an unobserved future.
+        pending.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        try:
+            return await asyncio.shield(pending)
+        except asyncio.CancelledError:
+            if is_async:
+                with task_lock:
+                    body_task["cancelled"] = True
+                    if "task" in body_task:
+                        try:
+                            body_task["loop"].call_soon_threadsafe(body_task["task"].cancel)
+                        except RuntimeError:
+                            pass  # The body finished and its loop is closed.
+            raise
 
 
 _gate: AccessGate | None = None

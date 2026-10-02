@@ -1580,3 +1580,37 @@ A new `NewCurrentDatabase` host has no ROT file moniker. Rebuild passes its exac
 **Caller audit**: `AccessConnection._create_or_reuse_instance` keeps `ensure_dispatch` because it explicitly supports attachment and determines ownership from process identity. Standalone installation validation and the fallback/no-target version probe use isolated dispatch too. Version validation's successful target-specific `GetObject` attachment remains non-owned and is never quit.
 
 **Validation**: Ownership regression tests failed on the previous implementation. Fault injection covers dispatch, performance setup, visibility, host creation, add-in loading and build dispatch; a failed dispatch never reaches cleanup. An integration test builds a disposable module beside another user-controlled Access database, checks distinct PIDs, output content, and preservation of process creation time, database, UserControl and query. Probe tests check marshaling of the exact supplied host.
+
+## 2026-10-02 — The apartment worker owns the gate after its caller leaves (M47)
+
+**Trigger**: M47 re-verified frozen target `f86571b` at MCP head `c2d2a5b`.
+Cancelling the await on executor work released the slot and cleared the in-flight
+call while a fake COM step was still blocked. A second public request took that
+slot and queued behind the worker instead of meeting the busy deadline.
+
+**Decision**: Shield the submitted concurrent future from caller cancellation.
+Only that future's completion releases the slot and in-flight identity, including
+worker failure or cancellation; failed submission releases it immediately.
+Forward async caller cancellation to the apartment task under a startup lock,
+but retain ownership through blocking work, body cleanup and `asyncio.Runner`
+shutdown. A caller loop that closes is not needed to release the slot. Retrieve
+an abandoned future's exception while its caller loop remains open.
+
+The public wrapper applies interruptions before usage logging as before, then
+consumes any remaining records in an apartment completion hook after Runner
+shutdown. Caller cleanup cannot retire those records. Status and dialog actions
+therefore still identify the original tool/database/call while it is alive, and
+later work cannot inherit its interruption.
+
+**Identity boundary with A33**: M47 owns Python gate admission and `call_id`
+lifetime. A33 independently owns VBA timer admission, callback/operation ID,
+cancellation channel, lease and journal isolation for refused/reentrant callers.
+Keeping the Python gate held neither replaces that work nor confirms VBA has
+stopped when a client cancels.
+
+**Validation**: Public `vcs_get_option` and `vcs_run_tests` regressions cover caller
+cancel/timeout during fake COM, blocking connection cleanup, bounded busy replies,
+responsive exempt tools, original-call interruption accounting and exactly-once
+release. A callback-path public regression also covers an interruption during
+Runner child cleanup. Gate checks cover detached failure after caller-loop closure,
+async Runner cleanup and submission failure. No live Access operations are used.

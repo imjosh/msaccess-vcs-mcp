@@ -456,6 +456,14 @@ always describes the box that was clicked.
   including connecting, loading the add-in and synchronous add-in calls. A
   dialog or status call therefore starts and returns on time while a gated
   call is blocked in any of those steps.
+- Cancelling or timing out the caller does not free the Access gate. The same
+  worker and call identity own it until the body, connection cleanup and
+  apartment-loop shutdown finish. Other gated requests get `server_busy`
+  within `ACCESS_VCS_BUSY_WAIT_SEC`; dialog, status and cancel tools remain
+  callable. Async bodies receive cancellation at their next await, after any
+  blocking COM step returns. Sync bodies continue to completion. Interruption
+  records stay attached to that original call and are consumed before the
+  worker releases its slot, including when no caller is still waiting.
 - Known gap (M43): `vcs_rebuild_database` attaches to an Access instance that
   is already running instead of starting its own. The build then fails ("You
   already have the database open"), and its cleanup closes that instance's

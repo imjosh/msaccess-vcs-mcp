@@ -133,6 +133,101 @@ def test_cancelling_the_caller_cancels_the_async_body():
     asyncio.run(runner())
 
 
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_cancelled_worker_releases_after_caller_loop_closes(is_async):
+    """Ownership and exception handling outlive the loop that submitted work."""
+    gate = AccessGate()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_step():
+        entered.set()
+        assert release.wait(5)
+        raise RuntimeError("detached worker failed")
+
+    async def async_work():
+        blocking_step()
+
+    async def caller():
+        work = async_work if is_async else blocking_step
+        task = asyncio.create_task(gate.run_exclusive("original", None, work, is_async))
+        await asyncio.wait_for(_until(entered), 1.0)
+        owner = gate.current_in_flight()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert gate.current_in_flight() is owner
+        return owner
+
+    try:
+        owner = asyncio.run(caller())  # This loop closes while the worker is blocked.
+        assert gate.current_in_flight() is owner
+    finally:
+        release.set()
+        gate._executor.shutdown(wait=True)
+    assert gate.current_in_flight() is None
+    assert gate._slot.acquire(blocking=False)
+    gate._slot.release()
+
+
+def test_cancelled_async_worker_keeps_slot_through_runner_cleanup():
+    """Runner shutdown must finish a child's async cancellation cleanup first."""
+    gate = AccessGate()
+    entered = threading.Event()
+    cleanup = threading.Event()
+    release = threading.Event()
+
+    async def child():
+        try:
+            entered.set()
+            await asyncio.sleep(5)
+        finally:
+            cleanup.set()
+            await _until(release)
+
+    async def work():
+        asyncio.create_task(child())
+        await asyncio.sleep(5)
+
+    async def scenario():
+        task = asyncio.create_task(gate.run_exclusive("original", None, work, True))
+        try:
+            await asyncio.wait_for(_until(entered), 1.0)
+            owner = gate.current_in_flight()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.wait_for(_until(cleanup), 1.0)
+            assert gate.current_in_flight() is owner
+            with patch("msaccess_vcs_mcp.access_gate._read_busy_wait_sec", return_value=0.05):
+                busy = await asyncio.wait_for(
+                    gate.run_exclusive("later", None, lambda: "later", False), 0.5,
+                )
+            assert busy["error_pattern"] == "server_busy"
+            assert busy["busy_with"]["tool"] == "original"
+            release.set()
+            assert await gate.run_exclusive("later", None, lambda: "later", False) == "later"
+            assert gate.current_in_flight() is None
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            gate._executor.shutdown(wait=True)
+
+    asyncio.run(scenario())
+
+
+def test_submission_failure_releases_slot():
+    gate = AccessGate()
+    try:
+        with patch.object(gate._executor, "submit", side_effect=RuntimeError("cannot submit")):
+            with pytest.raises(RuntimeError, match="cannot submit"):
+                asyncio.run(gate.run_exclusive("original", None, lambda: None, False))
+        assert gate.current_in_flight() is None
+        assert asyncio.run(gate.run_exclusive("later", None, lambda: "later", False)) == "later"
+    finally:
+        gate._executor.shutdown(wait=True)
+
+
 def test_server_loop_context_reports_progress_on_the_server_loop():
     gate = AccessGate()
     reports: list[tuple[object, dict]] = []
