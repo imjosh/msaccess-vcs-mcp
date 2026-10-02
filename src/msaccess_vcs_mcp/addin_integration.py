@@ -664,16 +664,14 @@ class VCSAddinIntegration:
             Dictionary with build results:
             - success: Boolean
             - database_path: Path to database
-            - log_path: Path to Build.log file
+            - log_path: The add-in's explicit operation log, when supplied
             - message: Status message
         """
-        source_path = self._get_export_folder(db_path, source_folder)
-        
         try:
             if decision_policy:
-                raw = self._call_addin_function("MergeBuild", decision_policy)
+                raw = self.call_sync("MergeBuild", decision_policy)
             else:
-                raw = self._call_addin_function("MergeBuild")
+                raw = self.call_sync("MergeBuild")
         except Exception as e:
             return {
                 "success": False,
@@ -699,10 +697,15 @@ class VCSAddinIntegration:
                            "the add-in build may be too old.",
             }
         result = dict(parsed)
+        wrapped = api_refusal_payload(result.get("error"))
+        if wrapped:
+            result.update(wrapped)
         result.setdefault("database_path", db_path)
-        if not result.get("log_path"):
-            log_path = os.path.join(source_path, "Build.log")
-            result["log_path"] = log_path if os.path.exists(log_path) else None
+        log_path = result.get("log_path") or result.get("logPath")
+        if log_path:
+            result["log_path"] = log_path
+        # The public log resolver checks execution and timestamps. A legacy
+        # Build.log here would look explicit and bypass those attribution checks.
         return result
 
     def build_from_source(
