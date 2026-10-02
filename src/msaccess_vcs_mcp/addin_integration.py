@@ -93,11 +93,23 @@ def start_only_result(raw: Any, operation: str, log_type: str) -> dict[str, Any]
     if isinstance(value, dict):
         wrapped = api_refusal_payload(value.get("error"))
         if wrapped:
-            return {**value, **wrapped}
-        if value.get("success") is False or is_decision_required(value):
-            return normalize_terminal_result(
+            result = {**value, **wrapped}
+        elif value.get("success") is False or is_decision_required(value):
+            result = normalize_terminal_result(
                 {**value, "success": False}, f"The {operation} failed"
             )
+            if "started" in value:
+                result["started"] = value["started"]
+        else:
+            result = unconfirmed_start_result(operation, log_type)
+        # Log metadata is independent of the verdict. A start-only return can
+        # identify its own log even when its completion remains unconfirmed.
+        log_path = value.get("log_path") or value.get("logPath")
+        if log_path:
+            result["log_path"] = log_path
+            if "logPath" in value:
+                result["logPath"] = log_path
+        return result
     return unconfirmed_start_result(operation, log_type)
 
 
@@ -615,11 +627,11 @@ class VCSAddinIntegration:
               normally; ``error`` then says to read the log
             - error / message: The failure, for a refusal or a COM exception
             - export_path: Path the export was asked to write to
-            - log_path: Path to Export.log, when it exists
+            - log_path: The add-in's explicit operation log, when supplied
         """
         export_path = self._get_export_folder(db_path, source_folder)
         command = "FullExport" if full_export else "Export"
-        result = self._start_only(command, "export", "Export", export_path, "Export.log")
+        result = self._start_only(command, "export", "Export")
         result["export_path"] = export_path
         return result
     
@@ -638,7 +650,7 @@ class VCSAddinIntegration:
             Dictionary with the start result, as for ``export_source``
         """
         export_path = self._get_export_folder(db_path, source_folder)
-        result = self._start_only("ExportVBA", "VBA export", "Export", export_path, "Export.log")
+        result = self._start_only("ExportVBA", "VBA export", "Export")
         result["export_path"] = export_path
         return result
     
@@ -735,7 +747,7 @@ class VCSAddinIntegration:
             - output_path: None. Only a completion callback reports where a
               build wrote; ``requested_output_path`` keeps the request on an
               unconfirmed start
-            - log_path: Path to Build.log, when it exists
+            - log_path: The add-in's explicit operation log, when supplied
         """
         if output_path:
             args: tuple[str, ...] = (source_folder, output_path)
@@ -743,7 +755,7 @@ class VCSAddinIntegration:
         else:
             args = (source_folder,)
             command = "Build"
-        result = self._start_only(command, "build", "Build", source_folder, "Build.log", *args)
+        result = self._start_only(command, "build", "Build", *args)
         result["output_path"] = None
         if output_path and result.get("completion_unconfirmed"):
             result["requested_output_path"] = output_path
@@ -792,15 +804,14 @@ class VCSAddinIntegration:
         command: str,
         operation: str,
         log_type: str,
-        folder: str,
-        log_name: str,
         *args: Any,
     ) -> dict[str, Any]:
         """Dispatch a start-only API method and report only what its return proves.
 
-        ``folder`` is where ``log_name`` is looked for.
+        Disk fallback belongs to the public resolver, which checks whether the
+        operation ran, the log family and its timestamp. Synthesizing a legacy
+        path here would bypass those checks as if the add-in supplied it.
         """
-        log_path = os.path.join(folder, log_name)
         try:
             raw = self._call_addin_function(command, *args)
         except Exception as e:
@@ -810,7 +821,7 @@ class VCSAddinIntegration:
                 "error": message, "message": message,
             }
         result = start_only_result(raw, operation, log_type)
-        result["log_path"] = log_path if os.path.exists(log_path) else None
+        result.setdefault("log_path", None)
         result["message"] = result.get("error")
         return result
     

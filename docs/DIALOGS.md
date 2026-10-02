@@ -143,6 +143,17 @@ sync-fallback paths. A final-result sync API in the add-in is deferred (see
 `DECISIONS.md`); until it exists, an agent that needs the outcome without the
 callback server reads the log.
 
+Operation log paths supplied by the add-in (`log_path` or `logPath`) remain
+authoritative, including on refusals and unconfirmed starts. When no explicit
+path is supplied, MCP can attach only the newest matching
+`<source>/logs/<Export|Build|Merge>_*.log` whose modification time is at or
+after the call started, and only with evidence that the operation ran.
+Pre-start refusals and `started: false` never use that fallback. A decision
+result keeps its own execution evidence; an unconfirmed start keeps its
+uncertain verdict even when a current log is found. Root-level legacy
+`Export.log` and `Build.log` are never inferred as operation logs. If no log
+is attributable, `log_path` is null and `log_excerpt` is absent.
+
 `vcs_rebuild_database` with an `output_path` calls `BuildAs(source, output)`
 on every path (async, inline and sync fallback), so the add-in opens neither
 the source-folder nor the save-as picker. MCP first runs the add-in's

@@ -462,7 +462,10 @@ def _attach_log_context(
 
     # Prefer an explicit path from the completion callback or an already-
     # normalized tool result (e.g. sync ImportByType / ExportByType JSON).
-    log_path = (completion or {}).get("log_path") or result.get("log_path") or None
+    log_path = (
+        (completion or {}).get("log_path") or (completion or {}).get("logPath")
+        or result.get("log_path") or result.get("logPath") or None
+    )
     pre_start_patterns = {
         "invalid_decision_policy", "operation_already_running", "merge_not_available",
         "interaction_mode_unconfirmed", "policy_unconfirmed", "api_self_dispatch",
