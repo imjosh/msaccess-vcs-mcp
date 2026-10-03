@@ -125,12 +125,15 @@ server. Never disable the gate or patch a loaded add-in. Source rebuild keeps
 the prerelease; the release owner sets a numeric stable identity before legacy
 Deploy. Merge add-in first and coordinate server shipping; publication is separate.
 
-Evidence and unfinished criteria: [X17 report](../../verification/X17/README.md).
+Evidence and criterion mapping: [X17 report](../../verification/X17/README.md).
 Live scope is Windows 64-bit Access 16/DAO.DBEngine.120 and Python 3.12 in the
 project venv. Manual/ribbon/direct-VCS routes remain unchanged following the
 developer's explicit scope decision. They cannot universally distinguish human
-VBA from arbitrary external VBA. [Resumed verification](../../verification/X17/RESUME.md)
-records bootstrap and owner qualification, same-PID native reset, and the
-remaining native unload/replacement and combined-test-order limitations.
-X17 remains in progress. M52, full VERIFY-1/VERIFY-2 acceptance, A36, X13, X14,
+VBA from arbitrary external VBA. [Final verification](../../verification/X17/CONTINUE.md)
+records bootstrap and owner qualification, native reset, combined-test restoration,
+and callback-free disconnected build/compile/install. On 2026-10-03 the developer
+accepted fail-closed loaded-file locking plus native reset/restart and controlled
+replacement evidence. Native reference removal is not claimed as an unload/reload,
+and Windows refused loaded replacement. X17 is complete under that disposition.
+M52, full VERIFY-1/VERIFY-2 acceptance, A36, X13, X14,
 other environments/desktop packaging and publication remain separate assignments.
