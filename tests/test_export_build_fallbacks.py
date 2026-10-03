@@ -66,6 +66,10 @@ class FakeAccess:
         self.folder_queries = 0
 
     def run(self, name, *args):
+        if name.endswith(".APIExecuteAsync"):
+            name, args = name[:-15] + "APIAsync", args[1:]
+        elif name.endswith(".APIExecute"):
+            name, args = name[:-10] + "API", args[1:]
         entry = name.rsplit(".", 1)[1]
         if entry == "APICapabilities":
             self.probes += 1

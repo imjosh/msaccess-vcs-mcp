@@ -105,9 +105,10 @@ class TestVCSAddinIntegration:
         assert result is True
         assert addin._addin_loaded is True
         assert addin._app is mock_app
-        mock_app.Run.assert_called_once()
+        from msaccess_vcs_mcp.addin_integration import ensure_session
+        ensure_session.assert_called_once()
     
-    def test_load_addin_com_error(self, tmp_path):
+    def test_load_addin_com_error(self, tmp_path, monkeypatch):
         """Test add-in loading with COM error."""
         # Create temporary add-in file
         addin_file = tmp_path / "test_addin.accda"
@@ -117,6 +118,7 @@ class TestVCSAddinIntegration:
         mock_app = Mock()
         mock_app.Run = Mock(side_effect=Exception("COM error"))
         
+        monkeypatch.setattr("msaccess_vcs_mcp.addin_integration.ensure_session", Mock(side_effect=Exception("COM error")))
         with pytest.raises(RuntimeError, match="Failed to load VCS add-in"):
             addin.load_addin(mock_app)
     
@@ -143,7 +145,8 @@ class TestVCSAddinIntegration:
         result = addin._call_addin_function("TestFunction", "arg1", "arg2")
         
         assert result == "success"
-        mock_app.Run.assert_called_once()
+        from msaccess_vcs_mcp.addin_integration import ensure_session
+        ensure_session.assert_called_once()
     
     def test_call_addin_function_error(self, tmp_path):
         """Test function call with error."""
@@ -238,7 +241,7 @@ class TestVCSAddinIntegration:
         
         assert result["success"] is False
         assert result["completion_unconfirmed"] is True
-        assert mock_app.Run.call_args.args[1] == "ExportVBA"
+        assert mock_app.Run.call_args.args[2] == "ExportVBA"
     
     def test_merge_build(self, tmp_path):
         """Test merge build operation."""
@@ -307,7 +310,7 @@ class TestVCSAddinIntegration:
         
         assert result["success"] is False
         assert result["completion_unconfirmed"] is True
-        assert mock_app.Run.call_args.args[1:] == ("Build", source_folder)
+        assert mock_app.Run.call_args.args[1:] == ("{}", "Build", source_folder)
     
     def test_parse_log_file_exists(self, tmp_path):
         """Test parsing existing log file."""
@@ -361,6 +364,7 @@ class TestLoadAddinProbeTimeout:
 
         # Force a tight timeout so the test runs quickly.
         monkeypatch.setenv("ACCESS_VCS_PROBE_TIMEOUT_SEC", "0.1")
+        monkeypatch.setattr("msaccess_vcs_mcp.addin_integration.ensure_session", lambda *args: time.sleep(2))
 
         with pytest.raises(TimeoutError, match="VCS add-in probe timed out"):
             addin.load_addin(mock_app, db_path=None)
@@ -431,7 +435,8 @@ class TestLoadAddinProbeTimeout:
         addin.load_addin(mock_app, db_path=None)
 
         # Probe ran exactly once -- the second call hit the early return.
-        mock_app.Run.assert_called_once()
+        from msaccess_vcs_mcp.addin_integration import ensure_session
+        ensure_session.assert_called_once()
 
     def test_load_addin_invalid_timeout_falls_back_to_default(
         self, tmp_path, monkeypatch
@@ -474,6 +479,7 @@ def test_probe_marshals_exact_host_into_worker():
     assert marshal.call_args.args[1] is app._oleobj_
     assert unmarshal.call_args.args[0] is stream
     dispatch.assert_called_once_with(interface)
-    worker_app.Run.assert_called_once()
+    from msaccess_vcs_mcp.addin_integration import ensure_session
+    assert ensure_session.call_args.args[0] is worker_app
     app.Run.assert_not_called()
     find.assert_not_called()

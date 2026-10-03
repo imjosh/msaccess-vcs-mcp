@@ -238,7 +238,7 @@ class AccessGate:
                 self._note_apartment_used()
                 if is_async:
                     return self._run_on_apartment_loop(fn, args, kwargs, context, body_task, task_lock)
-                return fn(*args, **kwargs)
+                return context.run(fn, *args, **kwargs)
             finally:
                 if on_worker_finished is not None:
                     on_worker_finished()

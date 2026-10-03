@@ -30,7 +30,7 @@ def test_version_probe_keeps_recovery_responsive_without_touching_access(
             entered.set()
             assert release.wait(6), "version probe blocked the server loop"
             stages.append(("returned", threading.get_ident()))
-        return {**compatibility.compatibility_result("5.2.0"), "addin_path": "mock-install.accda"}
+        return {**compatibility.compatibility_result("6.0.0"), "addin_path": "mock-install.accda"}
     monkeypatch.setattr(tools, "inspect_installed_addin", inspect)
     backend = FakeBackend([
         _win(hwnd=1, title="Northwind : Database", class_name="OMain"),
@@ -51,7 +51,7 @@ def test_version_probe_keeps_recovery_responsive_without_touching_access(
             if completion == "timeout":
                 result = await task
                 assert result["error_pattern"] == "tool_timeout"
-                assert result["mcp_version"] == "0.2.0-dev.16"
+                assert result["mcp_version"] == "0.3.0-dev.17"
                 assert result["supported_addin_range"] == compatibility.ADDIN_REQUIREMENT.text
             else:
                 assert not task.done()
@@ -62,7 +62,7 @@ def test_version_probe_keeps_recovery_responsive_without_touching_access(
         finally:
             release.set()
             if completion == "completed":
-                assert (await task)["vcs_version"] == "5.2.0"
+                assert (await task)["vcs_version"] == "6.0.0"
             assert await asyncio.to_thread(exempt_workers.wait_idle, 2)
         assert [stage for stage, _ in stages] == ["entered", "returned"]
         assert len({thread for _, thread in stages}) == 1

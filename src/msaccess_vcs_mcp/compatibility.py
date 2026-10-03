@@ -7,6 +7,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from functools import total_ordering
 from importlib.resources import files
@@ -119,7 +121,9 @@ class Requirement:
         return "below_minimum" if value < Version.parse(self.minimum) else None
 
 
-ADDIN_REQUIREMENT = Requirement("5.2.0", "6.0.0", ("5.2.0-dev.16",))
+ADDIN_REQUIREMENT = Requirement("6.0.0", "7.0.0", ("6.0.0-dev.17",))
+_discovery_cache = OrderedDict()
+_discovery_lock = threading.RLock()
 
 
 def compatibility_result(
@@ -160,9 +164,12 @@ def compatibility_result(
 
 
 def server_metadata() -> dict[str, Any]:
+    from .compatibility_session import PROTOCOL, SERVER_INSTANCE
     return {
         "mcp_version": __version__, "supported_addin_range": ADDIN_REQUIREMENT.text,
         "addin_requirement_status": REQUIREMENT_STATUS,
+        "command_protocol": PROTOCOL, "server_instance": SERVER_INSTANCE,
+        "metadata_establishes_session": False,
     }
 
 
@@ -227,8 +234,8 @@ def _read_installed_version(path: str) -> Any:
     return reply.get("version")
 
 
-def inspect_installed_addin(path: str | None = None) -> dict[str, Any]:
-    """No admission cache: re-read the library on every call, even at the same path.
+def inspect_installed_addin(path: str | None = None, *, fresh: bool = False) -> dict[str, Any]:
+    """Cache read-only discovery by installation/requirement identity (X17).
 
     A file changed during discovery is refused. This inspection invokes no Access
     application or VBA APIs, so it cannot dispatch into a running operation.
@@ -237,10 +244,21 @@ def inspect_installed_addin(path: str | None = None) -> dict[str, Any]:
     path = path or configured_addin_path()
     try:
         before = _installation_identity(path)
+        key = (before, ADDIN_REQUIREMENT.text)
+        with _discovery_lock:
+            cached = None if fresh else _discovery_cache.get(key)
+            if cached is not None:
+                return {**cached, "addin_path": path}
         installed = _read_installed_version(path)
         if _installation_identity(path) != before:
             raise RuntimeError("Installed library changed during version discovery; retry")
         result = compatibility_result(installed)
+        # Refusals need no sticky cache; recovery can always rediscover.
+        if result["success"]:
+            with _discovery_lock:
+                _discovery_cache[key] = dict(result)
+                while len(_discovery_cache) > 128:
+                    _discovery_cache.popitem(last=False)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         result = compatibility_result(None, detail=str(exc))
     result["addin_path"] = path

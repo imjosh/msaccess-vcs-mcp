@@ -1675,3 +1675,10 @@ responsive exempt tools, original-call interruption accounting and exactly-once
 release. A callback-path public regression also covers an interruption during
 Runner child cleanup. Gate checks cover detached failure after caller-loop closure,
 async Runner cleanup and submission failure. No live Access operations are used.
+
+
+## 2026-10-02 - X17 compatibility session implementation
+
+The developer requires automatic mutual version/protocol acceptance, cached for specific running incarnations, and a session ID validated on every dependent command. Named handshake/execute APIs replace the earlier per-command version draft. COM remains the existing procedure transport; no compatibility ribbon interaction is required. Assigned unpublished pair: MCP 0.3.0-dev.17 / add-in 6.0.0-dev.17, protocol msaccess-vcs.session/1. Per-call policy/mode acknowledgments and operation ownership remain separate.
+
+X17 stays in progress: bootstrap before target execution, unrestricted manual/direct VBA automation routes, native same-PID reset/replacement proof and exhaustive owner/lifecycle qualification remain unfinished. Policy-owner entries are pinned until owner cleanup/disconnect, preventing expiry checks from changing another caller's policy; abandoned-policy disposal needs qualification. See the shared tracker verification/X17/README.md and active compatibility guidance. X16 and historical gate receipts remain unchanged; M52, full gates, X13/X14 and publication are separate.

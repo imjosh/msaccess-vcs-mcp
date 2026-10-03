@@ -54,6 +54,7 @@ from .access_com.connection import (
 from .access_com.dao_helpers import list_query_defs, list_table_defs
 from .access_com.process_qos import list_access_pids, prefer_full_power_if_created
 from .access_gate import EXEMPT_TOOLS, ServerLoopContext, get_access_gate
+from .compatibility_session import AdmissionError, connection_scope, ensure_session
 from .compatibility import (
     ADDIN_DEPENDENT_TOOLS, compatibility_result, inspect_installed_addin,
     server_metadata, workflow_preflight_instructions,
@@ -1123,6 +1124,17 @@ def vcs_tool(name: str):
 
         @functools.wraps(func)
         async def with_refresh(*args, **kwargs):
+            try:
+                connection = _resolve_session(mcp.get_context())
+            except Exception:
+                connection = None
+            with connection_scope(connection):
+                try:
+                    return await with_connection(*args, **kwargs)
+                except AdmissionError as exc:
+                    return exc.result
+
+        async def with_connection(*args, **kwargs):
             # ``mcp.get_context()`` returns a Context bound to the active
             # request even when the tool itself doesn't declare a ctx
             # parameter -- the lowlevel server sets the contextvar before
@@ -1313,6 +1325,8 @@ async def vcs_export_database(
             try:
                 addin.load_addin(app, db_path=str(db_path))
             except Exception as e:
+                if isinstance(e, AdmissionError):
+                    raise
                 return {
                     "success": False,
                     "error": f"Add-in not responsive (may have a dialog open): {e}",
@@ -1416,6 +1430,8 @@ async def vcs_export_database(
                             call_started_at=call_started_at,
                         )
                 except Exception as e:
+                    if isinstance(e, AdmissionError):
+                        raise
                     # Async call failed - fall back to sync, which is a start
                     # with no callback: its outcome is unconfirmed.
                     op_manager.unregister_operation(operation_id)
@@ -1444,6 +1460,8 @@ async def vcs_export_database(
             }, export_path, "Export", completion, call_started_at=call_started_at, executed=True)
     
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {
             "success": False,
             "error": str(e),
@@ -1504,6 +1522,8 @@ async def vcs_list_objects(
                     if component.Type in (1, 2):  # Standard and class modules
                         module_names.append(component.Name)
             except Exception as e:
+                if isinstance(e, AdmissionError):
+                    raise
                 print(f"Warning: Could not list modules: {e}")
             
             return {
@@ -1518,6 +1538,8 @@ async def vcs_list_objects(
             }
     
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {
             "success": False,
             "error": str(e),
@@ -1610,6 +1632,8 @@ async def vcs_diff_database(
         return result
     
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {
             "success": False,
             "error": str(e),
@@ -1736,6 +1760,8 @@ async def vcs_import_objects(
             try:
                 addin.load_addin(app, db_path=str(db_path))
             except Exception as e:
+                if isinstance(e, AdmissionError):
+                    raise
                 return {
                     "success": False,
                     "error": f"Add-in not responsive (may have a dialog open): {e}",
@@ -1812,6 +1838,8 @@ async def vcs_import_objects(
             "imported_count": 0,
         }
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {
             "success": False,
             "error": str(e),
@@ -1989,6 +2017,8 @@ async def vcs_rebuild_database(
                             call_started_at=call_started_at,
                         )
                 except Exception as e:
+                    if isinstance(e, AdmissionError):
+                        raise
                     # Async call failed - fall back to sync, which is a start
                     # with no callback: its outcome is unconfirmed.
                     op_manager.unregister_operation(operation_id)
@@ -2023,6 +2053,8 @@ async def vcs_rebuild_database(
             "output_path": None,
         }
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {
             "success": False,
             "error": str(e),
@@ -2085,17 +2117,16 @@ async def vcs_rebuild_addin(
 
         if callback_url:
             op_manager = _get_operation_manager()
-            if op_manager:
+
+        def _admitted_args(call_args):
+            nonlocal operation_id, callback_queue, callback_info
+            if callback_url and op_manager:
                 operation_id, callback_queue = op_manager.register_operation(
-                    timeout_ms=int(timeout * 1000),
-                    database_path=str(host_path),
-                    command="RebuildAddIn",
+                    timeout_ms=int(timeout * 1000), database_path=str(host_path), command="RebuildAddIn",
                 )
-                callback_info = op_manager.create_callback_info(
-                    operation_id,
-                    callback_url,
-                    "cursor",
-                )
+                callback_info = op_manager.create_callback_info(operation_id, callback_url, "cursor")
+                return [*call_args, callback_info]
+            return call_args
 
         def _launch() -> dict[str, Any]:
             # Inside the gate, on its COM apartment thread: another window's
@@ -2111,13 +2142,9 @@ async def vcs_rebuild_addin(
                 [str(installed)] if installed else [],
             )
 
-            call_args = ["RebuildAddIn", str(src_path)]
-            if callback_info:
-                call_args.append(callback_info)
             return _execute_call_vba(
-                str(host_path),
-                "VCS.API",
-                call_args,
+                str(host_path), "VCS.API", ["RebuildAddIn", str(src_path)],
+                on_admitted=_admitted_args,
             )
 
         # The COM launch reports nothing until RebuildAddIn returns, so emit
@@ -2218,6 +2245,8 @@ async def vcs_rebuild_addin(
     except PermissionError as e:
         return {"success": False, "error": str(e)}
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {"success": False, "error": str(e)}
     finally:
         if callback_task is not None:
@@ -2556,6 +2585,8 @@ def vcs_check_vba_compiled(database_path: str) -> dict[str, Any]:
             return result
     
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {
             "success": False,
             "compiled": False,
@@ -2633,6 +2664,8 @@ def vcs_compile_vba(
             }
     
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {
             "success": False,
             "error": str(e),
@@ -2716,6 +2749,8 @@ def vcs_export_object(
     except InvalidDecisionPolicy as e:
         return invalid_policy_result(e)
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {"success": False, "error": str(e)}
 
 
@@ -2799,6 +2834,8 @@ def vcs_import_object(
     except PermissionError as e:
         return {"success": False, "error": str(e)}
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {"success": False, "error": str(e)}
 
 
@@ -2845,6 +2882,8 @@ def vcs_execute_sql(
             return _addin_json_result(result_json)
     
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {"success": False, "error": str(e)}
 
 
@@ -2902,6 +2941,7 @@ def _execute_call_vba(
     function_name: str,
     args: list[str] | None = None,
     timeout_seconds: float | None = None,
+    *, on_admitted=None,
 ) -> dict[str, Any]:
     """Invoke Application.Run and normalize the result. Used by vcs_call_vba
     and by vcs_rebuild_addin for the launch phase only.
@@ -2944,9 +2984,26 @@ def _execute_call_vba(
         with AccessConnection(str(db_path)) as conn:
             app, db = conn.connect()
 
-            run_result = _run_application_call_with_timeout(
-                app, resolved_name, call_args, timeout, str(db_path)
-            )
+            addin = VCSAddinIntegration(get_config().get("ACCESS_VCS_ADDIN_PATH"))
+            addin.load_addin(app, db_path=str(db_path))
+            if _is_addin_api_resolved_name(resolved_name):
+                if not resolved_name.lower().endswith(".api") or not call_args:
+                    from .compatibility_session import session_failure
+                    return session_failure("legacy_automation_entry_point")
+                envelope = ensure_session(app, addin.addin_path)
+                if on_admitted is not None:
+                    call_args = on_admitted(call_args)
+                run_result = _run_application_call_with_timeout(
+                    app, resolved_name[:-3] + "APIExecute", [envelope, *call_args], timeout, str(db_path)
+                )
+            else:
+                # Relay raw target calls through the same enforcing add-in boundary.
+                envelope = ensure_session(app, addin.addin_path)
+                library = os.path.splitext(os.path.abspath(addin.addin_path))[0]
+                run_result = _run_application_call_with_timeout(
+                    app, library + ".APIExecute",
+                    [envelope, "CallVBA", resolved_name, json.dumps(call_args)], timeout, str(db_path)
+                )
 
             if run_result.get("timed_out"):
                 return _with_rebuild_context({
@@ -2985,6 +3042,16 @@ def _execute_call_vba(
                     "function": resolved_name,
                 })
 
+            if isinstance(result, str) and result.startswith("{"):
+                try:
+                    admission_reply = json.loads(result)
+                except json.JSONDecodeError:
+                    admission_reply = {}
+                if admission_reply.get("error_pattern") in {
+                    "compatibility_session_invalid", "version_incompatible", "version_unconfirmed",
+                }:
+                    return _with_rebuild_context(admission_reply)
+
             response: dict[str, Any] = {
                 "success": True,
                 "result": str(result) if result is not None else None,
@@ -3000,6 +3067,8 @@ def _execute_call_vba(
             return _with_rebuild_context(response)
 
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return _with_rebuild_context({"success": False, "error": str(e)})
 
 
@@ -3391,6 +3460,8 @@ def vcs_run_vba(
         return _addin_json_result(worker_result.get("result"))
     
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {"success": False, "error": str(e)}
 
 
@@ -3457,6 +3528,8 @@ def vcs_set_option(
             return _addin_json_result(result_json)
     
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {"success": False, "error": str(e)}
 
 
@@ -3512,6 +3585,8 @@ def vcs_get_option(
             }
     
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {"success": False, "error": str(e)}
 
 
@@ -3567,6 +3642,8 @@ def vcs_get_log(
             return _addin_json_result(result_json, raw_key="content")
     
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {"success": False, "error": str(e)}
 
 
@@ -3733,6 +3810,8 @@ async def vcs_run_tests(
     except InvalidDecisionPolicy as e:
         return invalid_policy_result(e)
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {"success": False, "error": str(e)}
 
 
@@ -3786,6 +3865,8 @@ def vcs_end_session(
             return {"success": True, "result": result_json}
     
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {"success": False, "error": str(e)}
 
 
@@ -3821,6 +3902,8 @@ def vcs_list_dialogs(
             timeout_seconds=timeout_seconds,
         )
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {"success": False, "error": str(e)}
 
 
@@ -3870,6 +3953,8 @@ def vcs_dismiss_dialog(
             timeout_seconds=timeout_seconds,
         )
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {"success": False, "error": str(e)}
 
 
@@ -3913,6 +3998,8 @@ def vcs_recover_dialogs(
             timeout_seconds=timeout_seconds,
         )
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {"success": False, "error": str(e)}
 
 
@@ -3950,4 +4037,6 @@ def vcs_automation_status(
             timeout_seconds=timeout_seconds,
         )
     except Exception as e:
+        if isinstance(e, AdmissionError):
+            raise
         return {"success": False, "error": str(e)}

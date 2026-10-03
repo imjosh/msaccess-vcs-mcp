@@ -16,12 +16,17 @@ def _mock_existing_unit_installation(request, monkeypatch):
     X16 boundary tests opt out and exercise real admission with controlled DAO
     replies. Integration tests always inspect the real installation.
     """
-    if request.node.get_closest_marker("integration") or request.node.get_closest_marker("version_gate"):
+    if request.node.get_closest_marker("integration") or request.node.get_closest_marker("version_gate") or request.node.get_closest_marker("compatibility_session"):
         return
     from msaccess_vcs_mcp import compatibility, tools
     def accepted():
-        return {**compatibility.compatibility_result("5.2.0"), "addin_path": "mock-install.accda"}
+        return {**compatibility.compatibility_result("6.0.0"), "addin_path": "mock-install.accda"}
     monkeypatch.setattr(tools, "inspect_installed_addin", accepted)
+    from msaccess_vcs_mcp import addin_integration
+    from unittest.mock import MagicMock
+    fake_session = MagicMock(return_value="{}")
+    monkeypatch.setattr(addin_integration, "ensure_session", fake_session)
+    monkeypatch.setattr(tools, "ensure_session", fake_session)
 
 
 @pytest.fixture(params=[

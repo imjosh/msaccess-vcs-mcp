@@ -478,7 +478,9 @@ def test_rebuild_addin_passes_callback_identity_to_worker(tmp_path, monkeypatch)
     monkeypatch.setattr(tools_module, "_get_operation_manager", FakeManager)
     monkeypatch.setattr(tools_module, "_is_installed_addin_path", lambda _p: False)
 
-    def _execute(_database, _function, args, _timeout=None):
+    def _execute(_database, _function, args, _timeout=None, *, on_admitted=None):
+        if on_admitted:
+            args = on_admitted(args)
         captured["call_args"] = args
         return {"success": True, "result": launched}
 

@@ -6,6 +6,7 @@ delegating all export/import/build operations to the battle-tested add-in
 rather than reimplementing them in Python.
 """
 
+import contextvars
 import json
 import os
 import threading
@@ -20,6 +21,7 @@ try:
 except ImportError:
     COM_AVAILABLE = False
 
+from .compatibility_session import AdmissionError, ensure_session
 from .decision_policy import is_decision_required, normalize_terminal_result
 from .usage_logging import log_addin_probe
 
@@ -212,6 +214,7 @@ class VCSAddinIntegration:
         self.addin_path = addin_path or self._get_default_addin_path()
         self._app = None
         self._addin_loaded = False
+        self._session_envelope = None
     
     def _get_default_addin_path(self) -> str:
         """
@@ -237,7 +240,7 @@ class VCSAddinIntegration:
         """
         Verify add-in is accessible via the new API method.
         
-        Probes the add-in by calling ``GetVCSVersion`` through
+        Admits the loaded add-in with the named handshake through
         ``Application.Run`` with a hard timeout, surfacing dialog-blocked,
         VBA-break-mode, or hung Access instances as a clear lifecycle error
         before any real work is dispatched.  Idempotent: a second call on
@@ -322,6 +325,7 @@ class VCSAddinIntegration:
                 error=probe_error,
             )
         
+        self._session_envelope = self._probe_session
         self._app = app
         self._addin_loaded = True
         self._note_addin_locked(app)
@@ -347,7 +351,7 @@ class VCSAddinIntegration:
     
     def _probe_with_timeout(self, app, db_path: Optional[str], timeout_sec: float) -> None:
         """
-        Run ``GetVCSVersion`` in a daemon worker thread with a hard timeout.
+        Run mutual session admission in a daemon worker thread with a hard timeout.
         
         Adapted from db-inspector-mcp's ``_run_dao_with_timeout`` (see that
         project's DECISIONS.md for the full rationale).  The short version:
@@ -373,7 +377,7 @@ class VCSAddinIntegration:
         
         addin_path_abs = os.path.abspath(self.addin_path)
         addin_lib_name = os.path.splitext(addin_path_abs)[0]
-        api_function_name = f'{addin_lib_name}.API'
+        api_function_name = f'{addin_lib_name}.APIExecute'
         
         # A new build host may not have registered in the ROT. Marshal its
         # exact application proxy rather than sharing an STA proxy across
@@ -404,7 +408,7 @@ class VCSAddinIntegration:
                             f"from worker thread.  The Access application "
                             f"may have been closed."
                         )
-                    worker_app.Run(api_function_name, "GetVCSVersion")
+                    result_box["session"] = ensure_session(worker_app, self.addin_path)
                     result_box["ok"] = True
                 finally:
                     try:
@@ -414,8 +418,9 @@ class VCSAddinIntegration:
             except Exception as exc:
                 result_box["error"] = exc
         
+        probe_context = contextvars.copy_context()
         thread = threading.Thread(
-            target=worker, daemon=True, name="vcs-addin-probe"
+            target=lambda: probe_context.run(worker), daemon=True, name="vcs-addin-probe"
         )
         cls._active_probe_thread = thread
         thread.start()
@@ -437,6 +442,7 @@ class VCSAddinIntegration:
             )
         
         cls._active_probe_thread = None
+        self._probe_session = result_box.get("session")
         
         if "error" in result_box:
             raise result_box["error"]
@@ -528,11 +534,10 @@ class VCSAddinIntegration:
             raise RuntimeError("VCS add-in not loaded. Call load_addin() first.")
 
         try:
-            # New API format: Path without extension + ".API", then function name as first argument
-            # Example: app.Run("C:\Path\Version Control.API", "GetVCSVersion")
+            # Named session dispatcher: envelope, command, then arguments.
             addin_path_abs = os.path.abspath(self.addin_path)
             addin_lib_name = os.path.splitext(addin_path_abs)[0]
-            api_function_name = f'{addin_lib_name}.API'
+            api_function_name = f'{addin_lib_name}.APIExecute'
 
             # Verify database is open (required for add-in to work)
             try:
@@ -545,35 +550,19 @@ class VCSAddinIntegration:
             except Exception as db_error:
                 raise RuntimeError(f"Cannot access current database: {db_error}. Ensure a database is open before calling add-in functions.")
 
-            # With early binding (gencache.EnsureDispatch), Run returns a tuple
-            # where the first element is the actual result.
-            try:
-                if args:
-                    result = self._app.Run(api_function_name, function_name, *args)
-                else:
-                    result = self._app.Run(api_function_name, function_name)
-                if isinstance(result, tuple) and len(result) > 0:
-                    return result[0]
-                return result
-            except Exception as run_error:
-                # First call may fail while Access is loading/initializing the
-                # add-in. Retry once -- the add-in should now be resident.
+            # A COM exception can arrive after execution began. Never replay it.
+            envelope = ensure_session(self._app, self.addin_path)
+            result = self._app.Run(api_function_name, envelope, function_name, *args)
+            if isinstance(result, tuple) and result:
+                result = result[0]
+            if isinstance(result, str) and result.startswith("{"):
                 try:
-                    if args:
-                        result = self._app.Run(api_function_name, function_name, *args)
-                    else:
-                        result = self._app.Run(api_function_name, function_name)
-                    if isinstance(result, tuple) and len(result) > 0:
-                        return result[0]
-                    return result
-                except Exception as second_run_error:
-                    raise RuntimeError(
-                        f"Failed to call add-in function '{function_name}': {second_run_error}\n"
-                        f"First attempt error: {run_error}\n"
-                        f"API path used: {api_function_name}\n"
-                        f"Add-in path: {self.addin_path}\n"
-                        f"Ensure a database is open and the add-in path is correct."
-                    )
+                    parsed = json.loads(result)
+                except json.JSONDecodeError:
+                    parsed = {}
+                if isinstance(parsed, dict) and parsed.get("error_pattern") in {"version_incompatible", "version_unconfirmed", "compatibility_session_invalid"}:
+                    raise AdmissionError(parsed)
+            return result
 
         except RuntimeError:
             raise
@@ -914,17 +903,18 @@ class VCSAddinIntegration:
             # Format: APIAsync(strCallbackInfo, strCommand, [args...])
             addin_path_abs = os.path.abspath(self.addin_path)
             addin_lib_name = os.path.splitext(addin_path_abs)[0]
-            api_async_name = f'{addin_lib_name}.APIAsync'
+            api_async_name = f'{addin_lib_name}.APIExecuteAsync'
             
             # Ensure app reference is set
             if not self._app:
                 raise RuntimeError("Access Application object not set.")
             
-            # Call APIAsync with callback info as first arg
+            envelope = ensure_session(self._app, self.addin_path)
+            # Bind every asynchronous dispatch to its accepted session.
             if args:
-                result = self._app.Run(api_async_name, callback_info, command, *args)
+                result = self._app.Run(api_async_name, envelope, callback_info, command, *args)
             else:
-                result = self._app.Run(api_async_name, callback_info, command)
+                result = self._app.Run(api_async_name, envelope, callback_info, command)
             
             # Handle tuple return from early-bound Run method
             if isinstance(result, tuple) and len(result) > 0:
@@ -940,6 +930,8 @@ class VCSAddinIntegration:
                 envelope = json.loads(result)
                 # The add-in wraps its refusal as {success: false, error: <marked>}.
                 if isinstance(envelope, dict):
+                    if envelope.get("error_pattern") in {"version_incompatible", "version_unconfirmed", "compatibility_session_invalid"}:
+                        raise AdmissionError(envelope)
                     wrapped = api_refusal_payload(envelope.get("error"))
                     if wrapped:
                         return {**envelope, **wrapped}
@@ -948,6 +940,8 @@ class VCSAddinIntegration:
                 # Unexpected return type
                 return {"sync": True, "result": result}
                 
+        except AdmissionError:
+            raise
         except json.JSONDecodeError as e:
             raise RuntimeError(f"Invalid JSON response from APIAsync: {e}")
         except Exception as e:

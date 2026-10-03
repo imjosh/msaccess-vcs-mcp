@@ -18,6 +18,10 @@ class SetupApp(FakeApp):
         self.setup_args = []
 
     def Run(self, name, *args):
+        if name.endswith(".APIExecuteAsync"):
+            name, args = name[:-15] + "APIAsync", args[1:]
+        elif name.endswith(".APIExecute"):
+            name, args = name[:-10] + "API", args[1:]
         if args[0] == self.method:
             self.calls.append(args[0])
             self.setup_args.append(args[1:])

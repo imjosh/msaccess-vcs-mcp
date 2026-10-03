@@ -42,6 +42,7 @@ def _fake_access(monkeypatch, run_result=None, run_side_effect=None):
     therefore never reaches its own mock. Returns the fake so callers can assert on
     what it received.
     """
+    monkeypatch.setattr(tools_module.VCSAddinIntegration, "load_addin", lambda *args, **kwargs: True)
     app = MagicMock()
     if run_side_effect is not None:
         app.Run.side_effect = run_side_effect
@@ -308,3 +309,31 @@ def test_is_installed_addin_path_ignores_the_extension():
         assert not check(REPO_ADDIN)
         # A folder beside the install is not the install.
         assert not check(SOURCE_DIR)
+
+
+def test_raw_target_call_uses_accepted_dispatcher(_config_installed_addin, monkeypatch):
+    monkeypatch.setattr(tools_module, "validate_database_path", lambda p: Path(p))
+    app = _fake_access(monkeypatch, run_result="echo")
+    captured = {}
+    def bounded(_app, procedure, args, *_rest):
+        captured.update(procedure=procedure, args=args)
+        return {"success": True, "result": "echo"}
+    monkeypatch.setattr(tools_module, "_run_application_call_with_timeout", bounded)
+    result = _call_vba(REPO_ADDIN, "TargetEcho", ["hello"])
+    assert result["success"]
+    assert captured["procedure"].endswith(".APIExecute")
+    assert captured["args"][1:] == ["CallVBA", "TargetEcho", '["hello"]']
+
+
+def test_rebuild_admission_failure_registers_no_callback(_config_installed_addin, monkeypatch):
+    from msaccess_vcs_mcp.compatibility_session import AdmissionError, session_failure
+    monkeypatch.setattr(tools_module, "validate_database_path", lambda p: Path(p))
+    app = _fake_access(monkeypatch)
+    def refuse(*_args):
+        raise AdmissionError(session_failure("stale_instance"))
+    monkeypatch.setattr(tools_module, "ensure_session", refuse)
+    register = MagicMock()
+    with pytest.raises(AdmissionError):
+        tools_module._execute_call_vba(REPO_ADDIN, "VCS.API", ["RebuildAddIn", SOURCE_DIR], on_admitted=register)
+    register.assert_not_called()
+    app.Run.assert_not_called()

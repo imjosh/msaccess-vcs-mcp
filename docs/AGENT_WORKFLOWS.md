@@ -4,10 +4,10 @@ This guide documents common workflows for AI agents working with Microsoft Acces
 
 ## Required compatibility preflight
 
-This workflow owns the server requirement: **>=0.2.0 <0.3.0** for stable
-releases, plus explicit development admission **0.2.0-dev.16** (build metadata
+This workflow owns the server requirement: **>=0.3.0 <0.4.0** for stable
+releases, plus explicit development admission **0.3.0-dev.17** (build metadata
 does not affect identity). The range is assigned for the next release; no
-published 0.2.0 is claimed. The authoritative consumer declaration is the shipped
+published 0.3.0 is claimed. The authoritative consumer declaration is the shipped
 [`workflow_requirement.json`](../src/msaccess_vcs_mcp/workflow_requirement.json).
 The current MCP server instructions distribute this preflight without a plugin.
 The server's add-in requirement is independently owned by its release; consult
@@ -17,25 +17,25 @@ Before database work, and after a reconnection, server replacement, or changed
 connection identity, call the existing read-only `vcs_get_version_info()` tool.
 Read `mcp_version`, even if `success` is false because installation diagnostics
 failed. Apply strict SemVer comparison to this workflow's own range. Accept a
-stable 0.2.x at or above 0.2.0, or exactly 0.2.0-dev.16 ignoring build metadata.
+stable 0.3.x at or above 0.3.0, or exactly 0.3.0-dev.17 ignoring build metadata.
 Other prereleases require a workflow requirement update. Database work proceeds
 only after this check succeeds; a previously accepted connection does not admit
 a newly connected server. When reconnection cannot be detected, check before
 each new database workflow rather than retaining admission across workflows.
 
 For an older server, tell the user: "The connected MCP server is {installed};
-this workflow requires >=0.2.0 <0.3.0 (minimum 0.2.0), or the explicitly admitted
-development build 0.2.0-dev.16. Update the MCP server to a compatible release or
+this workflow requires >=0.3.0 <0.4.0 (minimum 0.3.0), or the explicitly admitted
+development build 0.3.0-dev.17. Update the MCP server to a compatible release or
 that development build, restart its process, and reconnect the MCP client."
 Stop database calls while that requirement is unmet. For a newer unsupported
-major or 0.3+ minor, explain the supported combination and offer a workflow
+major or 0.4+ minor, explain the supported combination and offer a workflow
 that supports that server or reconnection to a supported server. Upgrading the
 same server again does not resolve that mismatch.
 
 If the version tool is absent, fails without `mcp_version`, or returns a
 malformed/missing version, tell the user: "MCP server compatibility is
-unconfirmed: installed version {value or unknown}; required >=0.2.0 <0.3.0,
-minimum 0.2.0 (development admission 0.2.0-dev.16). Verify the server configured
+unconfirmed: installed version {value or unknown}; required >=0.3.0 <0.4.0,
+minimum 0.3.0 (development admission 0.3.0-dev.17). Verify the server configured
 for this connection, update to a compatible build if needed, restart and
 reconnect, then repeat the read-only check." Stop dependent calls. Older servers
 need not expose new requirement fields: their existing valid `mcp_version`
@@ -46,7 +46,7 @@ The server independently admits its installed add-in. If metadata reports an
 incompatible `addin_compatibility`, stop add-in work and relay its `error`,
 `component`, `installed_version`, `required_range`, `minimum_version`, and
 `recovery_action`. Relay the same details if an operation returns
-`version_incompatible` or `version_unconfirmed`; never retry the operation
+`version_incompatible`, `version_unconfirmed` or `compatibility_session_invalid`; never retry the operation
 through VBA or another tool to bypass the refusal. A failed check authorizes
 this notification, not installing, rebuilding, downgrading, or upgrading.
 Proceed after a compatible check without feature probes solely for release
@@ -543,3 +543,7 @@ For issues or questions:
 2. Review Export.log or Build.log
 3. Open an issue on GitHub
 4. Include error messages and context
+
+## Automatic compatibility sessions (X17)
+
+Workflow preflight is an independent workflow requirement. Operational commands automatically negotiate the server/add-in session even without agent preflight. Only the handshake transmits versions; every dependent command carries a validated session ID. Read-only metadata does not establish admission. See [release compatibility](RELEASE_COMPATIBILITY.md) for cache identity, invalidation, migration and unfinished qualification.

@@ -16,16 +16,16 @@ pytestmark = pytest.mark.version_gate
 
 
 @pytest.mark.parametrize("version,reason", [
-    ("5.1.99", "below_minimum"), ("5.2.0", None), ("5.2.1", None),
-    ("5.10.0", None), ("6.0.0", "unsupported_boundary"),
-    ("6.0.0-rc.1", "unsupported_boundary"),
-    ("5.2.0-dev.16", None), ("5.2.0-dev.16+local.009", None),
-    ("5.2.0-rc.1", "prerelease_not_admitted"),
-    ("5.3.0-beta.1", "prerelease_not_admitted"), ("5.2.0+build.001", None),
-    ("5.02.0", "invalid_version"), ("v5.2.0", "invalid_version"),
-    ("5.2", "invalid_version"), ("5.2.0.1", "invalid_version"),
-    ("5.2.0-01", "invalid_version"), ("5.2.0+", "invalid_version"),
-    (" 5.2.0", "invalid_version"), ("5.2.0\n", "invalid_version"),
+    ("5.9.99", "below_minimum"), ("6.0.0", None), ("6.0.1", None),
+    ("6.10.0", None), ("7.0.0", "unsupported_boundary"),
+    ("7.0.0-rc.1", "unsupported_boundary"),
+    ("6.0.0-dev.17", None), ("6.0.0-dev.17+local.009", None),
+    ("6.0.0-rc.1", "prerelease_not_admitted"),
+    ("6.1.0-beta.1", "prerelease_not_admitted"), ("6.0.0+build.001", None),
+    ("6.00.0", "invalid_version"), ("v6.0.0", "invalid_version"),
+    ("5.2", "invalid_version"), ("6.0.0.1", "invalid_version"),
+    ("6.0.0-01", "invalid_version"), ("6.0.0+", "invalid_version"),
+    (" 6.0.0", "invalid_version"), ("6.0.0\n", "invalid_version"),
     (None, "unknown_version"), ("", "unknown_version"), (5.2, "invalid_version"),
 ])
 def test_addin_matrix(version, reason):
@@ -33,7 +33,7 @@ def test_addin_matrix(version, reason):
     assert result["compatibility_reason"] == reason
     assert result["success"] == (reason is None)
     assert result["component"] == "addin"
-    assert result["minimum_version"] == "5.2.0"
+    assert result["minimum_version"] == "6.0.0"
     if reason:
         assert result["error_pattern"] in {"version_unconfirmed", "version_incompatible"}
         assert "required" in result["error"]
@@ -69,7 +69,7 @@ def test_invalid_requirements(low, high, pre):
 
 
 def test_newer_major_message_does_not_request_another_upgrade():
-    result = c.compatibility_result("6.1.0")
+    result = c.compatibility_result("7.1.0")
     assert "Update the" not in result["recovery_action"]
     assert "consumer release" in result["recovery_action"]
 
@@ -83,15 +83,15 @@ def discovery(monkeypatch, tmp_path):
 
 
 def test_replacement_and_configured_path_are_rechecked(discovery, monkeypatch):
-    read = MagicMock(return_value="5.2.0")
+    read = MagicMock(return_value="6.0.0")
     monkeypatch.setattr(c, "_read_installed_version", read)
     assert c.inspect_installed_addin()["success"]
     discovery.write_bytes(b"replacement")
-    read.return_value = "5.1.0"
+    read.return_value = "5.9.0"
     assert not c.inspect_installed_addin()["success"]
     other = discovery.with_name("another.accde")
     other.write_bytes(b"different path")
-    read.return_value = "6.0.0"
+    read.return_value = "7.0.0"
     monkeypatch.setattr(c, "configured_addin_path", lambda: str(other))
     assert c.inspect_installed_addin()["compatibility_reason"] == "unsupported_boundary"
     assert read.call_count == 3
@@ -101,7 +101,7 @@ def test_replacement_and_configured_path_are_rechecked(discovery, monkeypatch):
 def test_change_during_discovery_refused(discovery, monkeypatch):
     def changed(_):
         discovery.write_bytes(b"changed during read")
-        return "5.2.0"
+        return "6.0.0"
     monkeypatch.setattr(c, "_read_installed_version", changed)
     result = c.inspect_installed_addin()
     assert result["error_pattern"] == "version_unconfirmed"
@@ -116,9 +116,9 @@ def test_missing_and_timed_out_library(discovery, monkeypatch):
 
 
 def test_subprocess_uses_active_interpreter_bounded_hidden_read(monkeypatch):
-    run = MagicMock(return_value=SimpleNamespace(stdout='{"version":"5.2.0"}'))
+    run = MagicMock(return_value=SimpleNamespace(stdout='{"version":"6.0.0"}'))
     monkeypatch.setattr(c.subprocess, "run", run)
-    assert c._read_installed_version("install.accda") == "5.2.0"
+    assert c._read_installed_version("install.accda") == "6.0.0"
     assert run.call_args.args[0] == [c.sys.executable, "-m", "msaccess_vcs_mcp.version_probe", "install.accda"]
     assert run.call_args.kwargs["timeout"] == 10
     assert run.call_args.kwargs["stdin"] == subprocess.DEVNULL
@@ -129,9 +129,9 @@ def test_dao_opens_only_installed_library_read_only(monkeypatch):
     import win32com.client
     app = MagicMock()
     engine = MagicMock()
-    engine.OpenDatabase.return_value.Properties.return_value.Value = "5.2.0"
+    engine.OpenDatabase.return_value.Properties.return_value.Value = "6.0.0"
     monkeypatch.setattr(win32com.client, "Dispatch", lambda name: engine if name == "DAO.DBEngine.120" else app)
-    assert version_probe.read_version("install.accda") == "5.2.0"
+    assert version_probe.read_version("install.accda") == "6.0.0"
     engine.OpenDatabase.assert_called_once_with("install.accda", False, True)
     engine.OpenDatabase.return_value.Close.assert_called_once()
     assert not app.mock_calls
@@ -172,7 +172,7 @@ CALLS = {
 
 
 @pytest.mark.parametrize("name", sorted(CALLS))
-@pytest.mark.parametrize("installed", ["5.1.0", "6.0.0", "garbage", None])
+@pytest.mark.parametrize("installed", ["5.9.0", "7.0.0", "garbage", None])
 def test_every_public_addin_path_refuses_before_any_dependent_work(public, monkeypatch, name, installed):
     monkeypatch.setattr(c, "_read_installed_version", lambda _: installed)
     connect = MagicMock(side_effect=AssertionError("target opened"))
@@ -194,7 +194,7 @@ def test_every_public_addin_path_refuses_before_any_dependent_work(public, monke
 
 
 def test_admitted_public_tool_dispatches_normally(public, monkeypatch, tmp_path):
-    monkeypatch.setattr(c, "_read_installed_version", lambda _: "5.2.0")
+    monkeypatch.setattr(c, "_read_installed_version", lambda _: "6.0.0")
     db = tmp_path / "target.accdb"
     db.touch()
     conn, addin = MagicMock(), MagicMock()
@@ -209,24 +209,24 @@ def test_admitted_public_tool_dispatches_normally(public, monkeypatch, tmp_path)
 
 
 def test_cli_refusal_has_nonzero_exit_and_same_fields(public, monkeypatch, capsys):
-    monkeypatch.setattr(c, "_read_installed_version", lambda _: "5.1.0")
+    monkeypatch.setattr(c, "_read_installed_version", lambda _: "5.9.0")
     async def dispatch(name, arguments, progress):
         payload = await getattr(tools, name)(**arguments)
         return SimpleNamespace(isError=False, content=[SimpleNamespace(type="text", text=json.dumps(payload))])
     assert cli.main(["merge", "target.accdb", "source"], session_factory=dispatch) == 1
     output = capsys.readouterr().out
-    assert '"installed_version": "5.1.0"' in output
+    assert '"installed_version": "5.9.0"' in output
     assert '"component": "addin"' in output
     assert "Update the MSAccess VCS add-in" in output
 
 
 def test_metadata_survives_incompatible_or_missing_access(public, monkeypatch):
-    monkeypatch.setattr(c, "_read_installed_version", lambda _: "5.1.0")
+    monkeypatch.setattr(c, "_read_installed_version", lambda _: "5.9.0")
     connect = MagicMock(side_effect=AssertionError("Access started"))
     monkeypatch.setattr(tools, "AccessConnection", connect)
     result = asyncio.run(tools.vcs_get_version_info())
-    assert result["mcp_version"] == "0.2.0-dev.16"
-    assert result["vcs_version"] == "5.1.0"
+    assert result["mcp_version"] == "0.3.0-dev.17"
+    assert result["vcs_version"] == "5.9.0"
     assert not result["addin_compatibility"]["success"]
     assert result["supported_addin_range"] == c.ADDIN_REQUIREMENT.text
     assert "access_version" in result and "bitness" in result
@@ -240,7 +240,7 @@ def test_slow_admission_keeps_status_and_metadata_responsive(public, monkeypatch
         gate_thread.append(threading.get_ident())
         entered.set()
         assert release.wait(3)
-        return "5.1.0"
+        return "5.9.0"
     monkeypatch.setattr(c, "_read_installed_version", slow)
     async def scenario():
         loop_thread = threading.get_ident()
@@ -263,10 +263,10 @@ def test_declared_tool_set_is_exhaustively_exercised():
 
 def test_current_distribution_delivers_workflow_owned_preflight():
     requirement = c.workflow_requirement()
-    assert requirement.text == ">=0.2.0 <0.3.0; prerelease=0.2.0-dev.16"
+    assert requirement.text == ">=0.3.0 <0.4.0; prerelease=0.3.0-dev.17"
     assert requirement.reason("0.1.0") == "below_minimum"
-    assert requirement.reason("0.2.0-dev.16") is None
-    assert requirement.reason("0.3.0") == "unsupported_boundary"
+    assert requirement.reason("0.3.0-dev.17") is None
+    assert requirement.reason("0.4.0") == "unsupported_boundary"
     instructions = tools.mcp._mcp_server.instructions
     assert requirement.text in instructions
     assert "Before database work" in instructions
@@ -285,7 +285,7 @@ def test_shutdown_does_not_bypass_version_gate(discovery, monkeypatch):
     monkeypatch.setenv("ACCESS_VCS_SESSION_ID", "x16-test")
     monkeypatch.setenv("ACCESS_VCS_DATABASE", "target.accdb")
     monkeypatch.setattr(main, "get_config", lambda: {"ACCESS_VCS_ADDIN_PATH": str(discovery)})
-    monkeypatch.setattr(c, "_read_installed_version", lambda _: "5.1.0")
+    monkeypatch.setattr(c, "_read_installed_version", lambda _: "5.9.0")
     monkeypatch.setattr(connection, "access_instance_is_live", lambda _: True)
     connect = MagicMock(side_effect=AssertionError("cleanup connected"))
     monkeypatch.setattr(connection, "AccessConnection", connect)

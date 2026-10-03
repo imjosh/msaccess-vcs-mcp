@@ -59,6 +59,7 @@ python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
 markers = [
+    "compatibility_session: X17 real admission with controlled transports",
     "integration: marks tests as integration tests (require Access installed)",
     "version_gate: exercises X16 admission without the existing unit installation fake",
 ]

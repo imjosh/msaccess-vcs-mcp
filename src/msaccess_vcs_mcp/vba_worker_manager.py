@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import threading
@@ -291,6 +292,8 @@ class VBAWorkerManager:
         timeout_seconds: float,
         result: dict[str, Any],
     ) -> dict[str, Any]:
+        if result.get("error_pattern") in {"version_incompatible", "version_unconfirmed", "compatibility_session_invalid"}:
+            return result
         error = result.get("error", "VBA worker failed")
         pattern = result.get("error_pattern") or classify_com_error(error)
         timed_out = result.get("timed_out", False)
@@ -533,6 +536,10 @@ class VBAWorkerManager:
                     except Exception:
                         pass
             except Exception as exc:
+                from .compatibility_session import AdmissionError
+                if isinstance(exc, AdmissionError):
+                    result_box["result"] = exc.result
+                    return
                 result_box["result"] = {
                     "success": False,
                     "operation": operation,
@@ -542,7 +549,8 @@ class VBAWorkerManager:
                     "error_pattern": classify_com_error(exc),
                 }
 
-        thread = threading.Thread(target=worker, daemon=True, name="vcs-vba-worker")
+        worker_context = contextvars.copy_context()
+        thread = threading.Thread(target=lambda: worker_context.run(worker), daemon=True, name="vcs-vba-worker")
         cls._active_worker = thread
         thread.start()
         thread.join(timeout=timeout_seconds)
