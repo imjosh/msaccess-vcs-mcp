@@ -1,4 +1,4 @@
-"""M49: synchronous full merges retain dispatcher refusals at the public boundary."""
+"""M49/M52: full merges retain dispatcher refusals at the public boundary."""
 
 import asyncio
 import json
@@ -24,9 +24,12 @@ def public_merge(tmp_path, monkeypatch):
     monkeypatch.setenv("ACCESS_VCS_DISABLE_DIAGNOSTIC_LOG", "true")
 
     def run(raw, route, tuple_return):
+        start = json.dumps({"sync": True, "result": raw}) if route == "inline" else '{}'
         fake = FakeAccess(
             api=(raw, None) if tuple_return else raw,
-            async_start=RuntimeError("async unavailable") if route == "exception" else '{}',
+            async_start=RuntimeError("async unavailable") if route == "exception" else (
+                (start, None) if tuple_return else start
+            ),
         )
         manager = OperationManager()
         manager.unregister_operation = Mock(wraps=manager.unregister_operation)
@@ -48,7 +51,8 @@ def public_merge(tmp_path, monkeypatch):
         if callback:
             manager.unregister_operation.assert_called_once()
         assert fake.dispatched == (
-            ([] if not callback else [("APIAsync", "MergeBuild")]) + [("API", "MergeBuild")]
+            ([] if not callback else [("APIAsync", "MergeBuild")])
+            + ([] if route == "inline" else [("API", "MergeBuild")])
         )
         assert fake.arguments[-1] == ("block",)
         return result
@@ -57,7 +61,7 @@ def public_merge(tmp_path, monkeypatch):
     gate._executor.shutdown(wait=True)
 
 
-@pytest.mark.parametrize("route", ["no-callback", "unknown", "exception"])
+@pytest.mark.parametrize("route", ["no-callback", "unknown", "exception", "inline"])
 @pytest.mark.parametrize("tuple_return", [False, True])
 def test_public_merge_preserves_refusal(public_merge, addin_start_refusal, route, tuple_return):
     result = public_merge(addin_start_refusal["raw"], route, tuple_return)
@@ -92,7 +96,7 @@ def test_public_merge_start_and_decision_precedence(public_merge, route, tuple_r
         assert "error_pattern" not in result
 
 
-@pytest.mark.parametrize("route", ["no-callback", "unknown", "exception"])
+@pytest.mark.parametrize("route", ["no-callback", "unknown", "exception", "inline"])
 @pytest.mark.parametrize("log_key", ["log_path", "logPath"])
 def test_public_merge_preserves_explicit_refusal_log(public_merge, tmp_path, route, log_key):
     own_log = tmp_path / "own.log"
@@ -106,3 +110,41 @@ def test_public_merge_preserves_explicit_refusal_log(public_merge, tmp_path, rou
     assert result["error_pattern"] == "operation_already_running"
     assert result["log_path"] == str(own_log)
     assert result["log_excerpt"] == "This operation's explicit diagnostic"
+
+
+@pytest.mark.parametrize("self_dispatch", [False, True])
+@pytest.mark.parametrize("decision", [False, True])
+@pytest.mark.parametrize("readable", [False, True])
+@pytest.mark.parametrize("log_key", ["log_path", "logPath"])
+def test_inline_marked_envelope_keeps_decisions_and_explicit_log(
+    public_merge, tmp_path, self_dispatch, decision, readable, log_key,
+):
+    error = (
+        "The call arrived back in the project that sent it."
+        if self_dispatch else "Another API command is still running."
+    )
+    log = tmp_path / "explicit.log"
+    if readable:
+        log.write_text("Own refusal diagnostic", encoding="utf-8")
+    journal = [{"kind": "confirmation", "object": "Form1", "resolution": "blocked"}]
+    payload = {
+        "success": True, "error": "VCS_API_REFUSED: " + error,
+        "error_pattern": "other", "decision_required": decision,
+        "decisions": json.dumps(journal), log_key: str(log),
+    }
+    # A nested dict is also supported; JSON-string envelopes are covered above.
+    result = public_merge(payload, "inline", False)
+    assert result["success"] is False
+    assert result["error"] == error
+    assert result["error_pattern"] == (
+        "decision_required" if decision else
+        "api_self_dispatch" if self_dispatch else "operation_already_running"
+    )
+    assert result["decisions"] == journal
+    if decision:
+        assert result["decision_required"] is True
+    assert result["log_path"] == str(log)
+    if readable:
+        assert result["log_excerpt"] == "Own refusal diagnostic"
+    else:
+        assert "log_excerpt" not in result

@@ -354,7 +354,16 @@ async def run_import_merge(
         op_manager.unregister_operation(operation_id)
         if started.get("sync"):
             # Already completed inline: never merge twice.
-            return parse_addin_payload(started.get("result"))
+            # Import locally: integration also uses this module's normalizers.
+            from .addin_integration import api_refusal_payload
+
+            raw = started.get("result")
+            refusal = api_refusal_payload(raw)
+            if refusal:
+                return refusal
+            payload = parse_addin_payload(raw)
+            wrapped = api_refusal_payload(payload.get("error"))
+            return {**payload, **wrapped} if wrapped else payload
         if is_start_refusal(started):
             # Drop the duplicate refusal delivered by callback.
             return started
