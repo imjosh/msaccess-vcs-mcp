@@ -84,6 +84,22 @@ def test_cached_calls_send_no_versions_and_discover_once(transport, monkeypatch)
             assert "session_id" in json.loads(args[0])
 
 
+def test_mutable_file_data_reuses_server_approval(transport, monkeypatch):
+    """Loaded add-in validation accounts for data writes; server ignores size/mtime."""
+    from pathlib import Path
+    app, path = transport
+    read = Mock(return_value="6.0.0-dev.17")
+    monkeypatch.setattr(c, "_read_installed_version", read)
+    assert c.inspect_installed_addin(path)["success"]
+    first = s.ensure_session(app, path)
+    Path(path).write_bytes(b"same-generation mutable translation data, now larger")
+    assert c.inspect_installed_addin(path)["success"]
+    assert s.ensure_session(app, path) == first
+    assert read.call_count == 1
+    assert app.calls["APIHandshake"] == 1
+    assert app.calls["APIValidateSession"] == 1
+
+
 @pytest.mark.parametrize("change", ["reset", "reload", "access_restart", "pid_reuse", "server_restart", "path", "library", "requirement", "protocol"])
 def test_invalidation_cannot_resurrect_an_old_pair(transport, monkeypatch, change):
     from msaccess_vcs_mcp.access_com import instance_registry
@@ -101,7 +117,9 @@ def test_invalidation_cannot_resurrect_an_old_pair(transport, monkeypatch, chang
         path = str(Path(path).with_name("other.accda"))
         Path(path).write_bytes(b"other")
     elif change == "library":
-        Path(path).write_bytes(b"replaced file")
+        replacement = Path(path).with_name("replacement.accda")
+        replacement.write_bytes(b"replaced file")
+        replacement.replace(path)
     elif change == "requirement":
         monkeypatch.setattr(s, "ADDIN_REQUIREMENT", c.Requirement("6.0.1", "7.0.0"))
         app.version = "6.0.1"

@@ -215,8 +215,16 @@ def configured_addin_path() -> str:
 
 def _installation_identity(path: str) -> tuple:
     stat = os.stat(path)
+    # The supported installer deletes the previous artifact before copying.
+    # Translation tables can change size/mtime without replacing the code pair.
+    # The loaded add-in separately rejects unaccounted same-generation writes.
     return (os.path.normcase(os.path.realpath(path)), stat.st_dev, stat.st_ino,
-            stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            getattr(stat, "st_birthtime_ns", stat.st_ctime_ns))
+
+
+def _file_snapshot(path: str) -> tuple:
+    stat = os.stat(path)
+    return (_installation_identity(path), stat.st_size, stat.st_mtime_ns)
 
 
 def _read_installed_version(path: str) -> Any:
@@ -249,8 +257,9 @@ def inspect_installed_addin(path: str | None = None, *, fresh: bool = False) -> 
             cached = None if fresh else _discovery_cache.get(key)
             if cached is not None:
                 return {**cached, "addin_path": path}
+        snapshot = _file_snapshot(path)
         installed = _read_installed_version(path)
-        if _installation_identity(path) != before:
+        if _file_snapshot(path) != snapshot or _installation_identity(path) != before:
             raise RuntimeError("Installed library changed during version discovery; retry")
         result = compatibility_result(installed)
         # Refusals need no sticky cache; recovery can always rediscover.

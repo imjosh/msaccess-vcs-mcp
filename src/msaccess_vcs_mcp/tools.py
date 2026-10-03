@@ -54,10 +54,10 @@ from .access_com.connection import (
 from .access_com.dao_helpers import list_query_defs, list_table_defs
 from .access_com.process_qos import list_access_pids, prefer_full_power_if_created
 from .access_gate import EXEMPT_TOOLS, ServerLoopContext, get_access_gate
-from .compatibility_session import AdmissionError, connection_scope, ensure_session
+from .compatibility_session import AdmissionError, connection_scope, ensure_session, target_admission
 from .compatibility import (
     ADDIN_DEPENDENT_TOOLS, compatibility_result, inspect_installed_addin,
-    server_metadata, workflow_preflight_instructions,
+    server_metadata, workflow_preflight_instructions, configured_addin_path,
 )
 from .exempt_workers import WorkerCapacityUnavailable, workers_for
 from .dialog_recovery import (
@@ -1110,6 +1110,8 @@ def vcs_tool(name: str):
                         if "component" not in admission:
                             return compatibility_result(None, detail=admission.get("error"))
                         return admission
+                    with target_admission(admission.get("addin_path") or configured_addin_path()):
+                        return await func(*args, **kwargs)
                 return await func(*args, **kwargs)
         else:
             @functools.wraps(func)
@@ -1118,6 +1120,8 @@ def vcs_tool(name: str):
                     admission = inspect_installed_addin()
                     if not admission["success"]:
                         return admission
+                    with target_admission(admission.get("addin_path") or configured_addin_path()):
+                        return func(*args, **kwargs)
                 return func(*args, **kwargs)
 
         logged = with_logging(name)(admitted)
@@ -2357,7 +2361,7 @@ def _with_rebuild_fields(
 
 def _probe_version_info() -> dict[str, Any]:
     """Read installed metadata without attaching to Access or opening a target."""
-    admission = inspect_installed_addin()
+    admission = inspect_installed_addin(fresh=True)
     return {
         **server_metadata(), "success": True,
         "vcs_version": admission["installed_version"],

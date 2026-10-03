@@ -23,9 +23,10 @@ def test_version_probe_keeps_recovery_responsive_without_touching_access(
     access = MagicMock(side_effect=AssertionError("Metadata touched Access"))
     monkeypatch.setattr(validation, "create_isolated_access_app", access)
     monkeypatch.setattr(validation.win32com.client, "GetObject", access)
-    def inspect():
+    def inspect(*, fresh=False):
         # Option admission must remain independent of the metadata worker.
         if threading.current_thread().name.startswith("vcs-exempt-vcs_get_version_info"):
+            assert fresh is True
             stages.append(("entered", threading.get_ident()))
             entered.set()
             assert release.wait(6), "version probe blocked the server loop"

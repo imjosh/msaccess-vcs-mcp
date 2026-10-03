@@ -13,6 +13,7 @@ Key Complexity Areas:
 import os
 import re
 import shutil
+import tempfile
 import sys
 import threading
 from typing import Any
@@ -471,6 +472,11 @@ class AccessConnection:
         is a normal interactive Access app, not an automation ghost.
         """
         if self._app is None:
+            from ..compatibility_session import target_admission_path
+
+            library = target_admission_path()
+            if library is not None:
+                return self._get_admitted_access_app(library)
             created_now = False
             try:
                 # A moniker bind *launches* Access when nothing has the file
@@ -497,6 +503,92 @@ class AccessConnection:
             if self._owns_app:
                 self._ensure_owned_instance_interactive()
         return self._app
+
+    def _get_admitted_access_app(self, library):
+        """Admit in a neutral host before opening a previously closed target.
+
+        ROT lookup only attaches to an already open target. Never bind a file
+        moniker here: that can launch Access and run AutoExec before admission.
+        The loaded library survives CloseCurrentDatabase on the neutral host.
+        """
+        from ..addin_integration import VCSAddinIntegration
+        from ..compatibility_session import ensure_session
+        from .instance_registry import process_create_time, unregister_owned
+        from .process_qos import pid_from_access_app, process_is_alive, prefer_full_power_app
+
+        if not os.path.isfile(self._db_path):
+            raise FileNotFoundError(self._db_path)
+        existing = VCSAddinIntegration._find_access_in_rot(self._db_path)
+        if existing is not None:
+            VCSAddinIntegration(library).load_addin(existing, db_path=self._db_path)
+            self._app = existing
+            self._db_opened_via_getobject = True
+            self._resolve_ownership(False)
+            ensure_access_visible(existing)
+            return existing
+
+        app = create_isolated_access_app()
+        pid = pid_from_access_app(app)
+        created = process_create_time(pid) if pid else None
+        if not created:
+            # No target or bootstrap has been opened; identity loss fails closed.
+            from ..compatibility_session import AdmissionError, session_failure
+            raise AdmissionError(session_failure("access_identity_unconfirmed"))
+        self._app = app
+        self._resolve_ownership(True)
+        prefer_full_power_app(app)
+        folder = tempfile.mkdtemp(prefix="vcs-admission-")
+        neutral = os.path.join(folder, "bootstrap.accdb")
+        try:
+            app.UserControl = False
+            app.NewCurrentDatabase(neutral)
+            ensure_access_visible(app)
+            VCSAddinIntegration(library).load_addin(app)
+            app.CloseCurrentDatabase()
+            # This is validation only, before any target startup code executes.
+            ensure_session(app, library)
+            open_current_database(app, self._db_path)
+            self._db_opened_as_current = True
+            self._ensure_owned_instance_interactive()
+            return app
+        except TimeoutError:
+            # A timed-out admission worker can still be blocked inside Access.
+            # Even reading app.hWndAccessApp or calling Quit would defeat its
+            # timeout. Retain the captured ownership and actual neutral path
+            # for later recovery, without any further COM call or target open.
+            from .instance_registry import register_owned
+
+            register_owned(pid, neutral, create_time=created)
+            _log_instance_event("bootstrap_cleanup_deferred", pid=pid,
+                                create_time=created, path=neutral,
+                                error="admission probe timed out")
+            self._app = None
+            self._owns_app = False
+            raise
+        except Exception:
+            if (pid_from_access_app(app) == pid
+                    and process_create_time(pid) == created):
+                try:
+                    app.Quit(2)  # acQuitSaveNone; only this newly created process
+                finally:
+                    if process_is_alive(pid) is False:
+                        unregister_owned(pid, created)
+            self._app = None
+            self._owns_app = False
+            raise
+        finally:
+            # Exact files in our mkdtemp directory; no recursive deletion.
+            for path in (neutral, os.path.splitext(neutral)[0] + ".laccdb"):
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    _log_instance_event("bootstrap_cleanup_deferred", path=path, error=str(exc))
+            try:
+                os.rmdir(folder)
+            except OSError:
+                pass
 
     def _resolve_ownership(self, created_now: bool) -> None:
         """Set ``_owns_app`` from creation or the durable PID registry.

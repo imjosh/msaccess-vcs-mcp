@@ -86,7 +86,9 @@ def test_replacement_and_configured_path_are_rechecked(discovery, monkeypatch):
     read = MagicMock(return_value="6.0.0")
     monkeypatch.setattr(c, "_read_installed_version", read)
     assert c.inspect_installed_addin()["success"]
-    discovery.write_bytes(b"replacement")
+    replacement = discovery.with_name("replacement.accda")
+    replacement.write_bytes(b"replacement")
+    replacement.replace(discovery)
     read.return_value = "5.9.0"
     assert not c.inspect_installed_addin()["success"]
     other = discovery.with_name("another.accde")

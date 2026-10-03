@@ -15,10 +15,25 @@ PROTOCOL = "msaccess-vcs.session/1"
 SERVER_INSTANCE = str(uuid.uuid4())
 _local_connection = str(uuid.uuid4())
 _connection = contextvars.ContextVar("compatibility_connection", default=_local_connection)
+_target_library = contextvars.ContextVar("compatibility_target_library", default=None)
 _connections = OrderedDict()
 _sessions = OrderedDict()
 _lock = threading.RLock()
 MAX_SESSIONS = 128
+
+
+@contextmanager
+def target_admission(path):
+    """Require loaded mutual admission before a connection opens its target."""
+    token = _target_library.set(path)
+    try:
+        yield
+    finally:
+        _target_library.reset(token)
+
+
+def target_admission_path():
+    return _target_library.get()
 
 
 class AdmissionError(RuntimeError):

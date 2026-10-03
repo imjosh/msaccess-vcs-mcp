@@ -40,7 +40,14 @@ sets no policy, acquires no root and registers no callback. Its ten-second
 limit terminates only the probe; stdin is DEVNULL. Successful discovery is
 cached by path/file/requirement identity; registry paths are reread each call.
 
-On the existing Access connection, **APIIdentity** returns the loaded version,
+For a closed target, the server creates an owned, neutral temporary database,
+loads the configured library and completes mutual admission before opening the
+target or running its AutoExec. It validates again after closing the neutral
+database. ROT-only lookup can attach to an already open target; it does not
+activate a file moniker or reopen the user's database. Refusal discards only
+the new, identity-confirmed host and leaves the target unopened.
+
+On that Access connection, **APIIdentity** returns the loaded version,
 path, random incarnation, installation generation and protocol. The server
 checks that loaded version separately from installed metadata. **APIHandshake**
 receives the server version/protocol and expected incarnations; the add-in
@@ -64,14 +71,25 @@ path/permission guards, results, cancellation and log attribution remain require
 Sessions do not replace operation IDs, callbacks, override-file IDs or policy tokens.
 Foreign callers cannot clear another caller's session policy.
 
+The supported automation scope is MCP/CLI and API/APIAsync, as explicitly
+selected by the developer on 2026-10-02. Legacy operational calls need an
+explicit envelope forwarded by the admitted dispatcher; a reentrant call
+cannot inherit the running owner's ambient envelope. Ribbon/manual/direct-VCS
+VBA and admitted arbitrary VBA remain trusted code. Admission is not a VBA
+sandbox, and these trusted helpers do not independently require sessions.
+
 ## Cache and invalidation
 
 Server and add-in incarnations are random UUIDs; VBA reset/reload loses the
 add-in session dictionary. Connections get separate UUIDs with retained object
 references. The server cache includes Access PID **and creation time**, file,
 requirement and protocol identities. Missing/failed identity checks refuse reuse.
-The add-in checks volume/file ID/creation stamp; mutable translation-table writes
-do not replace loaded code. The server additionally checks file timestamps/size.
+The add-in checks volume/file ID/creation stamp and an accounted size/timestamp
+snapshot. Trusted translation-table writers refresh that snapshot around their
+own writes. An unaccounted change refuses loaded admission until reload. The
+server caches discovery by physical file generation, avoiding fresh DAO probes
+for those data writes; initial discovery also checks size/timestamps for races.
+Read-only version diagnostics deliberately request fresh installed metadata.
 Changed instance, connection, configuration, installation, requirement or protocol
 invalidates approval. An old loaded library does not adopt a replacement's version.
 Closing/reopening a target can leave the same library loaded; that alone is not
@@ -79,8 +97,9 @@ an add-in reload or MCP connection replacement.
 
 Caches are bounded to 128 entries. Add-in sessions expire after 30 idle minutes;
 a policy-owner entry is retained until its owner clears the policy or disconnects.
-Expiry never clears another caller's policy. Automatic idle-policy disposal remains
-an explicit lifecycle qualification gap. APIDisconnectSession refuses a policy owner's active
+Expiry never clears another caller's policy. The developer explicitly retained
+owner cleanup only on 2026-10-02: idle owners stay pinned, and abandoned owners
+consume capacity until explicit cleanup or host reset. APIDisconnectSession refuses a policy owner's active
 disconnect; otherwise it removes that session and cleans its own idle policy.
 Invalidation never cancels an already executing root or borrows its result/log.
 An invalidated queued start posts one refusal to its own callback.
@@ -109,8 +128,9 @@ Deploy. Merge add-in first and coordinate server shipping; publication is separa
 Evidence and unfinished criteria: [X17 report](../../verification/X17/README.md).
 Live scope is Windows 64-bit Access 16/DAO.DBEngine.120 and Python 3.12 in the
 project venv. Manual/ribbon/direct-VCS routes remain unchanged following the
-user's simplification direction. They cannot universally distinguish human
-VBA from arbitrary external VBA. X17's broader legacy-bypass/bootstrap coverage
-remains explicitly unfinished; the named-API evidence is not a VBA sandbox or
-whole-ticket completion. M52, full VERIFY-1/VERIFY-2 acceptance, A36, X13, X14,
+developer's explicit scope decision. They cannot universally distinguish human
+VBA from arbitrary external VBA. [Resumed verification](../../verification/X17/RESUME.md)
+records bootstrap and owner qualification, same-PID native reset, and the
+remaining native unload/replacement and combined-test-order limitations.
+X17 remains in progress. M52, full VERIFY-1/VERIFY-2 acceptance, A36, X13, X14,
 other environments/desktop packaging and publication remain separate assignments.
