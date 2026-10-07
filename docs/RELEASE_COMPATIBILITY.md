@@ -15,8 +15,11 @@ is the existing procedure-call transport; compatibility does not drive the UI.
 
 The add-in requirement comes from its command contract, independently of the
 workflow requirement. Protocol: **msaccess-vcs.session/1**. Development pair:
-add-in **6.0.0-dev.17**, server **0.3.0-dev.17**; package metadata uses PEP 440
-**0.3.0.dev17**. These X17 implementation assignments are **unpublished**.
+add-in **6.0.0-dev.17**, server **0.3.0-dev.17+verify1.2**; package metadata uses PEP 440
+**0.3.0.dev17+verify1.2**. This build marker distinguishes the next VERIFY-1
+restart after the MCP launch environment repair. The existing Access wrapper
+recovery is retained; consumer declarations still admit `0.3.0-dev.17`
+because build metadata is ignored for compatibility. These assignments are **unpublished**.
 Legacy refusal breaks the add-in API (major 6) and the major-zero server API
 (minor 0.3). Historical X16 receipts qualify only the previous contract.
 Release owners must verify and separately authorize publication of stable identities.
@@ -117,6 +120,13 @@ installed metadata without operational admission; metadata_establishes_session:f
 makes that distinction explicit. Recent calls, Win32 dialogs/status/recovery,
 HTTP cancellation and raw DAO inventory/diff retain their exceptions and guards.
 Add-in options/logs/compile, end-session and rebuild require admission.
+
+`server_runtime` identifies the responding process: PID/creation stamp,
+interpreter/base executable, package source directory and observation timestamp.
+After restart, check the exact repair build marker, source path and a new
+`server_instance` using the configured client's live tool response. A local
+import or separately launched CLI server does not prove that client's connection.
+Runtime metadata and installed discovery still do not establish a loaded session.
 
 An old library lacks the new API and is refused. An explicitly authorized
 migration uses the previous admitted X16 pair's [source rebuild](../../msaccess-vcs-addin/docs/agentic-rebuild.md)

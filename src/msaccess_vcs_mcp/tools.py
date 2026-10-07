@@ -2397,6 +2397,8 @@ async def vcs_get_version_info(
         Dictionary with:
         - success: Boolean indicating if info was retrieved
         - mcp_version: Version of the MCP server (e.g., "0.1.0")
+        - server_runtime: This server's PID/creation stamp, Python executables,
+          package source directory and observation timestamp (read-only)
         - vcs_version: Version of the VCS add-in (e.g., "4.1.4")
         - access_version: None; this metadata check never starts/attaches to Access
         - bitness: None, for the same reason

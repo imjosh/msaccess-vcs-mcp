@@ -10,8 +10,10 @@ import sys
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import total_ordering
 from importlib.resources import files
+from pathlib import Path
 from typing import Any
 
 from . import __version__
@@ -165,11 +167,20 @@ def compatibility_result(
 
 def server_metadata() -> dict[str, Any]:
     from .compatibility_session import PROTOCOL, SERVER_INSTANCE
+    from .access_com.instance_registry import process_create_time
     return {
         "mcp_version": __version__, "supported_addin_range": ADDIN_REQUIREMENT.text,
         "addin_requirement_status": REQUIREMENT_STATUS,
         "command_protocol": PROTOCOL, "server_instance": SERVER_INSTANCE,
         "metadata_establishes_session": False,
+        "server_runtime": {
+            "pid": os.getpid(),
+            "process_create_time": process_create_time(os.getpid()),
+            "python_executable": sys.executable,
+            "base_executable": getattr(sys, "_base_executable", sys.executable),
+            "package_root": str(Path(__file__).resolve().parent),
+            "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+        },
     }
 
 

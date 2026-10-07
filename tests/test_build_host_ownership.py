@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from msaccess_vcs_mcp import tools
+from msaccess_vcs_mcp.access_com import connection
 from tests.test_export_build_fallbacks import _unwrap
 
 
@@ -14,6 +15,7 @@ def test_rebuild_never_touches_existing_access(tmp_path, failure):
     existing.CurrentDb.return_value.Name = "users-unsaved.accdb"
     existing.UserControl = True
     owned = MagicMock()
+    raw = MagicMock()
     addin = MagicMock()
     addin.build_as_paths_refusal.return_value = None
     addin.build_from_source.return_value = {"success": False, "error": "build refused"}
@@ -27,9 +29,10 @@ def test_rebuild_never_touches_existing_access(tmp_path, failure):
     if failure == "build":
         addin.build_from_source.side_effect = RuntimeError("build")
     with (
-        patch("msaccess_vcs_mcp.access_com.connection.win32com.client.DispatchEx",
+        patch.object(connection.pythoncom, "CoCreateInstanceEx",
               side_effect=RuntimeError("dispatch") if failure == "dispatch" else None,
-              return_value=owned) as isolated,
+              return_value=(raw,)) as isolated,
+        patch.object(connection.win32com.client, "Dispatch", return_value=owned),
         patch("msaccess_vcs_mcp.tools.ensure_dispatch", return_value=existing, create=True),
         patch.object(tools, "get_config", return_value={}),
         patch.object(tools, "check_write_permission"),
@@ -51,7 +54,10 @@ def test_rebuild_never_touches_existing_access(tmp_path, failure):
     existing.Quit.assert_not_called()
     assert existing.mock_calls == []
     assert existing.UserControl is True
-    isolated.assert_called_once_with("Access.Application")
+    isolated.assert_called_once_with(
+        "Access.Application", None, connection.pythoncom.CLSCTX_SERVER,
+        None, (connection.pythoncom.IID_IDispatch,),
+    )
     if failure == "dispatch":
         close.assert_not_called()
     else:
@@ -69,12 +75,14 @@ def test_standalone_probes_do_not_quit_existing_windows(tmp_path, probe):
     existing = MagicMock()
     existing.CurrentDb.return_value = None  # Even an empty shell is user-owned.
     owned = MagicMock()
+    raw = MagicMock()
     addin = MagicMock()
     addin.verify_addin_exists.return_value = True
     target = tmp_path / "probe.accdb"
     target.touch()
     with (
-        patch.object(connection.win32com.client, "DispatchEx", return_value=owned) as isolated,
+        patch.object(connection.pythoncom, "CoCreateInstanceEx", return_value=(raw,)) as isolated,
+        patch.object(connection.win32com.client, "Dispatch", return_value=owned),
         patch.object(connection, "ensure_dispatch", return_value=existing),
         patch.object(validation.win32com.client, "GetObject", side_effect=RuntimeError("not open")),
         patch.object(validation, "get_config", return_value={
@@ -87,7 +95,10 @@ def test_standalone_probes_do_not_quit_existing_windows(tmp_path, probe):
             config.validate_access_installation()
         else:
             assert validation.validate_components(load_addin=False)["success"] is True
-    isolated.assert_called_once_with("Access.Application")
+    isolated.assert_called_once_with(
+        "Access.Application", None, connection.pythoncom.CLSCTX_SERVER,
+        None, (connection.pythoncom.IID_IDispatch,),
+    )
     owned.Quit.assert_called_once()
     existing.Quit.assert_not_called()
     existing.CloseCurrentDatabase.assert_not_called()

@@ -121,12 +121,34 @@ def ensure_dispatch(prog_id: str):
 def create_isolated_access_app():
     """Start a new Access COM server, never attach to an existing window.
 
-    Return immediately after DispatchEx so the caller can protect all later
-    setup with its own cleanup scope. Do not fall back to EnsureDispatch.
+    Keep DispatchEx's native creation semantics, but retain the raw object while
+    repairing a corrupt generated wrapper. Retry wrapping once on that same
+    object; never create a second host or fall back to EnsureDispatch.
     """
     if not COM_AVAILABLE:
         raise ImportError("pywin32 is required for Access COM automation")
-    return win32com.client.DispatchEx("Access.Application")
+    dispatch = pythoncom.CoCreateInstanceEx(
+        "Access.Application", None, pythoncom.CLSCTX_SERVER,
+        None, (pythoncom.IID_IDispatch,),
+    )[0]
+    for attempt in range(2):
+        try:
+            return win32com.client.Dispatch(
+                dispatch, "Access.Application", clsctx=pythoncom.CLSCTX_SERVER,
+            )
+        except AttributeError as exc:
+            if attempt or not _should_heal_gen_py_cache(exc):
+                raise
+            folder = _extract_gen_py_folder_from_error(str(exc))
+            typelib, _ = dispatch.GetTypeInfo().GetContainingTypeLib()
+            attributes = typelib.GetLibAttr()
+            identity = attributes[0], attributes[1], attributes[3], attributes[4]
+            if folder != gencache.GetGeneratedFileName(*identity):
+                # Only the native object's own type-library cache may be removed.
+                raise
+            _purge_gen_py_cache_folder(folder, prog_id="Access.Application")
+            if gencache.EnsureModule(*identity) is None:
+                raise RuntimeError("Access type-library wrapper generation unavailable")
 
 
 def _paths_match(a: str, b: str) -> bool:

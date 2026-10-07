@@ -227,7 +227,10 @@ def test_metadata_survives_incompatible_or_missing_access(public, monkeypatch):
     connect = MagicMock(side_effect=AssertionError("Access started"))
     monkeypatch.setattr(tools, "AccessConnection", connect)
     result = asyncio.run(tools.vcs_get_version_info())
-    assert result["mcp_version"] == "0.3.0-dev.17"
+    assert result["mcp_version"] == "0.3.0-dev.17+verify1.2"
+    assert result["server_runtime"]["pid"] > 0
+    assert result["server_runtime"]["python_executable"]
+    assert result["server_runtime"]["package_root"]
     assert result["vcs_version"] == "5.9.0"
     assert not result["addin_compatibility"]["success"]
     assert result["supported_addin_range"] == c.ADDIN_REQUIREMENT.text
@@ -268,6 +271,7 @@ def test_current_distribution_delivers_workflow_owned_preflight():
     assert requirement.text == ">=0.3.0 <0.4.0; prerelease=0.3.0-dev.17"
     assert requirement.reason("0.1.0") == "below_minimum"
     assert requirement.reason("0.3.0-dev.17") is None
+    assert requirement.reason("0.3.0-dev.17+verify1.1") is None
     assert requirement.reason("0.4.0") == "unsupported_boundary"
     instructions = tools.mcp._mcp_server.instructions
     assert requirement.text in instructions

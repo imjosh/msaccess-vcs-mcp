@@ -1,5 +1,8 @@
 """M45/X16: isolated metadata stays off the loop and never attaches to Access."""
 import asyncio
+import os
+from pathlib import Path
+import sys
 import threading
 import time
 from unittest.mock import MagicMock
@@ -52,7 +55,10 @@ def test_version_probe_keeps_recovery_responsive_without_touching_access(
             if completion == "timeout":
                 result = await task
                 assert result["error_pattern"] == "tool_timeout"
-                assert result["mcp_version"] == "0.3.0-dev.17"
+                assert result["mcp_version"] == "0.3.0-dev.17+verify1.2"
+                assert result["server_runtime"]["pid"] == os.getpid()
+                assert result["server_runtime"]["python_executable"] == sys.executable
+                assert result["server_runtime"]["package_root"] == str(Path(compatibility.__file__).resolve().parent)
                 assert result["supported_addin_range"] == compatibility.ADDIN_REQUIREMENT.text
             else:
                 assert not task.done()
