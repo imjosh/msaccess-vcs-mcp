@@ -783,6 +783,24 @@ pytest --cov=msaccess_vcs_mcp --cov-report=html
 pytest -m "not integration"
 ```
 
+The isolated translated `ExportObject` writer test requires an explicit opt-in
+and a confirmed empty Access process inventory. Close Access yourself before
+running it; run native tests serially, without xdist or competing native runs:
+
+```powershell
+$env:ACCESS_VCS_RUN_TRANSLATED_WRITER = '1'
+./venv/Scripts/python.exe -B -m pytest tests/test_translated_writer_live.py -m integration -v -s
+Remove-Item Env:ACCESS_VCS_RUN_TRANSLATED_WRITER
+```
+
+The case runs in a separate Python worker to contain configuration, logging,
+COM and compatibility-session caches. It uses real read-only version preflight,
+real session negotiation, a closed private library copy and process-local HKCU
+mapping. Receipts and logs remain in `../verification/translated-writer-integration/`;
+successful owned databases are disposed after confirmed exit, while failed
+fixtures remain for recovery. It covers a synthetic French writer failure, not
+the shipped French catalog, MCP transport or VERIFY-2 acceptance.
+
 ### Project Structure
 
 ```
