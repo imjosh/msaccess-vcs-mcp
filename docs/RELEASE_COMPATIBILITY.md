@@ -9,17 +9,14 @@ is the existing procedure-call transport; compatibility does not drive the UI.
 
 | Consumer | Authoritative declaration | Supported provider |
 |---|---|---|
-| Server | compatibility.ADDIN_REQUIREMENT | Add-in >=6.0.0 <7.0.0; explicit 6.0.0-dev.17 |
-| Add-in | modCompatibilitySession.SERVER_* | Server >=0.3.0 <0.4.0; explicit 0.3.0-dev.17 |
-| Workflow | [workflow_requirement.json](../src/msaccess_vcs_mcp/workflow_requirement.json) | Server >=0.3.0 <0.4.0; explicit 0.3.0-dev.17 |
+| Server | compatibility.ADDIN_REQUIREMENT | Add-in >=6.0.0 <7.0.0; explicit 6.0.0-dev.18 |
+| Add-in | modCompatibilitySession.SERVER_* | Server >=0.3.0 <0.4.0; explicit 0.3.0-dev.18 |
+| Workflow | [workflow_requirement.json](../src/msaccess_vcs_mcp/workflow_requirement.json) | Server >=0.3.0 <0.4.0; explicit 0.3.0-dev.18 |
 
 The add-in requirement comes from its command contract, independently of the
 workflow requirement. Protocol: **msaccess-vcs.session/1**. Development pair:
-add-in **6.0.0-dev.17**, server **0.3.0-dev.17+verify1.2**; package metadata uses PEP 440
-**0.3.0.dev17+verify1.2**. This build marker distinguishes the next VERIFY-1
-restart after the MCP launch environment repair. The existing Access wrapper
-recovery is retained; consumer declarations still admit `0.3.0-dev.17`
-because build metadata is ignored for compatibility. These assignments are **unpublished**.
+add-in **6.0.0-dev.18**, server **0.3.0-dev.18**; package metadata uses PEP 440
+**0.3.0.dev18**. The coordinated development bump includes the A36–A40 fixes; consumer declarations admit the new development pair. These assignments are **unpublished**.
 Legacy refusal breaks the add-in API (major 6) and the major-zero server API
 (minor 0.3). Historical X16 receipts qualify only the previous contract.
 Release owners must verify and separately authorize publication of stable identities.

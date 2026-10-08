@@ -19,7 +19,7 @@ pytestmark = pytest.mark.version_gate
     ("5.9.99", "below_minimum"), ("6.0.0", None), ("6.0.1", None),
     ("6.10.0", None), ("7.0.0", "unsupported_boundary"),
     ("7.0.0-rc.1", "unsupported_boundary"),
-    ("6.0.0-dev.17", None), ("6.0.0-dev.17+local.009", None),
+    ("6.0.0-dev.18", None), ("6.0.0-dev.18+local.009", None),
     ("6.0.0-rc.1", "prerelease_not_admitted"),
     ("6.1.0-beta.1", "prerelease_not_admitted"), ("6.0.0+build.001", None),
     ("6.00.0", "invalid_version"), ("v6.0.0", "invalid_version"),
@@ -227,7 +227,7 @@ def test_metadata_survives_incompatible_or_missing_access(public, monkeypatch):
     connect = MagicMock(side_effect=AssertionError("Access started"))
     monkeypatch.setattr(tools, "AccessConnection", connect)
     result = asyncio.run(tools.vcs_get_version_info())
-    assert result["mcp_version"] == "0.3.0-dev.17+verify1.2"
+    assert result["mcp_version"] == "0.3.0-dev.18"
     assert result["server_runtime"]["pid"] > 0
     assert result["server_runtime"]["python_executable"]
     assert result["server_runtime"]["package_root"]
@@ -268,10 +268,10 @@ def test_declared_tool_set_is_exhaustively_exercised():
 
 def test_current_distribution_delivers_workflow_owned_preflight():
     requirement = c.workflow_requirement()
-    assert requirement.text == ">=0.3.0 <0.4.0; prerelease=0.3.0-dev.17"
+    assert requirement.text == ">=0.3.0 <0.4.0; prerelease=0.3.0-dev.18"
     assert requirement.reason("0.1.0") == "below_minimum"
-    assert requirement.reason("0.3.0-dev.17") is None
-    assert requirement.reason("0.3.0-dev.17+verify1.1") is None
+    assert requirement.reason("0.3.0-dev.18") is None
+    assert requirement.reason("0.3.0-dev.18+verify1.1") is None
     assert requirement.reason("0.4.0") == "unsupported_boundary"
     instructions = tools.mcp._mcp_server.instructions
     assert requirement.text in instructions

@@ -184,10 +184,13 @@ If a client times out (`-32001`) or the tool returns `rebuild_stalled` / `timeou
 
 ### Running the add-in's own tests
 
-Pass the **development copy** in the add-in's repository as `database_path`:
+Pass a **fresh disposable development copy** with matching source/repository
+context as `database_path`. Follow the add-in's maintained
+[test-host lifecycle](../msaccess-vcs-addin/docs/agent-test-runs.md) for preparation,
+reopen checks, retained fixtures and whole-host disposal.
 
 ```python
-vcs_run_tests(r"C:\path\to\msaccess-vcs-addin\Version Control.accda", "clsTestInstall")
+vcs_run_tests(r"C:\scratch\addin-suite\msaccess-vcs-addin\Version Control.accda", "clsTestInstall")
 ```
 
 A run needs two projects and they are different files: the installed add-in loads as a library and supplies the runner and `TestAssert`, while the code under test is whatever the current database holds. The runner scans the current VBA project, so the host decides which tests are found — aim a run at a user database, or anything in the repo's `Testing` folder, and you get that database's tests reported as a clean pass.

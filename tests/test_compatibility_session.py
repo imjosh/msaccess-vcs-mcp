@@ -17,7 +17,7 @@ class AddinTransport:
     def __init__(self):
         self.calls = Counter()
         self.instance = str(uuid.uuid4())
-        self.version = "6.0.0-dev.17"
+        self.version = "6.0.0-dev.18"
         self.sessions = {}
         self.payloads = []
         self.reject = False
@@ -63,7 +63,7 @@ def transport(monkeypatch, tmp_path):
 
 def test_cached_calls_send_no_versions_and_discover_once(transport, monkeypatch):
     app, path = transport
-    read = Mock(return_value="6.0.0-dev.17")
+    read = Mock(return_value="6.0.0-dev.18")
     monkeypatch.setattr(c, "_read_installed_version", read)
     integration = VCSAddinIntegration(path)
     integration._app = app
@@ -88,7 +88,7 @@ def test_mutable_file_data_reuses_server_approval(transport, monkeypatch):
     """Loaded add-in validation accounts for data writes; server ignores size/mtime."""
     from pathlib import Path
     app, path = transport
-    read = Mock(return_value="6.0.0-dev.17")
+    read = Mock(return_value="6.0.0-dev.18")
     monkeypatch.setattr(c, "_read_installed_version", read)
     assert c.inspect_installed_addin(path)["success"]
     first = s.ensure_session(app, path)

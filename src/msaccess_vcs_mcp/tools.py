@@ -744,8 +744,10 @@ mcp = FastMCP(
         "ACCESS_VCS_CALL_VBA_TIMEOUT_SEC); raising it above the client's request timeout "
         "brings `-32001` back.\n\n"
         "**Running the add-in's own tests:**\n"
-        "Pass the **development copy** in the add-in's repository -- the `Version "
-        "Control.accda` beside `Version Control.accda.src` -- as database_path. The "
+        "Pass a **fresh disposable development copy** -- `Version Control.accda` "
+        "beside its matching `Version Control.accda.src` in an isolated checkout -- "
+        "as database_path. Include current working source, fixtures, docs and Git "
+        "context; a database-only copy can silently skip repository checks. The "
         "runner scans the current VBA project, so that copy is the code under test, "
         "while the installed add-in loads as a library and supplies the runner and "
         "TestAssert. Both roles are required and they are different files. A user "
@@ -755,7 +757,13 @@ mcp = FastMCP(
         "add-in's own window -- an all-EMPTY result (zero assertions) means the harness "
         "was bypassed, not that the tests passed. For live per-test output, run "
         "`msaccess-vcs run-tests <database>` from a terminal (same pattern as "
-        "rebuild-addin). Headless means no add-in UI, not a hidden Access window.\n\n"
+        "rebuild-addin). Headless means no add-in UI, not a hidden Access window. "
+        "A43 uses whole-host disposal with distinct retained import fixtures. "
+        "Follow the add-in docs/agent-test-runs.md: retain import "
+        "fixtures through owned close/fresh reopen readability and compile checks, "
+        "preserve results/logs and failed binaries, then close and delete the entire "
+        "owned temporary host. Keep the primary development database free of suite "
+        "mutations. This lifecycle is specific to add-in development tests.\n\n"
         "**The installed add-in is never a target:**\n"
         "No tool accepts the installed add-in under %APPDATA%\\MSAccessVCS as "
         "database_path, output_path, or template_path. That file exists to be loaded as "
@@ -3707,9 +3715,14 @@ async def vcs_run_tests(
     (via the VCS ribbon or ``VCS.InstallTestAssertModule``). In unattended mode
     the install prompt is suppressed, so pre-install before calling this tool.
 
-    **To run the add-in's own suite, pass the development copy in its repository** --
-    the ``Version Control.accda`` beside ``Version Control.accda.src``. The runner scans
-    the current VBA project, so the host database is the code under test, while the
+    **To run the add-in's own suite, pass a fresh disposable development copy** --
+    ``Version Control.accda`` beside matching ``Version Control.accda.src`` in an
+    isolated checkout with current working source, fixtures, docs and Git context.
+    Follow the add-in's ``docs/agent-test-runs.md`` for retained-fixture close/reopen
+    readability/compilation, evidence preservation and whole-host disposal. A43
+    retains distinct import fixtures; a database-only copy is insufficient.
+    This requirement applies to add-in development, not ordinary user databases.
+    The runner scans the current VBA project, so the host is the code under test, while the
     installed add-in loads as a library and supplies the runner and TestAssert. Passing
     the installed add-in is refused with ``installed_addin_refused`` before it is opened.
 

@@ -1,3 +1,3 @@
 """msaccess-vcs-mcp: A Microsoft Access version control MCP server."""
 
-__version__ = "0.3.0-dev.17+verify1.2"
+__version__ = "0.3.0-dev.18"

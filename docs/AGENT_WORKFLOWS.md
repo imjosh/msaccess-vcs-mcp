@@ -5,7 +5,7 @@ This guide documents common workflows for AI agents working with Microsoft Acces
 ## Required compatibility preflight
 
 This workflow owns the server requirement: **>=0.3.0 <0.4.0** for stable
-releases, plus explicit development admission **0.3.0-dev.17** (build metadata
+releases, plus explicit development admission **0.3.0-dev.18** (build metadata
 does not affect identity). The range is assigned for the next release; no
 published 0.3.0 is claimed. The authoritative consumer declaration is the shipped
 [`workflow_requirement.json`](../src/msaccess_vcs_mcp/workflow_requirement.json).
@@ -17,7 +17,7 @@ Before database work, and after a reconnection, server replacement, or changed
 connection identity, call the existing read-only `vcs_get_version_info()` tool.
 Read `mcp_version`, even if `success` is false because installation diagnostics
 failed. Apply strict SemVer comparison to this workflow's own range. Accept a
-stable 0.3.x at or above 0.3.0, or exactly 0.3.0-dev.17 ignoring build metadata.
+stable 0.3.x at or above 0.3.0, or exactly 0.3.0-dev.18 ignoring build metadata.
 Other prereleases require a workflow requirement update. Database work proceeds
 only after this check succeeds; a previously accepted connection does not admit
 a newly connected server. When reconnection cannot be detected, check before
@@ -25,7 +25,7 @@ each new database workflow rather than retaining admission across workflows.
 
 For an older server, tell the user: "The connected MCP server is {installed};
 this workflow requires >=0.3.0 <0.4.0 (minimum 0.3.0), or the explicitly admitted
-development build 0.3.0-dev.17. Update the MCP server to a compatible release or
+development build 0.3.0-dev.18. Update the MCP server to a compatible release or
 that development build, restart its process, and reconnect the MCP client."
 Stop database calls while that requirement is unmet. For a newer unsupported
 major or 0.4+ minor, explain the supported combination and offer a workflow
@@ -35,7 +35,7 @@ same server again does not resolve that mismatch.
 If the version tool is absent, fails without `mcp_version`, or returns a
 malformed/missing version, tell the user: "MCP server compatibility is
 unconfirmed: installed version {value or unknown}; required >=0.3.0 <0.4.0,
-minimum 0.3.0 (development admission 0.3.0-dev.17). Verify the server configured
+minimum 0.3.0 (development admission 0.3.0-dev.18). Verify the server configured
 for this connection, update to a compatible build if needed, restart and
 reconnect, then repeat the read-only check." Stop dependent calls. Older servers
 need not expose new requirement fields: their existing valid `mcp_version`
@@ -338,17 +338,25 @@ do not add a second timer wait, fixed-duration sleep, or
 
 ### 6c. Run the add-in's own test suite
 
-**Use case:** You changed add-in source and want its own tests to confirm the rebuild before touching a user database.
+**Use case:** Qualify the add-in's own source-built version in a fresh disposable
+development host. Normal user-database workflows remain separate.
 
-**Steps:**
+**Preparation and completion:** Follow the add-in's maintained
+[test-host lifecycle](../../msaccess-vcs-addin/docs/agent-test-runs.md). Prepare a
+complete isolated repository context, use a closed source-built `.accda`, run the
+suite, validate retained fixtures and compilation after owned close/fresh reopen,
+preserve evidence, then dispose of the whole host. A43 implementation/qualification
+are pending; copying the current cleanup-enabled binary alone is insufficient.
+
+**Run against the prepared disposable host:**
 ```python
-vcs_run_tests(r"C:\path\to\msaccess-vcs-addin\Version Control.accda", filter="clsTestInstall")
+vcs_run_tests(r"C:\scratch\addin-suite\msaccess-vcs-addin\Version Control.accda", filter="clsTestInstall")
 ```
 
 MCP progress is best-effort in Cursor. For live per-test output:
 
 ```text
-msaccess-vcs run-tests "C:\path\to\msaccess-vcs-addin\Version Control.accda" --filter clsTestInstall
+msaccess-vcs run-tests "C:\scratch\addin-suite\msaccess-vcs-addin\Version Control.accda" --filter clsTestInstall
 ```
 
 Keep the CLI in the foreground so its stream stays in the primary chat. It
@@ -358,7 +366,7 @@ full FAIL/ERROR/EMPTY lines. The last stdout line is a human summary such as
 `Tests passed. 12 subs, 40 assertions in 1.48s`. Headless means no add-in UI
 (no web runner, no console form), not a hidden Access window.
 
-**Why the path is the development copy:** a run needs two projects and they are different files. The installed add-in loads as a library and supplies the runner and `TestAssert`; the code under test is whatever the current database holds. The runner scans the current VBA project, so the host decides which tests are found — aim the call at a user database, or anything in the repository's `Testing` folder, and you get that database's tests. Access will not bind a file moniker to an `.accda`, so the server opens the development copy as the current database explicitly; you do not need to open it first.
+**Why the path is the disposable development copy:** a run needs two projects and they are different files. The installed add-in loads as a library and supplies the runner and `TestAssert`; the code under test is whatever the current database holds. The runner scans the current VBA project, so the disposable host must contain the version under test and its repository context; a user database or the `Testing` sample finds different tests. Access will not bind a file moniker to an `.accda`, so the server opens the development copy as the current database explicitly; you do not need to open it first.
 
 **The installed add-in is never a target.** No tool accepts it as `database_path`, `output_path`, or `template_path` — not this one, not export, import, rebuild, `vcs_run_vba`, or `vcs_call_vba`. That file exists to be loaded as a library: opening it as a database, or writing into it, resets a VBA project while it is executing. It also has no source tree beside it for the tests that read one. The check runs before the Access gate and any COM work, and returns `error_pattern: installed_addin_refused`; the add-in refuses such a run itself, so the server's refusal is the earlier of two. `vcs_get_version_info()` reports the installed version without opening anything. The comparison ignores the extension, because a compiled install is a `.accde` built from the same `.accda`.
 

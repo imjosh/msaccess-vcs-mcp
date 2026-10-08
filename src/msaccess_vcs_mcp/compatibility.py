@@ -123,7 +123,7 @@ class Requirement:
         return "below_minimum" if value < Version.parse(self.minimum) else None
 
 
-ADDIN_REQUIREMENT = Requirement("6.0.0", "7.0.0", ("6.0.0-dev.17",))
+ADDIN_REQUIREMENT = Requirement("6.0.0", "7.0.0", ("6.0.0-dev.18",))
 _discovery_cache = OrderedDict()
 _discovery_lock = threading.RLock()
 
