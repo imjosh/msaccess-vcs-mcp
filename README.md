@@ -821,6 +821,9 @@ MIT License - see LICENSE file for details.
 
 Contributions are welcome! Please open an issue or submit a pull request.
 
+For capability planning, see the [MCP-Access integration assessment](docs/MCP_ACCESS_INTEGRATION_ASSESSMENT.md),
+which records proposed integration boundaries and the source revisions inspected.
+
 ## Related Tools
 
 - **[db-inspector-mcp](https://github.com/joyfullservice/db-inspector-mcp)**: Cross-database MCP server for introspection and migration validation
