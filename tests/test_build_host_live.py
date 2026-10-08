@@ -12,12 +12,15 @@ from msaccess_vcs_mcp.callback_server import CallbackServer
 from msaccess_vcs_mcp.config import get_default_addin_path
 from msaccess_vcs_mcp.operation_manager import OperationManager
 from tests.test_export_build_fallbacks import _unwrap
+from tests.policy_live_host import OwnedHost, raw_creation
 
 
 @pytest.mark.integration
 @pytest.mark.skipif(sys.platform != "win32", reason="Requires Microsoft Access")
 def test_rebuild_preserves_other_access_database(tmp_path, monkeypatch):
     import pythoncom
+    import win32api
+    import win32event
     from msaccess_vcs_mcp.access_com.connection import create_isolated_access_app, ensure_access_visible
     from msaccess_vcs_mcp.access_com.instance_registry import process_create_time
     from msaccess_vcs_mcp.access_com.process_qos import pid_from_access_app
@@ -47,12 +50,15 @@ def test_rebuild_preserves_other_access_database(tmp_path, monkeypatch):
     manager = OperationManager()
     server = CallbackServer(manager.route_callback)
     app = None
+    owned = None
+    build_handles = []
     error_trapping = None
     created = []
     pythoncom.CoInitialize()
     try:
         # This fixture owns this window; the rebuild under test does not.
         app = create_isolated_access_app()
+        owned = OwnedHost(app, user_path)
         error_trapping = app.GetOption("Error Trapping")
         app.SetOption("Error Trapping", 2)
         app.NewCurrentDatabase(user_path)
@@ -68,6 +74,8 @@ def test_rebuild_preserves_other_access_database(tmp_path, monkeypatch):
         def create_host():
             host = create_isolated_access_app()
             created.append(pid_from_access_app(host))
+            handle = win32api.OpenProcess(0x1000 | 0x100000, False, created[-1])
+            build_handles.append((created[-1], handle, raw_creation(handle)))
             print("M43 build pid:", created[-1], flush=True)
             return host
 
@@ -88,20 +96,36 @@ def test_rebuild_preserves_other_access_database(tmp_path, monkeypatch):
         assert Path(app.CurrentDb().Name).resolve() == Path(user_path).resolve()
         assert app.UserControl is True
         assert app.CurrentDb().QueryDefs("qryM43Sentinel").SQL == "SELECT 43 AS SentinelValue;\r\n"
+        owned.receipt['build_processes'] = []
+        for build_pid, handle, creation in build_handles:
+            exited = win32event.WaitForSingleObject(handle, 10000) == win32event.WAIT_OBJECT_0
+            owned.receipt['build_processes'].append(dict(pid=build_pid, creation_FILETIME=creation,
+                                                        original_handle_exit_confirmed=exited))
+            assert exited
+        owned.check('sentinel_preserved', owned.verified(), True)
         # Inspect the built file through DAO without opening another Access UI.
         built = app.DBEngine.OpenDatabase(output, False, True)
         try:
             assert built.Containers("Modules").Documents("modM43Fixture").Name == "modM43Fixture"
         finally:
             built.Close()
+            built = None
     finally:
         server.stop()
-        if app is not None:
-            # Only the fixture's own DispatchEx reference is ever cleaned up.
-            try:
-                if error_trapping is not None:
-                    app.SetOption("Error Trapping", error_trapping)
-                app.CloseCurrentDatabase()
-            finally:
-                app.Quit(2)
-        pythoncom.CoUninitialize()
+        try:
+            if owned is not None:
+                if not owned.exited():
+                    assert owned.verified(), 'Uncertain sentinel identity/path; left untouched'
+                    if error_trapping is not None:
+                        app.SetOption("Error Trapping", error_trapping)
+                def release():
+                    nonlocal app
+                    owned.app = None
+                    app = None
+                owned.close(release)
+        finally:
+            if owned is not None:
+                owned.save('build-preservation')
+            for _, handle, _ in build_handles:
+                win32api.CloseHandle(handle)
+            pythoncom.CoUninitialize()
