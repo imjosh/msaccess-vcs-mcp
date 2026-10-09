@@ -342,7 +342,7 @@ def test_cleanup_failure_reaches_usage_log_and_keeps_operation_error(tmp_path, m
     assert result["policy_cleanup_error"] == "clear exploded"
     entries = [
         json.loads(line)
-        for line in (log_dir / "vcs-mcp-usage.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (log_dir / f"vcs-mcp-usage-{usage_logging._INSTANCE_ID}.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     cleanup = [e for e in entries if e.get("event") == "policy_cleanup_failed"]
     assert len(cleanup) == 1

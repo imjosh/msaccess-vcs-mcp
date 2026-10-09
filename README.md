@@ -155,6 +155,14 @@ All configuration is done through environment variables, typically in a `.env` f
 | `ACCESS_VCS_LOG_MAX_SIZE_MB` | Max log file size before rotation | `10` | No |
 | `ACCESS_VCS_LOG_BACKUP_COUNT` | Number of rotated backup files to keep | `5` | No |
 
+Usage and diagnostic logs use `vcs-mcp-usage-<pid>-<uuid>.jsonl` and
+`vcs-mcp-diagnostic-<pid>-<uuid>.jsonl`. Each server process owns its files;
+startup stderr and `vcs_get_version_info()` report the active paths. Records
+include `instance_id` and `server_pid`. If rotation is locked, logging reopens
+the current file. If writing is unavailable, records go to stderr; reopening
+and rotation retry on later records at most every five seconds, without sleeps.
+Failure diagnostics are limited to once per five seconds per failure type.
+
 ### Project-Specific Configuration
 
 This tool supports per-project configurations using `.env` files:

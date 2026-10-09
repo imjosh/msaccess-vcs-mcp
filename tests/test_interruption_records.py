@@ -320,7 +320,7 @@ def usage_log(tmp_path, monkeypatch):
     monkeypatch.setenv("ACCESS_VCS_LOG_DIR", str(log_dir))
     monkeypatch.setenv("ACCESS_VCS_DISABLE_DIAGNOSTIC_LOG", "true")
     usage_logging.reset_logging()
-    yield log_dir / "vcs-mcp-usage.jsonl"
+    yield log_dir / f"vcs-mcp-usage-{usage_logging._INSTANCE_ID}.jsonl"
     usage_logging.reset_logging()
 
 

@@ -215,7 +215,9 @@ Run these tests **through this server**, never from the add-in's own window. `mo
 
 ## Logging
 
-The server writes two parallel JSON Lines streams. Both filenames use the `vcs-mcp-` prefix so they don't collide with other tools that share the same logs directory.
+The server writes two parallel JSON Lines streams. Both filenames use the `vcs-mcp-` prefix and a process identity (`<pid>-<uuid>`), stable across configuration reloads. Each record includes `instance_id` and `server_pid`. Use the active paths from startup stderr or `vcs_get_version_info()` rather than assuming a fixed filename.
+
+If Windows refuses rotation, the writer reopens the current file and continues. Unavailable records go to stderr. File reopening and rotation retries occur on later records, at most once per five seconds, with diagnostics limited to the same frequency per failure type. Logging never sleeps or queues retries on the MCP call path.
 
 ### VCS operation logs (written by the add-in, not the server)
 
@@ -229,22 +231,22 @@ The add-in also writes a `.gitignore` into the source folder containing `logs/` 
 
 The add-in's sync API returns this as camelCase `logPath`; `_addin_json_result` in `tools.py` normalizes it to `log_path` at the boundary and keeps the original key as an alias. Async completion callbacks already use `log_path`. Keep the normalizer even if the add-in changes: a newer server may run against an older add-in build.
 
-### Diagnostic stream (`vcs-mcp-diagnostic.jsonl`) — always on
+### Diagnostic stream (`vcs-mcp-diagnostic-<instance>.jsonl`) — always on
 
 Captures server lifecycle events: `server_start`, `startup_env_load`, `lazy_env_load`, `lazy_init_started`, `lazy_init_skipped`, `list_roots_failed`, `list_roots_response`, `lazy_init_loaded`, `lazy_init_no_env_in_roots`, `usage_log_status`. Independent of `ACCESS_VCS_ENABLE_LOGGING` so it answers the "why didn't logging work?" question even when usage logging is silent.
 
-- **Location:** `~/.msaccess-vcs-mcp/logs/vcs-mcp-diagnostic.jsonl`
+- **Location:** `~/.msaccess-vcs-mcp/logs/vcs-mcp-diagnostic-<instance>.jsonl`
 - **Override:** `ACCESS_VCS_DIAGNOSTIC_LOG_DIR`
 - **Opt out:** `ACCESS_VCS_DISABLE_DIAGNOSTIC_LOG=true`
 - **Rotation:** 1 MB per file, 3 backups
 - **Discoverable from agents:** `vcs_get_version_info()` returns the active `diagnostic_log_path`.
 
-### Usage stream (`vcs-mcp-usage.jsonl`) — default on
+### Usage stream (`vcs-mcp-usage-<instance>.jsonl`) — default on
 
 When `ACCESS_VCS_ENABLE_LOGGING=true` (the default), every tool call writes a structured entry. Set the env var to `false` to opt out.
 
-- **Development installs:** logs to `{project_root}/logs/vcs-mcp-usage.jsonl`
-- **Package installs:** logs to `~/.msaccess-vcs-mcp/logs/vcs-mcp-usage.jsonl`
+- **Development installs:** logs to `{project_root}/logs/vcs-mcp-usage-<instance>.jsonl`
+- **Package installs:** logs to `~/.msaccess-vcs-mcp/logs/vcs-mcp-usage-<instance>.jsonl`
 - **Override:** `ACCESS_VCS_LOG_DIR`
 - **Rotation:** `ACCESS_VCS_LOG_MAX_SIZE_MB` (default 10 MB), `ACCESS_VCS_LOG_BACKUP_COUNT` (default 5)
 

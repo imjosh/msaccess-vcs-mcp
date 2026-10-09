@@ -80,7 +80,7 @@ def _read_diagnostic_events() -> list[dict]:
     diag_dir_str = os.environ.get("ACCESS_VCS_DIAGNOSTIC_LOG_DIR")
     if not diag_dir_str:
         return []
-    path = Path(diag_dir_str) / "vcs-mcp-diagnostic.jsonl"
+    path = Path(diag_dir_str) / f"vcs-mcp-diagnostic-{logging_module._INSTANCE_ID}.jsonl"
     if not path.exists():
         return []
     return [

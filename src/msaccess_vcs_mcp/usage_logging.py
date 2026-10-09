@@ -6,7 +6,7 @@ Logs are stored with automatic rotation.
 
 **Two parallel streams:**
 
-1. **Diagnostic stream** (``vcs-mcp-diagnostic.jsonl``) -- always-on lifecycle
+1. **Diagnostic stream** (``vcs-mcp-diagnostic-<instance>.jsonl``) -- always-on lifecycle
    log: server start, project-root resolution, lazy MCP-roots ``.env``
    discovery, and reset transitions. Independent of
    ``ACCESS_VCS_ENABLE_LOGGING`` so it can be used to debug exactly the
@@ -14,7 +14,7 @@ Logs are stored with automatic rotation.
    ``ACCESS_VCS_DIAGNOSTIC_LOG_DIR`` or ``~/.msaccess-vcs-mcp/logs/``.
    Opt out with ``ACCESS_VCS_DISABLE_DIAGNOSTIC_LOG=true``.
 
-2. **Usage stream** (``vcs-mcp-usage.jsonl``) -- tool calls and
+2. **Usage stream** (``vcs-mcp-usage-<instance>.jsonl``) -- tool calls and
    code-execution events. Gated on ``ACCESS_VCS_ENABLE_LOGGING`` (default
    ``true``).
 
@@ -53,6 +53,87 @@ from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
+
+
+# Stable across configuration reloads; PID alone can be reused by Windows.
+_INSTANCE_ID = f"{os.getpid()}-{uuid4().hex}"
+
+
+class _RecoveringRotatingFileHandler(RotatingFileHandler):
+    """Serialize JSONL writes and recover from transient Windows file locks.
+
+    Failed filesystem operations are retried on a later record, at most once
+    per five seconds. Records that cannot reach the file go to stderr; there
+    is no growing memory queue and no sleep on the MCP request path.
+    """
+
+    retry_interval = 5.0
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs, delay=True)
+        self._next_open = 0.0
+        self._next_rotation = 0.0
+        self._next_warning: dict[str, float] = {}
+
+    def _warn(self, operation: str, error: Exception, now: float) -> None:
+        if now >= self._next_warning.get(operation, 0.0):
+            print(
+                f"Warning: Log {operation} failed at {self.baseFilename} "
+                f"(instance {_INSTANCE_ID}): {error}; retries at most every "
+                f"{self.retry_interval:g}s; unavailable records go to stderr",
+                file=sys.stderr,
+            )
+            self._next_warning[operation] = now + self.retry_interval
+
+    def _open_for_write(self, now: float) -> bool:
+        if self.stream is not None and not self.stream.closed:
+            return True
+        if now < self._next_open:
+            return False
+        try:
+            self.stream = self._open()
+            return True
+        except Exception as error:
+            self._next_open = now + self.retry_interval
+            self._warn("reopen", error, now)
+            return False
+
+    def write_jsonl(self, line: str) -> None:
+        self.acquire()
+        try:
+            now = time.monotonic()
+            if not self._open_for_write(now):
+                print(line, end="", file=sys.stderr)
+                return
+            try:
+                self.stream.write(line)
+                self.stream.flush()
+            except Exception as error:
+                self._warn("write", error, now)
+                try:
+                    self.stream.close()
+                except Exception:
+                    pass
+                self.stream = None
+                self._next_open = now + self.retry_interval
+                print(line, end="", file=sys.stderr)
+                return
+
+            if self.maxBytes > 0 and now >= self._next_rotation:
+                try:
+                    self.stream.seek(0, 2)
+                    if self.stream.tell() >= self.maxBytes:
+                        self.doRollover()
+                except Exception as error:
+                    self._next_rotation = now + self.retry_interval
+                    self._warn("rotation", error, now)
+                    # doRollover closes the stream before rename. The record
+                    # was already flushed: reopen without duplicating it.
+                    self._open_for_write(now)
+        finally:
+            self.release()
+
 
 def _strip_path_quotes(value: str) -> str:
     """Strip matching outer quotes from an env-var value (see config._strip_quotes)."""
@@ -62,10 +143,10 @@ def _strip_path_quotes(value: str) -> str:
 
 
 _logging_enabled: bool | None = None
-_log_handler: RotatingFileHandler | None = None
+_log_handler: _RecoveringRotatingFileHandler | None = None
 _log_file: Path | None = None
 
-_diagnostic_handler: RotatingFileHandler | None = None
+_diagnostic_handler: _RecoveringRotatingFileHandler | None = None
 _diagnostic_file: Path | None = None
 _diagnostic_initialized: bool = False
 _diagnostic_enabled: bool = False
@@ -248,11 +329,11 @@ def _initialize_logging() -> bool:
         _logging_enabled = False
         return False
 
-    _log_file = log_dir / "vcs-mcp-usage.jsonl"
+    _log_file = log_dir / f"vcs-mcp-usage-{_INSTANCE_ID}.jsonl"
     max_bytes = config["max_size_mb"] * 1024 * 1024
 
     try:
-        _log_handler = RotatingFileHandler(
+        _log_handler = _RecoveringRotatingFileHandler(
             filename=str(_log_file),
             maxBytes=max_bytes,
             backupCount=config["backup_count"],
@@ -325,12 +406,12 @@ def reset_logging() -> None:
 
 def _write_log_entry(
     entry: dict[str, Any],
-    handler: RotatingFileHandler | None = None,
+    handler: _RecoveringRotatingFileHandler | None = None,
 ) -> None:
     """Write a single JSONL entry to a rotating log handler.
 
     Defaults to the usage-log handler. Pass ``handler`` to target the
-    diagnostic stream (or any other rotating handler).
+    diagnostic stream.
     """
     if handler is None:
         handler = _log_handler
@@ -343,19 +424,13 @@ def _write_log_entry(
     if "version" not in entry:
         from . import __version__
         entry["version"] = __version__
+    entry["instance_id"] = _INSTANCE_ID
+    entry["server_pid"] = os.getpid()
 
     try:
         log_line = json.dumps(entry, default=str) + "\n"
 
-        handler.stream.write(log_line)
-        handler.stream.flush()
-
-        # Check if rotation is needed by comparing file size directly.
-        # We can't use shouldRollover() because it expects a LogRecord.
-        if handler.maxBytes > 0:
-            handler.stream.seek(0, 2)
-            if handler.stream.tell() >= handler.maxBytes:
-                handler.doRollover()
+        handler.write_jsonl(log_line)
 
     except Exception as e:
         print(f"Warning: Failed to write log entry: {e}", file=sys.stderr)
@@ -370,8 +445,9 @@ def _initialize_diagnostic_logging() -> bool:
     that an operator can answer "why didn't logging work?" without
     relying on the very ``.env`` discovery that may have failed.
 
-    Returns ``True`` if the handler is open and ready, ``False`` if the
-    stream has been opted out or the handler could not be created.
+    Returns ``True`` if the handler is configured (temporarily unavailable
+    files use stderr), ``False`` if the stream has been opted out or the
+    handler could not be created.
     Idempotent: subsequent calls return the cached result.
     """
     global _diagnostic_handler, _diagnostic_file
@@ -401,18 +477,19 @@ def _initialize_diagnostic_logging() -> bool:
         _diagnostic_disabled_reason = f"mkdir_failed: {e}"
         return False
 
-    _diagnostic_file = log_dir / "vcs-mcp-diagnostic.jsonl"
+    _diagnostic_file = log_dir / f"vcs-mcp-diagnostic-{_INSTANCE_ID}.jsonl"
     # Diagnostic log: smaller cap, fewer backups -- it's lifecycle-only.
     max_bytes = 1 * 1024 * 1024  # 1 MB
     backup_count = 3
 
     try:
-        _diagnostic_handler = RotatingFileHandler(
+        _diagnostic_handler = _RecoveringRotatingFileHandler(
             filename=str(_diagnostic_file),
             maxBytes=max_bytes,
             backupCount=backup_count,
             encoding="utf-8",
         )
+        _diagnostic_handler._open_for_write(time.monotonic())
     except Exception as e:
         print(
             f"Warning: Could not initialize diagnostic logging at {_diagnostic_file}: {e}",
@@ -431,7 +508,7 @@ def _initialize_diagnostic_logging() -> bool:
 
 def log_diagnostic_event(event: str, **fields: Any) -> None:
     """
-    Append a single lifecycle event to ``vcs-mcp-diagnostic.jsonl``.
+    Append a single lifecycle event to ``vcs-mcp-diagnostic-<instance>.jsonl``.
 
     Always-on by design: this is the stream of last resort for
     diagnosing why the *usage* stream might be silent. No-ops cleanly
@@ -459,7 +536,7 @@ def get_diagnostic_log_path() -> Path | None:
 
 
 def is_diagnostic_logging_enabled() -> bool:
-    """Return whether the diagnostic stream is open and writing."""
+    """Return whether diagnostics are enabled, including stderr fallback."""
     return _initialize_diagnostic_logging()
 
 
@@ -825,7 +902,7 @@ def log_addin_probe(
     verify the add-in is healthy before any real work is dispatched.  This
     helper records the probe's outcome -- duration, success, and whether
     the hard timeout fired -- so the cumulative cost of probing every tool
-    call can be audited from the same ``vcs-mcp-usage.jsonl`` stream as
+    call can be audited from the same ``vcs-mcp-usage-<instance>.jsonl`` stream as
     ``tool_call`` and ``code_execution`` events.
 
     Args:

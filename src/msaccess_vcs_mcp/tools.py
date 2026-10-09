@@ -858,11 +858,11 @@ mcp = FastMCP(
         "**Logs:**\n"
         "Two JSON Lines streams (both prefixed `vcs-mcp-` so they don't collide with "
         "other tools' logs in a shared directory).\n"
-        "1. `vcs-mcp-diagnostic.jsonl` -- always-on lifecycle log "
+        "1. `vcs-mcp-diagnostic-<instance>.jsonl` -- always-on lifecycle log "
         "(server_start, startup_env_load, lazy_init_*). Lives at "
         "`~/.msaccess-vcs-mcp/logs/`. Opt out with "
         "ACCESS_VCS_DISABLE_DIAGNOSTIC_LOG=true.\n"
-        "2. `vcs-mcp-usage.jsonl` -- tool-call audit + code-execution events. "
+        "2. `vcs-mcp-usage-<instance>.jsonl` -- tool-call audit + code-execution events. "
         "Default-on; opt out with ACCESS_VCS_ENABLE_LOGGING=false. "
         "SQL/VBA bodies are recorded as `code_length` only (full `code` "
         "field requires ACCESS_VCS_LOG_CODE_CONTENT=true). Param keys "
@@ -2416,9 +2416,9 @@ async def vcs_get_version_info(
         - addin_path: Path to the VCS add-in file
         - callback_url: URL for async callbacks (None if not available)
         - async_available: Boolean indicating if async operations are supported
-        - usage_log_path: Path to ``vcs-mcp-usage.jsonl`` (None if usage
+        - usage_log_path: Path to ``vcs-mcp-usage-<instance>.jsonl`` (None if usage
           logging is disabled)
-        - diagnostic_log_path: Path to ``vcs-mcp-diagnostic.jsonl`` (None
+        - diagnostic_log_path: Path to ``vcs-mcp-diagnostic-<instance>.jsonl`` (None
           if the always-on diagnostic stream has been opted out)
         - log_code_content: Boolean -- whether ``code_execution`` events
           record the full SQL/VBA body or only ``code_length``

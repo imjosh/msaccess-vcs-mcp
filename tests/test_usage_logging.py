@@ -142,7 +142,7 @@ class TestInitializeLogging:
             clear=False,
         ):
             _initialize_logging()
-            assert (log_dir / "vcs-mcp-usage.jsonl").exists()
+            assert (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").exists()
 
 
 class TestResetLogging:
@@ -225,7 +225,7 @@ class TestLogToolCall:
                 execution_time_ms=42.5,
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         # First line is init, second is the tool call
         entry = json.loads(lines[-1])
         assert entry["event"] == "tool_call"
@@ -250,7 +250,7 @@ class TestLogToolCall:
                 execution_time_ms=1.2,
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["success"] is False
         assert "File not found" in entry["error"]
@@ -271,7 +271,7 @@ class TestLogToolCall:
                 result={"error": "Compilation failed"},
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["success"] is False
 
@@ -301,7 +301,7 @@ class TestLogToolCall:
                 },
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         decision, interrupted = (json.loads(line) for line in lines[-2:])
         assert decision["success"] is False
         assert decision["error_pattern"] == "decision_required"
@@ -387,7 +387,7 @@ class TestWithLoggingDecorator:
             result = my_tool("hello", count=3)
             assert result == {"result": "hello", "count": 3}
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["tool"] == "test_tool"
         assert entry["success"] is True
@@ -411,7 +411,7 @@ class TestWithLoggingDecorator:
             result = asyncio.run(my_async_tool("C:\\test.accdb"))
             assert result == {"path": "C:\\test.accdb"}
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["tool"] == "test_async_tool"
         assert entry["success"] is True
@@ -431,7 +431,7 @@ class TestWithLoggingDecorator:
             with pytest.raises(ValueError, match="something broke"):
                 my_failing_tool()
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["success"] is False
         assert "something broke" in entry["error"]
@@ -472,7 +472,7 @@ class TestHelpers:
         ):
             path = get_log_file_path()
             assert path is not None
-            assert path.name == "vcs-mcp-usage.jsonl"
+            assert path.name == f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl"
 
     def test_get_log_file_path_when_disabled(self):
         with patch.dict(os.environ, {"ACCESS_VCS_ENABLE_LOGGING": "false"}, clear=False):
@@ -505,7 +505,7 @@ class TestLogCodeExecution:
                 code_type="sql",
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["event"] == "code_execution"
         assert entry["tool"] == "vcs_execute_sql"
@@ -534,7 +534,7 @@ class TestLogCodeExecution:
                 code_type="vba",
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["code_length"] == len("Dim qd As DAO.QueryDef")
         assert "code" not in entry
@@ -560,7 +560,7 @@ class TestLogCodeExecution:
                 code_type="sql",
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["event"] == "code_execution"
         assert entry["code"] == sql
@@ -591,7 +591,7 @@ class TestLogCodeExecution:
                 code_type="vba",
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["code_type"] == "vba"
         assert entry["code"] == vba_code
@@ -617,7 +617,7 @@ class TestLogCodeExecution:
                 code_type="vba_call",
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["event"] == "code_execution"
         assert entry["code_type"] == "vba_call"
@@ -646,7 +646,7 @@ class TestLogCodeExecution:
                 code=long_sql,
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["code"] == long_sql
         assert "truncated" not in entry["code"]
@@ -682,7 +682,7 @@ class TestLogAddinProbe:
                 error=None,
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["event"] == "addin_probe"
         assert entry["addin_path"].endswith("Version Control.accda")
@@ -708,7 +708,7 @@ class TestLogAddinProbe:
                 error="VCS add-in probe timed out after 10.0s ...",
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["event"] == "addin_probe"
         assert entry["success"] is False
@@ -734,7 +734,7 @@ class TestLogAddinProbe:
                 error="Failed to load VCS add-in: COM error",
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["success"] is False
         assert entry["timed_out"] is False
@@ -773,7 +773,7 @@ class TestRecoveryLogging:
                 phase="run_vba",
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["event"] == "vba_worker_timeout"
         assert entry["database"] == "C:\\test.accdb"
@@ -797,7 +797,7 @@ class TestRecoveryLogging:
                 success=True,
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["event"] == "com_recovery_probe_result"
         assert entry["database"] == "C:\\test.accdb"
@@ -818,7 +818,7 @@ class TestDiagnosticLogging:
         assert is_diagnostic_logging_enabled() is True
         path = get_diagnostic_log_path()
         assert path is not None
-        assert path.name == "vcs-mcp-diagnostic.jsonl"
+        assert path.name == f"vcs-mcp-diagnostic-{logging_module._INSTANCE_ID}.jsonl"
 
     def test_opt_out_via_env_var(self, tmp_path, monkeypatch):
         """ACCESS_VCS_DISABLE_DIAGNOSTIC_LOG=true disables the stream
@@ -888,7 +888,7 @@ class TestDiagnosticLogging:
         assert diag_path is not None and diag_path.exists()
         # Usage stream stays untouched.
         assert get_log_file_path() is None
-        assert not (usage_dir / "vcs-mcp-usage.jsonl").exists()
+        assert not (usage_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").exists()
 
     def test_initialization_is_idempotent(self, tmp_path, monkeypatch):
         """A second call returns the cached state without reopening the
@@ -990,7 +990,7 @@ class TestSecretKeyMasking:
                 },
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["parameters"]["database_path"] == "C:\\test.accdb"
         assert entry["parameters"]["password"] == "<redacted>"
@@ -1063,7 +1063,7 @@ class TestCodeParameterRedaction:
                 execution_time_ms=100.0,
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["parameters"]["code"] == f"<code_length:{len(vba)}>"
         assert entry["parameters"]["database_path"] == "C:\\test.accdb"
@@ -1094,7 +1094,7 @@ class TestCodeParameterRedaction:
                 execution_time_ms=50.0,
             )
 
-        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        lines = (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text().strip().split("\n")
         entry = json.loads(lines[-1])
         assert entry["parameters"]["code"] == vba
 

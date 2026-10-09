@@ -405,7 +405,7 @@ class TestResolutionRecordedInUsageLog:
 
             entries = [
                 json.loads(line)
-                for line in (log_dir / "vcs-mcp-usage.jsonl").read_text(encoding="utf-8").splitlines()
+                for line in (log_dir / f"vcs-mcp-usage-{logging_module._INSTANCE_ID}.jsonl").read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
             init_events = [e for e in entries if e.get("event") == "logging_initialized"]
