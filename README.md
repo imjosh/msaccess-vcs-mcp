@@ -79,6 +79,15 @@ The add-in will be installed to `%AppData%\MSAccessVCS\Version Control.accda` by
 
 ### 3. Register the MCP server
 
+The supported connection mode on this branch is **stdio**, which remains the
+default. Upstream commit `2a7bcb1` adds optional `--transport sse`, `--host`, and
+`--port` flags, but SSE is not ready for use: with MCP SDK 1.30.0, startup fails
+because `FastMCP.run()` does not accept the supplied `host` and `port` arguments.
+Remote host/origin configuration and the supported client/session model also
+remain unresolved. The upstream change was merged for branch synchronization;
+remote SSE support is deferred and existing client configurations should continue
+using stdio.
+
 Add the server entry to your MCP client config. Both Cursor and Claude Code use the same `mcpServers` format, just in different files:
 
 | Client | Project-level config | User-level (global) config |
