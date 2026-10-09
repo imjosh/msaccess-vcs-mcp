@@ -1,279 +1,45 @@
-# AGENTS.md - AI Agent Guide to msaccess-vcs-mcp
-
-## Purpose
-
-This repository contains the **msaccess-vcs-mcp** server — a lightweight MCP (Model Context Protocol) bridge that lets AI agents drive the [MSAccess VCS Add-in](https://github.com/joyfullservice/msaccess-vcs-addin) for version-controlling Microsoft Access databases.
-
-## Development Environment Setup
-
-**Always use the project virtual environment.** The package is installed in editable mode inside `venv/`. Do not install globally or suggest `pip install` outside the venv.
-
-```powershell
-# Activate the virtual environment (Windows PowerShell)
-cd C:\path\to\msaccess-vcs-mcp
-.\venv\Scripts\Activate.ps1
-
-# If the venv doesn't exist yet, create it first:
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
-```
-
-### Running Tests
-
-Tests must run inside the activated virtual environment:
-
-```powershell
-.\venv\Scripts\Activate.ps1
-
-# Run all unit tests
-pytest
-
-# Run a specific test file
-pytest tests/test_usage_logging.py -v
-
-# Skip integration tests (require Access installed)
-pytest -m "not integration"
-
-# Run with coverage
-pytest --cov=msaccess_vcs_mcp --cov-report=html
-```
-
-## Repository Structure
-
-```
-msaccess-vcs-mcp/
-├── src/msaccess_vcs_mcp/       # Package source
-│   ├── __init__.py             # Version (__version__)
-│   ├── main.py                 # CLI entry point, startup sequence
-│   ├── tools.py                # FastMCP instance + all @vcs_tool handlers
-│   ├── config.py               # .env loading, get_config()
-│   ├── usage_logging.py        # Structured JSONL usage logging
-│   ├── security.py             # Path validation, write guards
-│   ├── validation.py           # Startup validation helpers
-│   ├── addin_integration.py    # COM calls to VCS add-in
-│   ├── operation_manager.py    # Async operation queues
-│   ├── callback_server.py      # HTTP callback server for VBA progress
-│   └── access_com/             # Low-level COM/DAO helpers
-├── tests/                      # pytest test suite
-├── docs/                       # Extended documentation
-├── .env.example                # Template for environment variables
-├── pyproject.toml              # Package metadata & dependencies
-└── AGENTS.md                   # This file
-```
-
-## Architecture
-
-Before database work, follow the required read-only compatibility preflight in
-[docs/AGENT_WORKFLOWS.md](docs/AGENT_WORKFLOWS.md#required-compatibility-preflight).
-Release requirements, discovery, errors and update steps are documented in
-[docs/RELEASE_COMPATIBILITY.md](docs/RELEASE_COMPATIBILITY.md).
-
-All tools are registered with the `@vcs_tool("name")` decorator in `tools.py`, which composes three concerns in order:
-
-1. **Config reload** — `load_config()` re-reads `.env` when it changes
-2. **Usage logging** — `with_logging(name)` records tool calls to JSONL
-3. **MCP registration** — `mcp.tool()` exposes the function to MCP clients
-
-```
-AI Agent ──► MCP Server (Python) ──► VCS Add-in (VBA) ──► Access Database
-                 │
-           Path validation
-           Permission checks
-           Usage logging
-           Async progress tracking
-```
-
-### Access window visibility
-
-Any Access instance holding a database the server works with is left **visible**, whether the server created it or attached to one already running. A hidden instance strands the user: an error dialog, a VBA break, or a trust prompt blocks every later call with nothing on screen to explain why, and nobody can dismiss what they cannot see. `COM automation` normally starts Access hidden, so this is deliberate, not incidental.
-
-Two rules follow from that, both enforced in `access_com/connection.py`:
-
-- Open databases through `open_current_database(app, path)`, never a bare `app.OpenCurrentDatabase(...)`. It lowers `Application.UserControl` across the open — `OpenCurrentDatabase` runs the target's AutoExec, and the add-in's own `AutoRun` opens its installer form when that flag says a person is watching, stranding the instance the server is about to drive — and it shows the window afterwards.
-- Show the window *after* the database opens, via `ensure_access_visible(app)`. Making a window visible can itself set `UserControl`, which is why the order is not interchangeable.
-- After that, instances the server created also get `UserControl = True` so the window is a normal interactive Access app. `Visible` alone is not enough on a COM-created process.
-
-The one deliberate exception is `validate_access_installation()` in `config.py`: it opens no database and quits immediately, so a window would only flash on screen with nothing to act on.
-
-### Full-power cores
-
-Access is single-threaded. MCP-launched Access processes disable EcoQoS and run at Above Normal so Windows prefers a performance core. User-owned Access the server attaches to is left alone. Do not pin CPU affinity.
-
-## Configuration
-
-All settings come from environment variables (loaded from `.env` / `.env.local` in the project root). See `.env.example` for the full list.
-
-Key variables:
-- `ACCESS_VCS_DATABASE` — target database path
-- `ACCESS_VCS_DISABLE_WRITES` — set `true` to block write operations
-- `ACCESS_VCS_ENABLE_LOGGING` — set `true` to enable usage logging
-- `ACCESS_VCS_RUN_VBA_TIMEOUT_SEC` — parent-side timeout for `vcs_run_vba` worker processes (default 45s)
-- `ACCESS_VCS_CALL_VBA_TIMEOUT_SEC` — parent-side timeout for `vcs_call_vba` `Application.Run` calls (default 45s)
-- `ACCESS_VCS_REBUILD_TIMEOUT_SEC` — how long `vcs_rebuild_addin` waits after launch for a terminal status (default 1200s)
-- `ACCESS_VCS_BUSY_WAIT_SEC` — how long a second tool call waits for the Access gate before returning `server_busy` (default 15s)
-- `ACCESS_VCS_DIALOG_TIMEOUT_SEC` — how long dialog inspection and a click wait for a window to answer (default 5s, capped at 30s). Read through the config layer, so `.env` edits apply without a restart
-- `ACCESS_VCS_RECOVERY_PROBE_TIMEOUT_SEC` — timeout for automatic Access/add-in recovery probes after a VBA timeout or COM disconnect (default 10s)
-- `ACCESS_VCS_LEAVE_ACCESS_OPEN` — when `true` (the default), a COM-created Access instance is not Quit on disconnect so a later attach can reuse the boosted process. The user closes the window. Set `false` to restore quit-per-call. The server still closes instances it created when a rebuild must replace a file they hold, or when recycling a stuck owned instance after a failed recovery probe. User-owned Access is never closed.
-- `ACCESS_VCS_CLOSE_TIMEOUT_SEC` — how long a graceful close of a server-created instance may take before it is force-terminated (default 10s)
-- `ACCESS_VCS_OWNED_INSTANCES_PATH` — where the ownership registry lives (default `~/.msaccess-vcs-mcp/owned-instances.json`)
-
-### Which Access windows the server may close
-
-Persistence only pays off if the server can still get a file back when it needs to replace one, so it has to know which windows are its own. That is recorded on disk in the ownership registry, keyed by PID *and* process creation time — a PID alone is reused by Windows, and a reused PID would authorize closing a stranger's process.
-
-The rules, all enforced in `access_com/instance_registry.py` and `access_com/connection.py`:
-
-- **Only a confirmed match is owned.** If the creation stamp cannot be read, or the record does not carry one, the answer is "not ours". Every ambiguity resolves toward leaving the window alone.
-- **A failed process query is not an empty one.** `list_access_pids_or_none()` returns `None` when `tasklist` itself fails, and the registry keeps its records rather than forgetting every window it created.
-- **Closing re-verifies identity.** Both ways of resolving an instance from a path can land on a different process than the one recorded, and a moniker bind can even start a new one. `pid` and creation time are re-checked against the record before anything is closed.
-- **A hung owned instance is terminated.** The graceful `CloseCurrentDatabase` + `Quit` runs in a worker thread with `ACCESS_VCS_CLOSE_TIMEOUT_SEC`; a blocking call here would hang the Access gate. If the process survives, it is force-terminated. This is reachable only for a PID proven to be server-created, where unsaved state is acceptable loss.
-- **A live process keeps its claim.** A record is dropped only once the process is confirmed gone. Forgetting a live owned instance would make it permanently uncloseable.
-- **A loaded add-in counts as holding a file.** Every tool call loads the add-in as a library, which locks it no matter which database that instance has open. `load_addin` records this, and a rebuild closes those instances too — matching only on the open database would make rebuilds refuse almost every time.
-
-One MCP server process is shared across all Cursor windows. Gated tools run in a single COM apartment thread with one Access operation at a time; an async tool body runs there in an event loop of its own, so a blocking COM step never stalls the server loop. A long call in one window causes others to get `error_pattern: server_busy` with `busy_with` naming the in-flight tool — retry rather than waiting for a client `-32001` timeout. After any client timeout, call `vcs_get_recent_calls()` to see what actually executed.
-
-`vcs_run_vba` executes Access COM work in a daemon worker thread with a hard timeout. If a snippet hangs because Access is in break mode, blocked on a modal dialog, or otherwise unresponsive, the MCP server abandons that thread and returns a recoverable timeout. It does **not** kill `MSACCESS.EXE` or close user-owned Access windows; after Access becomes responsive, the next call runs an automatic probe and resumes normal operation.
-
-### Dialogs and noninteractive runs
-
-`vcs_run_tests`, `vcs_import_objects`, `vcs_import_object` and `vcs_export_object` default to `noninteractive=True` with `decision_policy="block"`. The tool hands the policy to the add-in before the call (inline for `RunFilteredTests` and a full `MergeBuild`, through `SetOperationPolicy` for the scoped and single-object calls) and clears it in `finally`. While it is set the add-in suppresses its own message boxes and results window, and it restores the previous mode when the operation finishes, fails, or is cancelled. A confirmation or merge conflict that the policy does not cover returns `error_pattern: decision_required` and does not open a dialog. On `vcs_import_object` and `vcs_export_object` an add-in error that would have been a message box (for example a refused add-in form merge) is `success: false` with the text in `error`. A policy set that the add-in does not acknowledge with `{success: true, policy}` is `error_pattern: policy_unconfirmed` and nothing starts. A failed policy clear (anything but `{success: true}`) is `policy_cleanup_error` on the result and never replaces the operation's own result.
-
-Policies: `block` approves nothing. `decline` answers No, Cancel, or Abort and keeps the database object on a conflict. `prefer_source` makes each conflict take the action it asks for (source overwrites when it asks for none) and leaves other confirmations `decision_required`. `prefer_database` and `skip` keep the database object. Pass `noninteractive=False` to the three import and export tools for the previous interactive behavior: MCP sends an explicit interactive mode before the operation starts, and if the add-in refuses it the refusal is returned and nothing starts. `vcs_run_tests` is the exception: an automation test run is always headless (the add-in forces it for any API call), so `noninteractive=False` is refused with `error_pattern: interactive_tests_unsupported` before any add-in call, and `msaccess-vcs run-tests` has no `--interactive` flag (X11).
-
-The add-in's sync return from `MergeBuild` is a start result, never a final one. A refusal (`invalid_decision_policy`, `operation_already_running`, `merge_not_available`, `decision_required`) is returned once and passed through with its `decisions`; `merge_not_available` is not retried, run a full build. A started merge with no callback to follow is `success: false` with `started: true` and `completion_unconfirmed: true`: read `log_path` or `vcs_get_recent_calls()` before retrying. `RunFilteredTests` returns final results. MCP never calls the add-in's own dialog APIs (`ListAddinDialogs`, `DismissAddinDialog`); the inspector below uses only Win32 messages, plus MSAA for Office NetUI (`NUIDialog`) boxes such as the add-in's `MsgBox2`.
-
-`DoCmd.SetWarnings` is not used as a blanket suppressor. See [docs/DIALOGS.md](docs/DIALOGS.md) for which dialogs the add-in can prevent and which need the Win32 inspector.
-
-These tools do not take the Access gate, so they stay callable while another request is blocked:
-
-```python
-vcs_list_dialogs(database_path)
-vcs_dismiss_dialog(database_path, "hwnd:123456", button="OK")
-vcs_dismiss_dialog(database_path, "hwnd:123456", button="End")
-vcs_dismiss_dialog(database_path, "hwnd:123456", action="close")   # finished add-in window
-vcs_dismiss_dialog(database_path, "hwnd:123456", action="cancel")  # request a cancel of a running operation
-vcs_recover_dialogs(database_path, policy="end_runtime_error")
-vcs_automation_status(database_path)
-```
-
-Each gate-exempt sync tool runs in its own bounded workers, off the event loop and the COM apartment thread. One deadline, the dialog timeout plus 5s, covers waiting for a worker and running in it. A call that runs past it is `tool_timeout` and its thread is abandoned. A call that gets no worker in time is `worker_capacity_unavailable`: at most two threads per tool stay alive, hung or not, and at most two more calls wait (a third is refused at once). Both are recoverable. Hung dialog workers hold nothing the Access gate needs, so a gated tool still gets the gate or `server_busy` within `ACCESS_VCS_BUSY_WAIT_SEC`.
-
-`ready: true` from `vcs_automation_status` means the process is confirmed as a running Access, it responded (unknown is not ready), VBA is not in break mode, no blocking dialog is open, and the gate is not busy with that database. Otherwise `error_pattern` names why, with `access_not_running` and `no_windows_to_probe` kept distinct. `vcs_recover_dialogs(policy="safe")` clicks OK only on an OK-only `vba_msgbox` without destructive text. Access error and warning dialogs are report-only, and `end_runtime_error` adds End on a runtime-error dialog (whatever its text says) and OK on a compile error. Ending a runtime-error dialog sets `execution_interrupted` and does not turn the failed call into a success, even when Access finishes the call before the click returns (the interruption is reserved before the click). A click whose delivery is not confirmed leaves the call `success: false` with `interruption_uncertain: true`. `action=cancel` only requests a cancel (`cancel_requested: true`), because an interactive run asks first and No resumes it. The held call is `execution_interrupted` only if its result says `cancelled: true`. A success stays a success and gains `cancel_not_honored: true`. Any other failure gains `interruption_uncertain: true`. Debug is never clicked. The inspector only touches windows of the matched Access PID. Right before a click or close the dialog is read again: a different class, title, text, kind or button set is `dialog_changed` and nothing is clicked, and `recover_dialogs` re-runs its policy on that fresh window. This narrows the race with a replaced box but cannot close it (see `docs/DIALOGS.md`, Limits).
-
-### Rebuilding the VCS add-in
-
-To rebuild `Version Control.accda` from source after editing add-in files, do **not** use `vcs_rebuild_database` (that rebuilds a user project). Call:
-
-```python
-vcs_rebuild_addin(r"C:\path\to\msaccess-vcs-addin\Version Control.accda.src")
-```
-
-The tool derives the development copy beside that folder, launches
-`RebuildAddIn`, and passes its HTTP callback identity through the disconnected
-worker to the builder Access process. Detailed `Log.Add` / `Log.Progress`
-messages stream during the build; the status file covers compile, install, and
-durable terminal recovery. Do **not** poll it yourself in the normal workflow.
-`vcs_call_vba(..., ["RebuildAddIn", source])` remains launch-only.
-
-MCP progress notifications are best-effort in Cursor 3.13 (often only "Running..." until the tool returns). For guaranteed live output, run `msaccess-vcs rebuild-addin <source>` from a terminal and keep that command in the foreground so the stream stays in the primary chat. The CLI exits when the operation reaches terminal status; that process exit is the completion signal. Do not background the CLI just to wait on a notification, and do not add a second timer wait, sleep, or `rebuild-status.json` poll after it has already finished.
-
-`refused` and `launch-failed` are returned immediately and mean nothing was rebuilt: before launch, and inside the Access gate so nothing can reopen the file in between, the server closes Access windows **it created** that hold a file the rebuild replaces — including instances whose only claim on the add-in is having loaded it as a library. `refused` when a **user-owned** `MSACCESS.EXE` still holds one of those files or cannot be asked which files it holds (`otherInstances` names what to close; the add-in never closes another process), and `launch-failed` when the helper script never started, which leaves Access open and is safe to retry.
-
-If a client times out (`-32001`) or the tool returns `rebuild_stalled` / `timeout`, recover by reading `<source>/logs/rebuild-status.json` and matching `phaseStarted` against `rebuild_phase_started`. A `complete` whose `phaseStarted` predates the call is an earlier run's record. After any client timeout, call `vcs_get_recent_calls()` before inferring from the status file. A live rebuild always has `MSACCESS.EXE` or `wscript.exe`; neither, with a non-terminal status, means the run died.
-
-### Running the add-in's own tests
-
-Pass a **fresh disposable development copy** with matching source/repository
-context as `database_path`. Follow the add-in's maintained
-[test-host lifecycle](../msaccess-vcs-addin/docs/agent-test-runs.md) for preparation,
-reopen checks, retained fixtures and whole-host disposal.
-
-```python
-vcs_run_tests(r"C:\scratch\addin-suite\msaccess-vcs-addin\Version Control.accda", "clsTestInstall")
-```
-
-A run needs two projects and they are different files: the installed add-in loads as a library and supplies the runner and `TestAssert`, while the code under test is whatever the current database holds. The runner scans the current VBA project, so the host decides which tests are found — aim a run at a user database, or anything in the repo's `Testing` folder, and you get that database's tests reported as a clean pass.
-
-The installed add-in is refused as a host (see below); it also has no source tree beside it for the tests that read one. The add-in refuses such a run itself in `ExecuteTests` via `modInstall.CurrentDbIsInstalledAddIn`, so the server's refusal is the earlier of two.
-
-`AccessConnection` opens the development copy itself (Access refuses to bind a file moniker to an `.accda`, so `GetObject` fails and the explicit `OpenCurrentDatabase` fallback in `_open_as_current_database` takes over), so no manual pre-open is needed.
-
-MCP progress notifications are best-effort in Cursor. For live per-test output, run `msaccess-vcs run-tests <database>` from a terminal and keep that command in the foreground, the same way as `rebuild-addin`. The CLI prints pytest-style dots for fast passes, names tests that take a second or more, then a human completion line; it does not dump the full `tests` map. Headless means no add-in UI, not a hidden Access window.
-
-### The installed add-in is never a target
-
-No tool accepts the installed add-in as `database_path`, `output_path`, or `template_path`. That file exists to be loaded as a library: opening it as a database, or writing into it, resets a VBA project while it is executing. `_refuse_installed_addin_target` runs inside the `vcs_tool` wrapper, ahead of the gate and of any COM work, so the rule holds for every tool rather than the handful that grew their own guards — export, import, rebuild, `run_vba`, `run_tests`, `call_vba`, and the rest. Refusals carry `error_pattern: installed_addin_refused`.
-
-`vcs_get_version_info()` reports the installed add-in's version without opening it, which is the one thing you might legitimately want from that file.
-
-The comparison ignores the file extension, mirroring the add-in's `modInstall.PathsMatchIgnoringExtension`: a compiled install is a `.accde` built from the same `.accda`, and only one of the two is ever named in `ACCESS_VCS_ADDIN_PATH`. Folder parameters (`source_dir`, `output_dir`) are not checked — an export folder beside the install is not the install.
-
-**Resolving the install path.** With `ACCESS_VCS_ADDIN_PATH` unset, `get_default_addin_path()` reads `HKCU\Software\VB and VBA Program Settings\MSAccessVCS\Install`, which is the only place to read it from — the add-in's own `GetInstalledAddInFileName` is built from exactly these two values. `Install Folder` is present only for a folder the user chose (the installer deletes it when the folder is the default, so absence means `%AppData%\MSAccessVCS`, not "not installed"), and `Compile accde` decides the extension. Do not reconstruct the path from `%AppData%` alone or assume `.accda`. Installer settings are re-read on every call so reinstalling or moving the library cannot retain an old compatibility decision; `reset_addin_path_cache()` remains a legacy helper.
-
-Run these tests **through this server**, never from the add-in's own window. `modTestAssert.TestAssert` routes through `Application.Run` to the *installed* add-in path, while the runner singleton that records assertions lives in whichever project received `RunTests`. Invoking them from a development copy puts those in different projects: assertions are discarded and every test reports `EMPTY`. Treat an all-`EMPTY` result as a broken harness, not a pass.
-
-## Logging
-
-The server writes two parallel JSON Lines streams. Both filenames use the `vcs-mcp-` prefix and a process identity (`<pid>-<uuid>`), stable across configuration reloads. Each record includes `instance_id` and `server_pid`. Use the active paths from startup stderr or `vcs_get_version_info()` rather than assuming a fixed filename.
-
-If Windows refuses rotation, the writer reopens the current file and continues. Unavailable records go to stderr. File reopening and rotation retries occur on later records, at most once per five seconds, with diagnostics limited to the same frequency per failure type. Logging never sleeps or queues retries on the MCP call path.
-
-### VCS operation logs (written by the add-in, not the server)
-
-Separate from the two streams below, the add-in writes a per-operation log to `{source_dir}/logs/<Base>_<yyyymmdd_hhnnss_fff>.log`, where `<Base>` is `Export`, `Merge`, `Build`, `TestRun`, or `Other`. Note the base name tracks the *operation*, not the tool: `vcs_import_objects` and `vcs_import_object` both produce `Merge_*.log`.
-
-The add-in also writes a `.gitignore` into the source folder containing `logs/` and `*.log`, which means **Cursor's Glob and Grep silently skip these files** — a search returns no matches rather than an error, so an agent can burn several calls before falling back to a shell listing. To avoid that:
-
-- Every operation tool returns `log_path` for the run it just performed. Use it directly with the Read tool.
-- On failure, those tools also return `log_excerpt` (tail of the log), so the error is usually available without any follow-up call.
-- If the path is no longer at hand, call `vcs_get_log(database_path, log_type=...)` with the base name matching the operation.
-
-The add-in's sync API returns this as camelCase `logPath`; `_addin_json_result` in `tools.py` normalizes it to `log_path` at the boundary and keeps the original key as an alias. Async completion callbacks already use `log_path`. Keep the normalizer even if the add-in changes: a newer server may run against an older add-in build.
-
-### Diagnostic stream (`vcs-mcp-diagnostic-<instance>.jsonl`) — always on
-
-Captures server lifecycle events: `server_start`, `startup_env_load`, `lazy_env_load`, `lazy_init_started`, `lazy_init_skipped`, `list_roots_failed`, `list_roots_response`, `lazy_init_loaded`, `lazy_init_no_env_in_roots`, `usage_log_status`. Independent of `ACCESS_VCS_ENABLE_LOGGING` so it answers the "why didn't logging work?" question even when usage logging is silent.
-
-- **Location:** `~/.msaccess-vcs-mcp/logs/vcs-mcp-diagnostic-<instance>.jsonl`
-- **Override:** `ACCESS_VCS_DIAGNOSTIC_LOG_DIR`
-- **Opt out:** `ACCESS_VCS_DISABLE_DIAGNOSTIC_LOG=true`
-- **Rotation:** 1 MB per file, 3 backups
-- **Discoverable from agents:** `vcs_get_version_info()` returns the active `diagnostic_log_path`.
-
-### Usage stream (`vcs-mcp-usage-<instance>.jsonl`) — default on
-
-When `ACCESS_VCS_ENABLE_LOGGING=true` (the default), every tool call writes a structured entry. Set the env var to `false` to opt out.
-
-- **Development installs:** logs to `{project_root}/logs/vcs-mcp-usage-<instance>.jsonl`
-- **Package installs:** logs to `~/.msaccess-vcs-mcp/logs/vcs-mcp-usage-<instance>.jsonl`
-- **Override:** `ACCESS_VCS_LOG_DIR`
-- **Rotation:** `ACCESS_VCS_LOG_MAX_SIZE_MB` (default 10 MB), `ACCESS_VCS_LOG_BACKUP_COUNT` (default 5)
-
-Each `tool_call` entry includes: `timestamp`, `version`, `event`, `tool`, `parameters`, `success`, `error`, `error_pattern`, `execution_time_ms`.
-
-### Tiered audit posture
-
-Three sensitivity tiers in the usage stream, each independently controlled:
-
-1. **Audit metadata** — always written when `ENABLE_LOGGING=true`. Tool name, timing, success/error, sanitized parameter dict.
-2. **Code-execution bodies** — `vcs_execute_sql`, `vcs_call_vba`, and `vcs_run_vba` write a `"code_execution"` event *before* execution begins. By default only `code_length` is recorded. Set `ACCESS_VCS_LOG_CODE_CONTENT=true` to record the full `code` field for forensic replay (off by default to limit business-data exposure). `code_length` lets analysts spot anomalies (e.g. "an agent ran a 4 KB VBA block") without seeing the body.
-3. **Credential-shaped parameter keys** — any parameter whose name matches `password`, `secret`, `token`, `api_key`, `apikey`, `connection_string`, or `connectionstring` (case-insensitive) is replaced with `"<redacted>"` regardless of other switches. Defense in depth.
-
-## Adding a New Tool
-
-1. Write the handler function in `tools.py`
-2. Decorate with `@vcs_tool("vcs_your_tool_name")` — this handles config reload, usage logging, and MCP registration automatically
-3. Add tests in `tests/`
-
-## Key Conventions
-
-- All tool names use the `vcs_` prefix
-- Tool handlers return `dict[str, Any]` with at least a `success` key
-- Error results include `"error"` key (detected by usage logging)
-- Async tools (`async def`) are supported by `@vcs_tool` transparently
-- `Context` parameters from FastMCP are filtered out of usage logs automatically
-
-## Active cross-repo work: dialog handling hardening
-
-Work on `feat/noninteractive-dialogs` is tracked in a local markdown tracker in the parent folder shared with the sibling repo `msaccess-vcs-addin`: `../issues/INDEX.md` (issue files beside it) and the combined spec `../specs/dialog-handling-hardening.md`. Read the index, pick a `todo` issue whose blockers are `done`, and update its status in both the issue file and the index.
+# AGENTS.md — msaccess-vcs-mcp
+
+This repository is the Python MCP bridge to the MSAccess VCS add-in. Its tools
+operate on users' Access databases; contributor work here changes the bridge.
+
+## Read for the task
+
+| Working on | Read |
+| --- | --- |
+| Editing/syncing a user's project, fresh build, verification, or project tests | [docs/AGENT_WORKFLOWS.md](docs/AGENT_WORKFLOWS.md); optional [access-vcs-sync](skills/access-vcs-sync/SKILL.md) |
+| Busy server, timeouts, dialogs, cancellation, interruption, or cleanup | [docs/DIALOGS.md](docs/DIALOGS.md); optional [access-vcs-recover](skills/access-vcs-recover/SKILL.md) |
+| Installing/distributing these workflow skills | [docs/AGENT_WORKFLOWS.md](docs/AGENT_WORKFLOWS.md#optional-skill-installation-and-distribution) |
+| Compatibility preflight, refused admission, or changed connection | [docs/AGENT_WORKFLOWS.md](docs/AGENT_WORKFLOWS.md#required-compatibility-preflight), [docs/RELEASE_COMPATIBILITY.md](docs/RELEASE_COMPATIBILITY.md) |
+| Python setup/tests, architecture, COM ownership/threading, registration, logging | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) |
+| Rebuilding the add-in or running its own tests | [docs/ADDIN_DEVELOPMENT.md](docs/ADDIN_DEVELOPMENT.md) |
+| Policy, callback, interruption, or Win32 dialog implementation | [docs/DIALOGS.md](docs/DIALOGS.md), [docs/SETUP_CALLS.md](docs/SETUP_CALLS.md) |
+| VBA bridge/callback implementation | [docs/VBA_INTEGRATION.md](docs/VBA_INTEGRATION.md), [docs/VBA_CALLBACK_API.md](docs/VBA_CALLBACK_API.md) |
+| Server integration-test procedures | [docs/TESTING.md](docs/TESTING.md) |
+
+## Essential contributor invariants
+
+- Use the project `venv` for Python and pytest; install editable development
+  dependencies there. Setup and test commands live in the contributor guide.
+- Register tools with `@vcs_tool` in `tools.py`; preserve config reload, logging,
+  installed-target refusal, and the Access gate. Return structured outcomes.
+- Keep gated COM objects on their creating apartment thread. Dialog/status/cancel
+  inspection must remain responsive independently of a blocked COM call.
+- Leave Access visible. Use `open_current_database` and show it after opening;
+  setting visibility earlier can change `UserControl` and trigger AutoExec UI.
+- Close/recycle only a server-owned process confirmed by PID **and creation time**.
+  Unknown identity is not ownership. Preserve user-owned windows and unsaved work.
+- The installed add-in is a library, never a tool target. Do not patch a loaded
+  add-in project; source changes use the add-in rebuild workflow.
+- Preserve the distinction between start acknowledgment and terminal outcome,
+  between cancel request and confirmed cancellation, and between operation result
+  and cleanup failure. These are server-enforced contracts, not retry heuristics.
+- For user-project tests, host the run on the user's database. The development
+  add-in is a host only for the add-in's own suite; use its maintained disposable-host lifecycle.
+
+## Active cross-repo work
+
+`feat/noninteractive-dialogs` uses the parent-folder tracker shared with
+`msaccess-vcs-addin`: `../issues/INDEX.md` and
+`../specs/dialog-handling-hardening.md`. For work in that tracker, pick a `todo`
+issue with completed blockers and update both its file and index.

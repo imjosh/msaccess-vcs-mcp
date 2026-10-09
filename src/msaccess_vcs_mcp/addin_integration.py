@@ -723,8 +723,9 @@ class VCSAddinIntegration:
             source_folder: Path to source files folder
             output_path: Optional path for new database (default: the name
                 the source files record). Given, it is passed to
-                ``BuildAs(source, output)``; confirm ``build_as_paths_refusal``
-                first, since an older add-in opens pickers for BuildAs.
+                ``BuildAs(source, output)`` under the admitted release contract; optional
+                discovery may use ``build_as_paths_refusal``. Production dispatch
+                does not require a capability probe.
 
         Returns:
             Dictionary with the start result, never ``success: true``: no

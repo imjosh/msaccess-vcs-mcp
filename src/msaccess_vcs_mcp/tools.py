@@ -786,8 +786,8 @@ mcp = FastMCP(
         "**Tool quick-reference (required parameters marked with *, optional with ?):**\n"
         "- vcs_get_version_info() — server, add-in, and Access version info\n"
         "- vcs_list_objects(database_path*) — list all objects by type\n"
-        "- vcs_export_database(database_path*, output_dir*, object_types?, full_export?) "
-        "— export project (or scoped categories via object_types) to source files\n"
+        "- vcs_export_database(database_path*, output_dir?, object_types?, full_export?) "
+        "— export to the configured folder; output_dir is deprecated and must match it\n"
         "- vcs_export_object(database_path*, object_type*, object_name?, noninteractive?, "
         "decision_policy?) — export a single object/type to source\n"
         "- vcs_import_objects(database_path*, source_dir*, object_types?, full_import?, "
@@ -797,7 +797,7 @@ mcp = FastMCP(
         "- vcs_import_object(database_path*, object_type*, object_name?, noninteractive?, "
         "decision_policy?) — import a single object/type from source\n"
         "- vcs_rebuild_database(source_dir*, output_path*, template_path?) "
-        "— build fresh database from source\n"
+        "— build fresh database from source; template_path is accepted but unused\n"
         "- vcs_rebuild_addin(source_dir*, timeout_seconds?) "
         "— rebuild the VCS add-in from source and wait for install\n"
         "- vcs_diff_database(database_path*, source_dir*, show_details?) "
@@ -1879,7 +1879,7 @@ async def vcs_rebuild_database(
         # Rebuild from source
         vcs_rebuild_database("C:\\\\src\\\\mydb", "C:\\\\output\\\\rebuilt.accdb")
         
-        # Rebuild using template
+        # Accepted legacy template argument (currently unused)
         vcs_rebuild_database(
             "C:\\\\src\\\\mydb",
             "C:\\\\output\\\\rebuilt.accdb",
@@ -1890,15 +1890,14 @@ async def vcs_rebuild_database(
         source_dir: Directory containing source files
         output_path: Absolute path for the new database file. Its folder must
             exist, and it must not be the add-in itself.
-        template_path: Optional template database to start from
+        template_path: Accepted for compatibility but currently unused; no template is applied
 
     The build uses a new, isolated Access instance and closes only that
     instance. An already-open output is refused without closing its holder.
 
     The add-in builds ``source_dir`` into ``output_path`` through
-    ``BuildAs(source, output)`` and opens no picker. An add-in whose
-    ``APICapabilities`` does not list ``build_as_paths`` is refused before
-    anything starts, with ``error_pattern: build_output_unsupported``. A
+    ``BuildAs(source, output)`` and opens no picker under the admitted release
+    contract. Capability discovery is optional, not a required probe. A
     relative ``output_path``, or one the add-in rejects, is
     ``invalid_build_path``.
 

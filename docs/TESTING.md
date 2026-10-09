@@ -1,488 +1,214 @@
 # Testing Guide for msaccess-vcs-mcp
 
-This guide covers testing procedures for the MCP tool, including unit tests, integration tests, and end-to-end workflow testing.
-
-## Virtual Environment
-
-Use Python 3.11 or later. All test commands assume the project virtual environment is activated. Activate it before running any tests:
+Use the project virtual environment and Python >=3.11. Contributor setup, COM
+ownership and server log discovery live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```powershell
-cd C:\path\to\msaccess-vcs-mcp
 .\venv\Scripts\Activate.ps1
-```
-
-If the venv doesn't exist yet, create and install:
-
-```powershell
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
-```
-
-## Running Unit Tests
-
-Unit tests cover individual components without requiring Access or the VCS add-in:
-
-```bash
-# Run all unit tests
-pytest
-
-# Run with coverage report
-pytest --cov=msaccess_vcs_mcp --cov-report=html
-
-# Run specific test file
-pytest tests/test_usage_logging.py -v
-
-# Run specific test
-pytest tests/test_addin_integration.py::TestVCSAddinIntegration::test_load_addin_success -v
-```
-
-## Integration Tests
-
-Integration tests require:
-- Microsoft Access installed
-- MSAccess VCS add-in installed
-- Test database available
-
-### Prerequisites
-
-1. **Install MSAccess VCS Add-in:**
-   - Download from [releases](https://github.com/joyfullservice/msaccess-vcs-integration/releases/latest)
-   - Install to default location: `%AppData%\MSAccessVCS\`
-
-2. **Create Test Database:**
-   ```python
-   # Create a simple test database
-   import win32com.client
-   
-   app = win32com.client.Dispatch("Access.Application")
-   app.NewCurrentDatabase("C:\\test\\TestDB.accdb")
-   
-   # Add a simple query
-   db = app.CurrentDb()
-   qd = db.CreateQueryDef("TestQuery")
-   qd.SQL = "SELECT 1 AS TestValue"
-   
-   app.CloseCurrentDatabase()
-   app.Quit()
-   ```
-
-### Running Integration Tests
-
-```bash
-# Run integration tests (marked with @pytest.mark.integration)
-pytest -m integration
-
-# Skip integration tests (when Access not available)
 pytest -m "not integration"
+pytest tests/test_usage_logging.py -v
+pytest --cov=msaccess_vcs_mcp --cov-report=html -m "not integration"
 ```
 
-## End-to-End Workflow Testing
+## Integration prerequisites
 
-### Test Setup
+Integration runs need local Windows Access and the **supported server/add-in
+combination**, established by [compatibility preflight](AGENT_WORKFLOWS.md#required-compatibility-preflight).
+Use a separately authorized test installation; installing "latest" is not proof
+of compatibility. Follow upstream Access support; 32-bit Access remains untested.
+This guide defines no Windows version range or Python maximum.
 
-1. **Create test directory structure:**
-   ```
-   C:\test\
-   ├── TestDB.accdb          # Test database
-   ├── TestDB.src\           # Source files (will be created)
-   └── TestDB_built.accdb    # Rebuilt database (will be created)
-   ```
+For the add-in's own suite, follow [ADDIN_DEVELOPMENT.md](ADDIN_DEVELOPMENT.md#running-the-add-ins-own-tests)
+and its maintained disposable complete-host lifecycle. User-project tests target
+the intended user database or the confirmed rebuilt output. Never run the add-in
+suite against the installed library, the primary development copy or `Testing/`.
 
-2. **Activate virtual environment** (see [Virtual Environment](#virtual-environment) above)
+Database writes and read-only SQL execution have separate permissions. Obtain the
+needed authorization and configure the fixture's MCP options before the run;
+setup never grants those permissions automatically. Keep production databases,
+source edits, Trust Center settings and user-owned Access windows out of fixtures.
 
-### Manual End-to-End Test
-
-This test verifies the complete workflow from export through modify to merge build.
-
-#### Step 1: Export Database
-
-```python
-from msaccess_vcs_mcp.tools import vcs_export_database
-
-# Export test database
-result = vcs_export_database(
-    "C:\\test\\TestDB.accdb",
-    "C:\\test\\TestDB.src"
-)
-
-print(f"Success: {result['success']}")
-print(f"Exported: {result['exported_count']} objects")
-print(f"Path: {result['export_path']}")
-
-# Verify source files were created
-import os
-assert os.path.exists("C:\\test\\TestDB.src")
-assert os.path.exists("C:\\test\\TestDB.src\\vcs-options.json")
-print("✓ Export successful")
+```powershell
+pytest -m integration
 ```
 
-#### Step 2: Modify Source Files
+## Executable export, merge and named-output recipe
 
-```python
-# Read a query
-query_path = "C:\\test\\TestDB.src\\queries\\TestQuery.sql"
-with open(query_path, 'r', encoding='utf-8-sig') as f:
-    original_sql = f.read()
+The script below uses a persistent public MCP session. Every tool call is awaited;
+normal server startup owns callbacks and mutual admission. Python imports of the
+async tool handlers must also be awaited, but a bare import does not start the
+callback server and whole exports/builds may return `completion_unconfirmed`.
+The tool notation in [AGENT_WORKFLOWS.md](AGENT_WORKFLOWS.md) is illustrative MCP
+client notation, not a synchronous Python program.
 
-# Modify the query
-modified_sql = original_sql.replace(
-    "SELECT 1 AS TestValue",
-    "SELECT 2 AS TestValue, 'Modified' AS Status"
-)
+Provide a **closed disposable fixture** made from an authorized test project,
+containing `TestQuery` with `SELECT 1 AS TestValue`. Its configured export folder
+must be dedicated to this run, with no source edits to lose; the built output must
+be a fresh absolute path in an existing folder. The fixture and built output need
+read-only SQL permission so the oracle can execute the query. Preserve a seed and
+evidence separately. This recipe modifies the fixture query to return 2.
 
-# Write back with UTF-8 BOM
-with open(query_path, 'w', encoding='utf-8-sig') as f:
-    f.write(modified_sql)
+To create a blank fixture instead, DAO `DBEngine.CreateDatabase` can create a new
+unique file and query without an Access application process. Close only that DAO
+database handle. If fixture preparation uses Access, use an isolated created
+application, record its PID **and creation time**, and reverify both immediately
+before `CloseCurrentDatabase`/`Quit`. Unknown identity leaves the process alone;
+attaching `Dispatch("Access.Application")` followed by `Quit` is unsafe.
 
-print("✓ Query modified")
+Save this script outside `tests/` (it is a deliberate integration run, not an
+automatically collected test). Run it from the activated venv:
+
+```powershell
+python .\scratch\check_workflow.py C:\scratch\run\Fixture.accdb C:\scratch\run\Built.accdb
 ```
 
-#### Step 3: Merge Changes
-
 ```python
-from msaccess_vcs_mcp.tools import vcs_import_objects
-
-# Merge source changes into database
-result = vcs_import_objects(
-    "C:\\test\\TestDB.accdb",
-    "C:\\test\\TestDB.src"
-)
-
-print(f"Success: {result['success']}")
-if result.get('log_path'):
-    print(f"Log: {result['log_path']}")
-
-print("✓ Merge successful")
-```
-
-#### Step 4: Verify Changes
-
-```python
-from msaccess_vcs_mcp.tools import vcs_list_objects
-from msaccess_vcs_mcp.access_com.connection import AccessConnection
-
-# List objects to verify query exists
-objects = vcs_list_objects("C:\\test\\TestDB.accdb")
-print(f"Queries: {[q['name'] for q in objects['queries']]}")
-
-# Read the modified query SQL directly
-with AccessConnection("C:\\test\\TestDB.accdb") as conn:
-    app, db = conn.connect()
-    query = db.QueryDefs("TestQuery")
-    print(f"Modified SQL: {query.SQL}")
-    
-    # Should contain our modifications
-    assert "Status" in query.SQL
-    assert "2" in query.SQL
-
-print("✓ Changes verified in database")
-```
-
-#### Step 5: Build from Source
-
-```python
-from msaccess_vcs_mcp.tools import vcs_rebuild_database
-
-# Build fresh database from source
-result = vcs_rebuild_database(
-    "C:\\test\\TestDB.src",
-    "C:\\test\\TestDB_built.accdb"
-)
-
-print(f"Success: {result['success']}")
-print(f"Output: {result['output_path']}")
-
-# Verify built database
-import os
-assert os.path.exists("C:\\test\\TestDB_built.accdb")
-print("✓ Build from source successful")
-```
-
-#### Step 6: Compare Databases
-
-```python
-# Export both databases and compare
-vcs_export_database(
-    "C:\\test\\TestDB.accdb",
-    "C:\\test\\TestDB_original.src"
-)
-
-vcs_export_database(
-    "C:\\test\\TestDB_built.accdb",
-    "C:\\test\\TestDB_rebuilt.src"
-)
-
-# Compare source files
-import filecmp
-
-dcmp = filecmp.dircmp(
-    "C:\\test\\TestDB_original.src",
-    "C:\\test\\TestDB_rebuilt.src"
-)
-
-print(f"Identical files: {len(dcmp.same_files)}")
-print(f"Different files: {len(dcmp.diff_files)}")
-print(f"Different: {dcmp.diff_files}")
-
-# Some files may differ (timestamps, GUIDs, etc.)
-# But core files should match
-print("✓ Database comparison complete")
-```
-
-### Automated End-to-End Test Script
-
-Save this as `tests/test_e2e_workflow.py`:
-
-```python
-import os
-import pytest
+import asyncio
+import json
+import re
+import sys
 from pathlib import Path
-import win32com.client
 
-from msaccess_vcs_mcp.tools import (
-    vcs_export_database,
-    vcs_import_objects,
-    vcs_rebuild_database,
-    vcs_list_objects
-)
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from msaccess_vcs_mcp import __version__
+from msaccess_vcs_mcp.cli import stdio_server_environment
+from msaccess_vcs_mcp.compatibility import workflow_requirement
 
 
-@pytest.mark.integration
-class TestEndToEndWorkflow:
-    """End-to-end workflow tests requiring Access and VCS add-in."""
-    
-    @pytest.fixture
-    def test_db_path(self, tmp_path):
-        """Create a test database."""
-        db_path = tmp_path / "TestDB.accdb"
-        
-        # Create database with Access
-        app = win32com.client.Dispatch("Access.Application")
-        app.NewCurrentDatabase(str(db_path))
-        
-        # Add a test query
-        db = app.CurrentDb()
-        qd = db.CreateQueryDef("TestQuery")
-        qd.SQL = "SELECT 1 AS TestValue"
-        
-        app.CloseCurrentDatabase()
-        app.Quit()
-        
-        return str(db_path)
-    
-    def test_complete_workflow(self, test_db_path, tmp_path):
-        """Test complete export -> modify -> merge -> build workflow."""
-        src_path = tmp_path / "TestDB.src"
-        
-        # 1. Export
-        result = vcs_export_database(
-            test_db_path,
-            str(src_path)
-        )
-        assert result["success"]
-        assert src_path.exists()
-        
-        # 2. Modify source
-        query_file = src_path / "queries" / "TestQuery.sql"
-        assert query_file.exists()
-        
-        content = query_file.read_text(encoding='utf-8-sig')
-        modified = content.replace(
-            "SELECT 1 AS TestValue",
-            "SELECT 2 AS TestValue"
-        )
-        query_file.write_text(modified, encoding='utf-8-sig')
-        
-        # 3. Merge changes
-        result = vcs_import_objects(
-            test_db_path,
-            str(src_path)
-        )
-        assert result["success"]
-        
-        # 4. Verify changes
-        objects = vcs_list_objects(test_db_path)
-        assert any(q["name"] == "TestQuery" for q in objects["queries"])
-        
-        # 5. Build from source
-        built_db = tmp_path / "TestDB_built.accdb"
-        result = vcs_rebuild_database(
-            str(src_path),
-            str(built_db)
-        )
-        assert result["success"]
-        assert built_db.exists()
+def terminal(result):
+    assert isinstance(result, dict), result
+    assert result.get("success") is True, result
+    for flag in ("completion_unconfirmed", "cancelled", "execution_interrupted",
+                 "interruption_uncertain", "policy_cleanup_error"):
+        assert not result.get(flag), result
+    assert not result.get("error_pattern"), result
+    return result
+
+
+async def check_workflow(database, output):
+    database, output = Path(database), Path(output)
+    assert database.is_absolute() and output.is_absolute()
+    database, output = database.resolve(), output.resolve()
+    assert database.is_file() and output.parent.is_dir()
+    assert not output.exists(), "Use a fresh output for this recipe"
+    env = stdio_server_environment()
+    # Server connection cleanup closes only its identity-confirmed created hosts.
+    # Fixture prerequisites exclude existing user-owned holders; never close them.
+    env["ACCESS_VCS_LEAVE_ACCESS_OPEN"] = "false"
+    params = StdioServerParameters(
+        command=sys.executable, args=["-m", "msaccess_vcs_mcp"], env=env,
+    )
+    async with stdio_client(params) as streams:
+        async with ClientSession(*streams) as session:
+            await session.initialize()
+
+            async def call(name, **arguments):
+                reply = await session.call_tool(name, arguments)
+                texts = [item.text for item in reply.content if item.type == "text"]
+                assert not reply.isError and len(texts) == 1, reply
+                result = json.loads(texts[0])
+                print(name, json.dumps(result, ensure_ascii=False))  # retain evidence
+                return result
+
+            metadata = await call("vcs_get_version_info")
+            observed = metadata.get("mcp_version")
+            assert observed == __version__, metadata  # source-release provenance
+            assert workflow_requirement().reason(observed) is None, metadata
+            terminal(metadata.get("addin_compatibility"))
+            assert metadata.get("async_available") is True, metadata
+            # Repeat the preflight if this connection is replaced. Metadata does
+            # not establish a VBA session: each dependent call admits automatically.
+
+            async def query_value(target):
+                result = terminal(await call(
+                    "vcs_execute_sql", database_path=str(target),
+                    sql="SELECT * FROM TestQuery", max_rows=2,
+                ))
+                assert not result.get("truncated"), result
+                return result["rows"]
+
+            assert await query_value(database) == [{"TestValue": 1}]
+            folder = terminal(await call(
+                "vcs_call_vba", database_path=str(database),
+                function_name="VCS.API", args=["GetExportFolder"],
+            ))
+            source = Path(folder["result"]).resolve()
+            assert source.is_relative_to(database.parent), "Use a dedicated fixture folder"
+            # Confirm this is the fixture's dedicated configured folder before running.
+            exported = terminal(await call(
+                "vcs_export_database", database_path=str(database),
+            ))
+            assert Path(exported["export_path"]).resolve() == source, exported
+            query_file = source / "queries/TestQuery.sql"
+            original = query_file.read_text(encoding="utf-8-sig")
+            modified, count = re.subn(r"\b1\s+AS\s+TestValue\b", "2 AS TestValue",
+                                      original, flags=re.IGNORECASE)
+            assert count == 1, original
+            query_file.write_text(modified, encoding="utf-8-sig", newline="\r\n")
+            merged = await call(
+                "vcs_import_objects", database_path=str(database),
+                source_dir=str(source), decision_policy="prefer_source",
+            )  # this disposable-fixture run expressly selects source replacement
+            if merged.get("log_path"):
+                print("This merge attempt log:", merged["log_path"])
+            terminal(merged)
+            assert await query_value(database) == [{"TestValue": 2}]
+            built = terminal(await call(
+                "vcs_rebuild_database", source_dir=str(source), output_path=str(output),
+            ))
+            confirmed = Path(built["output_path"]).resolve()
+            assert confirmed == output and confirmed.is_file(), built
+            assert await query_value(confirmed) == [{"TestValue": 2}]
+            # Do not export this output to guessed alternate folders: its configured
+            # folder may be the original source. The query results are the content oracle.
+            print("Verified fixture merge and confirmed rebuilt query result")
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v", "-m", "integration"])
+    asyncio.run(check_workflow(*sys.argv[1:]))
 ```
 
-## Common Test Scenarios
+Stop on refusal, cancellation, timeout, cleanup error or uncertain completion.
+Retain the printed result, operation ID/time and returned `log_path`. Inspect
+recent calls and readiness through the same client, then reconcile contents before
+retrying. If the session is gone, reconnect and repeat preflight; a new connection
+does not turn the previous operation into a success. Never unwrap handlers or use
+`AccessConnection` to get past the public admission/permission boundary.
 
-### Test Add-in Not Installed
+The assertions establish a query-content round trip, not whole-database, layout
+or binary equivalence. A filename, inventory entry or success print alone is not
+an oracle. For further coverage, run relevant tests on the confirmed output and
+check intended tests, assertions, failures, ERROR/EMPTY and stale results.
 
-```python
-# Temporarily move or rename add-in
-import os
-from msaccess_vcs_mcp.config import get_config
+## Logs, negative cases and performance
 
-config = get_config()
-addin_path = config["ACCESS_VCS_ADDIN_PATH"]
+Use this attempt's returned `log_path` or correlate timestamp, target and operation
+identity with the [maintained log families](CONTRIBUTING.md#vcs-operation-logs-written-by-the-add-in-not-the-server).
+Imports produce `Merge_*.log`, exports `Export_*.log`, full builds `Build_*.log`;
+fixed `Export.log`/`Build.log` filenames and newest-file selection are insufficient.
+`vcs_get_log` itself requires admission; permitted recent-call/status inspection
+remains available after refusal. Discover active server JSONL paths from metadata.
 
-# Should fail gracefully
-try:
-    result = vcs_export_database("test.accdb", "test.src")
-    assert not result["success"]
-    assert "not found" in result.get("error", "").lower()
-except RuntimeError as e:
-    assert "not found" in str(e).lower()
-```
+Test missing/unsupported add-ins through mocked discovery in
+`tests/test_version_compatibility.py`, rather than renaming an installed library.
+Test write refusal using `ACCESS_VCS_DISABLE_WRITES=true` in an isolated test
+configuration. Destination mismatch, callback-free starts and installed-target
+protection have mocked public-boundary tests; preserve them when changing tools.
 
-### Test Permission Denied
+Measure elapsed time around awaited calls and report the terminal outcome with it.
+Whole exports do not promise an object-count/type breakdown; do not divide timing
+by an absent `exported_count` or infer incremental correctness from counts.
+Compare actual changed content or query behavior for the requested scope.
 
-```python
-from msaccess_vcs_mcp.tools import vcs_import_objects
-import os
+Keep fixture files and logs until results have been recorded and all owned handles
+are closed. Only the test's confirmed created processes may be closed. Ambiguous or
+user-owned holders remain open and prevent disposal; report them. Add-in suite
+whole-host disposal follows its maintained lifecycle, separately from user projects.
 
-# Without write permission
-os.environ["ACCESS_VCS_ALLOW_WRITES"] = "false"
+## Continuous integration
 
-result = vcs_import_objects("test.accdb", "test.src")
-assert not result["success"]
-assert "permission" in result["error"].lower()
-```
-
-### Test Invalid Database Path
-
-```python
-result = vcs_export_database(
-    "C:\\NonExistent\\Database.accdb",
-    "C:\\test\\output"
-)
-assert not result["success"]
-```
-
-### Test Fast Save (Incremental Export)
-
-```python
-# First export
-result1 = vcs_export_database("test.accdb", "test.src")
-count1 = result1["exported_count"]
-
-# Second export without changes (should be fast)
-result2 = vcs_export_database("test.accdb", "test.src")
-count2 = result2["exported_count"]
-
-# Fast save should export fewer objects
-assert count2 <= count1
-```
-
-## Performance Testing
-
-### Measure Export Time
-
-```python
-import time
-
-start = time.time()
-result = vcs_export_database("large.accdb", "large.src")
-duration = time.time() - start
-
-print(f"Exported {result['exported_count']} objects in {duration:.2f}s")
-print(f"Average: {duration/result['exported_count']:.3f}s per object")
-```
-
-### Measure Merge Build Time
-
-```python
-start = time.time()
-result = vcs_import_objects("large.accdb", "large.src")
-duration = time.time() - start
-
-print(f"Merge build completed in {duration:.2f}s")
-```
-
-## Troubleshooting Tests
-
-### Enable Debug Mode
-
-Set debug environment variables:
-```bash
-set ACCESS_VCS_DEBUG=1
-pytest -v -s
-```
-
-### View COM Errors
-
-```python
-import win32com.client
-import pythoncom
-
-# Enable COM error details
-pythoncom.CoInitialize()
-```
-
-### Check Log Files
-
-After operations, check log files:
-```python
-# Export log
-log_path = "C:\\test\\TestDB.src\\Export.log"
-if os.path.exists(log_path):
-    with open(log_path, 'r') as f:
-        print(f.read())
-
-# Build log  
-log_path = "C:\\test\\TestDB.src\\Build.log"
-if os.path.exists(log_path):
-    with open(log_path, 'r') as f:
-        print(f.read())
-```
-
-## Continuous Integration
-
-For CI/CD environments:
-
-1. **Skip integration tests** (no Access available):
-   ```yaml
-   # .github/workflows/test.yml
-   - name: Run tests
-     run: pytest -m "not integration"
-   ```
-
-2. **Run integration tests on Windows runners** (with Access):
-   ```yaml
-   - name: Install Access
-     # Install Access runtime or full version
-   
-   - name: Install VCS Add-in
-     # Download and install add-in
-   
-   - name: Run integration tests
-     run: pytest -m integration
-   ```
-
-## Test Coverage
-
-Check test coverage:
-
-```bash
-# Generate coverage report
-pytest --cov=msaccess_vcs_mcp --cov-report=html
-
-# View in browser
-start htmlcov/index.html
-```
-
-Target coverage goals:
-- Unit tests: >80%
-- Integration tests: All major workflows
-- End-to-end: Complete export/import cycle
-
-## Resources
-
-- [pytest Documentation](https://docs.pytest.org/)
-- [pytest-cov Plugin](https://pytest-cov.readthedocs.io/)
-- [MSAccess VCS Add-in Testing](https://github.com/joyfullservice/msaccess-vcs-integration/wiki)
+Use `pytest -m "not integration"` on runners without Access. Native integration
+needs an authorized compatible Windows Access/add-in installation and isolated
+fixtures. Passing mocked contracts does not qualify a desktop client's registration,
+a live database build or the native behavioral gates. X14 owns client setup.

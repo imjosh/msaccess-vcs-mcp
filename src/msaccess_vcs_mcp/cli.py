@@ -70,7 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rebuild_db.add_argument("source_dir")
     rebuild_db.add_argument("output_path")
-    rebuild_db.add_argument("--template", dest="template_path", default=None)
+    rebuild_db.add_argument("--template", dest="template_path", default=None,
+                            help="Accepted for compatibility; currently unused (no template is applied)")
 
     rebuild_addin = sub.add_parser(
         "rebuild-addin",

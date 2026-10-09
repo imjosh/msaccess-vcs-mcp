@@ -286,9 +286,9 @@ Creates a fresh database from source files, useful for clean builds and distribu
 **Args:**
 - `source_dir`: Directory containing source files
 - `output_path`: Absolute path for the new database file (its folder must exist)
-- `template_path`: Optional template database to use as starting point
+- `template_path`: Accepted for compatibility but currently unused; no template is applied
 
-The add-in builds through `BuildAs(source, output)` and opens no picker. An add-in that does not list `build_as_paths` in `APICapabilities` is refused before the build starts (`error_pattern: build_output_unsupported`). `output_path` in the result is the path the add-in reports building.
+The add-in builds through `BuildAs(source, output)` and opens no picker. Named-output behavior belongs to the admitted release contract; optional capability discovery is not a required probe. `output_path` in the result is the path the add-in reports building.
 
 ```python
 vcs_rebuild_database("C:\\src\\mydb", "C:\\output\\fresh.accdb")
@@ -330,27 +330,32 @@ msaccess-vcs run-tests C:\path\to\msaccess-vcs-addin\Version Control.accda --fil
 
 #### Running the add-in's own tests
 
-Pass the development copy in the add-in's repository as the database path:
+Use a fresh disposable complete development host; follow the maintained
+[test-host lifecycle](../msaccess-vcs-addin/docs/agent-test-runs.md#prepare-and-dispose-of-the-entire-development-host)
+for preparation, retained-fixture reopen/compile checks, evidence and disposal:
 
 ```python
-vcs_run_tests(r"C:\path\to\msaccess-vcs-addin\Version Control.accda", filter="clsTestInstall")
+vcs_run_tests(r"C:\scratch\addin-suite\msaccess-vcs-addin\Version Control.accda", filter="clsTestInstall")
 ```
 
-A run needs two projects and they are different files: the installed add-in loads as a library and supplies the runner and `TestAssert`, while the code under test is whatever the current database holds. The runner scans the current VBA project, so the host decides which tests are found — a run aimed at a user database, or at anything in the repository's `Testing` folder, finds that database's tests instead. The server opens the development copy as the current database for you, so there is no manual pre-open step.
-
-The installed add-in is refused as a host (see below), and it has no source tree beside it for the tests that read one. The add-in refuses such a run itself, so the server's refusal is the earlier of two.
+The runner scans the current database's VBA project. This development-copy host
+is for the add-in's own suite; **user-project tests target the user's database**
+or the confirmed rebuilt output. The installed add-in supplies the runner as a
+library. See [AGENT_WORKFLOWS.md](docs/AGENT_WORKFLOWS.md) for user-project recipes,
+and [ADDIN_DEVELOPMENT.md](docs/ADDIN_DEVELOPMENT.md) for add-in rebuilds,
+CLI output, test-host setup, and assertion routing.
 
 #### The installed add-in is never a target
 
-No tool accepts the installed add-in as `database_path`, `output_path`, or `template_path`. That file exists to be loaded as a library: opening it as a database, or writing into it, resets a VBA project while it is executing. The check runs before the Access gate and before any COM work, so it applies to every tool — export, import, rebuild, `vcs_run_vba`, `vcs_run_tests`, `vcs_call_vba`, and the rest. Refusals carry `error_pattern: installed_addin_refused`.
+No tool accepts the installed add-in as `database_path`, `output_path`, or
+`template_path`. Opening or writing to that library as a database resets its
+executing VBA project. The server refuses it before the Access gate or COM work
+with `error_pattern: installed_addin_refused`. Use the actual user database or,
+for add-in development, its repository copy.
 
-`vcs_get_version_info()` reports the installed add-in's version without opening it.
-
-The comparison ignores the file extension, since a compiled install is a `.accde` built from the same `.accda`. Folder parameters are not checked — an export folder beside the install is not the install.
-
-With `ACCESS_VCS_ADDIN_PATH` unset, the install path comes from `HKCU\Software\VB and VBA Program Settings\MSAccessVCS\Install`, the same `Install Folder` and `Compile accde` values the add-in's own installer writes. `Install Folder` is absent for a default install, which means `%AppData%\MSAccessVCS`.
-
-Run these tests through the server rather than from the add-in's own window. Assertions are recorded by the runner in whichever project received the call, while `TestAssert` always routes to the *installed* add-in, so a run started inside a development copy discards every assertion and reports `EMPTY` for each test. An all-`EMPTY` result means the harness was bypassed, not that the tests passed.
+`vcs_get_version_info()` reports the installed version without opening it. Path
+resolution and guard implementation live in
+[CONTRIBUTING.md](docs/CONTRIBUTING.md#the-installed-add-in-is-never-a-target).
 
 ### Per-Object Operations
 

@@ -1,6 +1,17 @@
 # AI Agent Workflows for Microsoft Access Development
 
-This guide documents common workflows for AI agents working with Microsoft Access databases using the msaccess-vcs-mcp tool.
+This guide documents common workflows for AI agents working on users' Microsoft
+Access databases with msaccess-vcs-mcp. The Python-style examples illustrate MCP
+tool calls; invoke them through your client's tool interface and read its live
+schemas for parameter contracts. `read_file`, `write_file`, and Git calls below
+represent your editor and version-control tools, not functions supplied by MCP.
+
+The optional [access-vcs-sync](../skills/access-vcs-sync/SKILL.md) and
+[access-vcs-recover](../skills/access-vcs-recover/SKILL.md) skills package sync and
+recovery guidance for installation in an agent client. This guide remains usable
+without installing them. For bridge development, read
+[CONTRIBUTING.md](CONTRIBUTING.md); add-in rebuilds and its own tests are covered
+in [ADDIN_DEVELOPMENT.md](ADDIN_DEVELOPMENT.md).
 
 ## Required compatibility preflight
 
@@ -52,6 +63,11 @@ this notification, not installing, rebuilding, downgrading, or upgrading.
 Proceed after a compatible check without feature probes solely for release
 compatibility. Requested mode/policy acknowledgments remain required per call.
 
+After a refusal, server-permitted metadata/recent-call, dialog/status/recovery,
+HTTP cancellation and raw DAO inspection retain their own guards. They do not
+authorize replay, installation, rebuilding or overriding compatibility.
+When using released skills, also check their exact [release provenance](../skills/release-policy.md).
+
 ## Overview
 
 The MCP tool enables AI agents to work iteratively with Access databases by:
@@ -60,9 +76,39 @@ The MCP tool enables AI agents to work iteratively with Access databases by:
 3. Merging changes back into the database
 4. Testing and iterating
 
+## Establish the target and confirm outcomes
+
+Locate and read the target project's exported `AGENTS.md`, normally in
+`<database-name>.accdb.src`, plus the relevant `vcs-agent-docs/` references. These
+are the authority for editing the actual export format. The paths below are
+examples; a project can configure a different source folder.
+
+Before exporting or importing, confirm that folder against the intended database:
+
+```python
+vcs_call_vba(
+    database_path=r"C:\mydb.accdb",
+    function_name="VCS.API",
+    args=["GetExportFolder"],
+)
+```
+
+Export writes only to the configured folder; omit deprecated `output_dir`.
+Import's `source_dir` does not change the configured folder it reads. Preserve
+pending source edits and unsaved database work before a replacement or export.
+
+Check every operation's returned outcome before proceeding. Whole-project export,
+merge, and rebuild require a terminal completion callback; a start acknowledgment
+or `completion_unconfirmed` is not confirmed success. For uncertainty, inspect
+recent calls and the matching operation log before retrying a mutation. Read
+[DIALOGS.md](DIALOGS.md) for decision policies, cancellation, and recovery tools;
+the portable skills carry additional conditional
+[operation-choice](../skills/access-vcs-sync/references/operation-choice.md) and
+[verification](../skills/access-vcs-sync/references/verification.md) guidance.
+
 ## Core Workflow Pattern
 
-All Access development workflows follow this pattern:
+The usual edit-and-sync cycle is:
 
 ```
 ┌─────────────┐
@@ -90,28 +136,33 @@ All Access development workflows follow this pattern:
 
 **Steps:**
 ```python
-# 1. Export the database to source files
-vcs_export_database("C:\\mydb.accdb", "C:\\mydb.src")
+# 1. Capture Access changes only after preserving pending source edits
+vcs_export_database(database_path=r"C:\mydb.accdb")
 
 # 2. Read the query source file
-query_sql = read_file("C:\\mydb.src\\queries\\CustomerReport.sql")
+query_sql = read_file("C:\\mydb.accdb.src\\queries\\CustomerReport.sql")
 
 # 3. Modify the SQL
 # (AI agent makes changes to the SQL)
 
 # 4. Write the updated query
-write_file("C:\\mydb.src\\queries\\CustomerReport.sql", updated_sql)
+write_file("C:\\mydb.accdb.src\\queries\\CustomerReport.sql", updated_sql)
 
 # 5. Merge changes back into database
-vcs_import_objects("C:\\mydb.accdb", "C:\\mydb.src")
+result = vcs_import_objects(
+    database_path=r"C:\mydb.accdb",
+    source_dir=r"C:\mydb.accdb.src",
+    decision_policy="block",
+)
+# Proceed only after confirmed success; reconcile decisions or uncertainty first
 
-# 6. Test the query
-# (Open database and run query to verify)
+# 6. Verify the SQL and run an authorized query check on C:\mydb.accdb
+# A listed object name alone does not verify the change
 ```
 
 **Tips:**
 - Query files are in `queries/` folder with `.sql` extension
-- Include SQL comments for context
+- Follow the exported query guidance for the editable SQL and companion files
 - Test with sample data before committing
 
 ### 2. Add or Update VBA Code
@@ -120,24 +171,28 @@ vcs_import_objects("C:\\mydb.accdb", "C:\\mydb.src")
 
 **Steps:**
 ```python
-# 1. Export VBA modules only (faster)
+# 1. Capture relevant Access changes before editing, if needed
 vcs_export_database(
-    "C:\\mydb.accdb", 
-    "C:\\mydb.src",
+    database_path=r"C:\mydb.accdb",
     object_types=["modules"]
 )
 
 # 2. Read the module source file
-module_code = read_file("C:\\mydb.src\\modules\\Utilities.bas")
+module_code = read_file("C:\\mydb.accdb.src\\modules\\Utilities.bas")
 
 # 3. Add or modify VBA code
 # (AI agent makes changes to the module)
 
 # 4. Write the updated module
-write_file("C:\\mydb.src\\modules\\Utilities.bas", updated_code)
+write_file("C:\\mydb.accdb.src\\modules\\Utilities.bas", updated_code)
 
 # 5. Merge changes back
-vcs_import_objects("C:\\mydb.accdb", "C:\\mydb.src")
+result = vcs_import_objects(
+    database_path=r"C:\mydb.accdb",
+    source_dir=r"C:\mydb.accdb.src",
+    decision_policy="block",
+)
+# Proceed only after confirmed success; reconcile decisions or uncertainty first
 
 # 6. Compile to validate
 result = vcs_compile_vba("C:\\mydb.accdb")
@@ -154,8 +209,9 @@ if not result["success"]:
 - Module files are in `modules/` folder with `.bas` (standard modules) or `.cls` (class modules) extensions
 - Preserve the `Attribute VB_Name` header
 - Use Option Explicit for type safety
-- Include XML doc comments for functions
-- If `vcs_compile_vba` fails, stop editing and ask the user to **Debug → Compile** in the VBE, then paste the code snippet around the highlighted line
+- Follow the project's procedure-comment conventions
+- On a compile failure, follow `agent_guidance` and the exported troubleshooting
+  reference; use the highlighted error context before choosing a fix
 
 ### 3. Create a New Database Object
 
@@ -163,34 +219,35 @@ if not result["success"]:
 
 **Steps:**
 ```python
-# 1. Export existing database
-vcs_export_database("C:\\mydb.accdb", "C:\\mydb.src")
+# 1. Export existing database if needed, after preserving pending source edits
+vcs_export_database(database_path=r"C:\mydb.accdb")
 
 # 2. Create new source file
 # For a new query:
-new_query = """-- Query: NewCustomerList
--- Type: Select
--- Exported: 2026-01-20T10:30:00
-
-SELECT CustomerID, CompanyName, ContactName
+new_query = """SELECT CustomerID, CompanyName, ContactName
 FROM Customers
 WHERE Active = True
 ORDER BY CompanyName
 """
 
-write_file("C:\\mydb.src\\queries\\NewCustomerList.sql", new_query)
+write_file("C:\\mydb.accdb.src\\queries\\NewCustomerList.sql", new_query)
 
 # 3. Merge into database
-vcs_import_objects("C:\\mydb.accdb", "C:\\mydb.src")
+result = vcs_import_objects(
+    database_path=r"C:\mydb.accdb",
+    source_dir=r"C:\mydb.accdb.src",
+    decision_policy="block",
+)
+# Proceed only after confirmed success; reconcile decisions or uncertainty first
 
 # 4. Verify the object was created
 objects = vcs_list_objects("C:\\mydb.accdb")
-print(objects["queries"])
+# Inspect the returned query inventory, then verify its actual SQL and behavior
 ```
 
 **Tips:**
 - Follow existing file naming conventions
-- Include metadata headers for queries
+- Use a compatible existing export as a pattern; preserve required companion files
 - Use descriptive names
 - Test immediately after creation
 
@@ -200,21 +257,19 @@ print(objects["queries"])
 
 **Steps:**
 ```python
-# 1. Full export to source files
-result = vcs_export_database("C:\\mydb.accdb", "C:\\mydb.src")
+# 1. Full export to the configured source folder
+result = vcs_export_database(database_path=r"C:\mydb.accdb", full_export=True)
 
-# 2. Review what was exported
-print(f"Exported {result['exported_count']} objects")
-for obj_type, count in result['objects_by_type'].items():
-    print(f"  {obj_type}: {count}")
+# 2. Check the outcome, export_path, and operation log before proceeding
+# Inspect the exported files and Git diff for missing objects or unexpected changes
 
 # 3. Commit to version control (using git tools)
-git_add("C:\\mydb.src")
+git_add("C:\\mydb.accdb.src")
 git_commit("Initial database export")
 ```
 
 **Tips:**
-- First export is always a full export
+- For an explicitly requested complete export, pass `full_export=True`
 - Subsequent exports use "fast save" (only changed objects)
 - Review Export.log for details
 - Commit frequently for granular history
@@ -226,35 +281,43 @@ git_commit("Initial database export")
 **Steps:**
 ```python
 # 1. Commit any local changes first
-vcs_export_database("C:\\mydb.accdb", "C:\\mydb.src")
-git_add("C:\\mydb.src")
+vcs_export_database(database_path=r"C:\mydb.accdb")
+git_add("C:\\mydb.accdb.src")
 git_commit("My changes before pull")
 
 # 2. Pull changes from remote
 git_pull()
 
-# 3. Review what changed
-diff_result = vcs_diff_database("C:\\mydb.accdb", "C:\\mydb.src")
-print("Modified objects:")
-print(diff_result)
+# 3. Review Git changes and any independent database edits before merging
+# vcs_diff_database is only a limited query/module name inventory, not a content diff
 
 # 4. Merge source changes into database
-vcs_import_objects("C:\\mydb.accdb", "C:\\mydb.src")
+result = vcs_import_objects(
+    database_path=r"C:\mydb.accdb",
+    source_dir=r"C:\mydb.accdb.src",
+    decision_policy="block",
+)
+# Proceed only after confirmed success; reconcile decisions or uncertainty first
 
 # 5. Test the merged result
 # (Verify database functions correctly)
 
-# 6. Export and commit if merge succeeded
-vcs_export_database("C:\\mydb.accdb", "C:\\mydb.src")
-git_add("C:\\mydb.src")
+# 6. After confirmed merge and verification, capture Access normalization if needed
+vcs_export_database(database_path=r"C:\mydb.accdb")
+git_add("C:\\mydb.accdb.src")
 git_commit("Merged changes from team")
 ```
 
 **Tips:**
-- Always commit before pulling
+- Preserve local source and database work before integrating remote changes
 - Review diffs carefully
 - Test thoroughly after merge
-- Resolve conflicts in source files, not in Access
+- Resolve Git conflicts in source files before import
+- Database-versus-source conflicts require an authorized winner: default `block`
+  reports `decision_required`; inspect the decisions instead of silently choosing
+- Use `prefer_source` or `prefer_database` only when the user's intent authorizes
+  that outcome; source-winning actions may include deletion
+- See [DIALOGS.md](DIALOGS.md) for policy semantics and partial outcomes
 
 ### 6. Build Fresh Database from Source
 
@@ -264,116 +327,42 @@ git_commit("Merged changes from team")
 ```python
 # 1. Build from source files
 result = vcs_rebuild_database(
-    "C:\\mydb.src",
-    "C:\\builds\\mydb_v1.0.accdb"
+    source_dir=r"C:\mydb.accdb.src",
+    output_path=r"C:\builds\mydb_v1.0.accdb"
 )
 
 # 2. Verify build succeeded
-if result["success"]:
+if result.get("success"):
     print(f"Database built: {result['output_path']}")
-    print(f"Build log: {result['log_path']}")
+    # Review the returned log_path/log_excerpt when available
 else:
-    print(f"Build failed: {result['error']}")
+    print(f"Build failed or unconfirmed: {result.get('error')}")
 
-# 3. Test the built database
-objects = vcs_list_objects("C:\\builds\\mydb_v1.0.accdb")
-print(f"Built database contains {len(objects['queries'])} queries")
+# 3. Only after confirmed completion, verify and test the reported output_path
+# Object-name inventory alone does not establish content or behavior
 ```
 
 **Tips:**
-- Build from source creates a fresh database
+- Build from source creates a fresh database; select a fresh or authorized output
+- It uses an isolated Access host and refuses an already-open output, preserving
+  user-owned windows; `requested_output_path` alone is not the resulting file
+- `template_path` is currently accepted but not applied; report a required
+  template as a limitation rather than promising it was used
 - Use for deployments and releases
-- Review Build.log for any issues
+- Read this attempt's returned `log_path` or a correlated `Build_*.log` for issues
 - Test thoroughly before distributing
 
 ### 6b. Rebuild the VCS add-in from source
 
-**Use case:** You edited add-in source (for example `clsQueryComposer.cls`) and need the running add-in to pick up those changes without waiting for a person.
-
-This is **not** `vcs_rebuild_database`. That tool rebuilds a user project. The add-in rebuilds itself through `vcs_rebuild_addin`.
-
-**Preconditions:** no other `MSACCESS.EXE` in the Windows session may hold a file the rebuild replaces — the installed add-in or the build target. An instance with an unrelated database open does not block it; one that loaded the add-in does, as does one that cannot be asked. The guard reports them but closes nothing. The repo folder must be a trusted location and the helper script enabled.
-
-**Steps:**
-```python
-result = vcs_rebuild_addin(
-    r"C:\path\to\msaccess-vcs-addin\Version Control.accda.src"
-)
-# Returns when this attempt is complete, refused, or *-failed.
-# Do not poll rebuild-status.json yourself unless the tool timed out.
-```
-
-The tool derives the development copy beside the source folder. Its callback
-URL and operation ID cross the disconnected worker boundary, so the builder
-Access process emits the same detailed HTTP `Log.Add` / `Log.Progress` stream
-as `vcs_rebuild_database`. The status file remains authoritative for compile,
-install, terminal failure, and recovery after the builder exits. Rebuilding
-the add-in is a repository operation and belongs to the repository's own copy,
-which closes itself once the worker handoff is confirmed. Do not open a user
-database, anything in the repository's `Testing` folder, or a scratch `.accdb`.
-The installed add-in is refused here as it is for every tool — see the note
-under 6c.
-
-MCP progress is best-effort in Cursor 3.13. For live terminal output:
-
-```text
-msaccess-vcs rebuild-addin "C:\path\to\msaccess-vcs-addin\Version Control.accda.src"
-```
-
-Keep the CLI in the foreground so its stream stays in the primary chat. It
-exits when the operation reaches terminal status; that process exit is the
-completion signal. Do not background it just to wait on a notification, and
-do not add a second timer wait, fixed-duration sleep, or
-`rebuild-status.json` poll after it has already finished.
-
-**Tips:**
-- `refused` and `launch-failed` come back immediately; nothing was rebuilt
-- A `refused` result lists each other process in `otherInstances`; close those yourself and call again
-- `launch-failed` means the helper script never started — Access stays open and the call is safe to retry
-- `compile-failed` leaves Access open on the rebuilt file for Debug > Compile
-- After `complete`, later MCP calls load the newly installed add-in
-- Builder and silent-installer Access processes request full-power QoS; user-owned Access is left alone
-- `vcs_call_vba(..., ["RebuildAddIn", source])` is a launch-only escape hatch
-- If the tool times out, recover by reading `<source>/logs/rebuild-status.json` and matching `phaseStarted`
+For add-in source changes, follow
+[Rebuilding the VCS add-in](ADDIN_DEVELOPMENT.md#rebuilding-the-vcs-add-in).
+`vcs_rebuild_database` is for user projects; use `vcs_rebuild_addin` for the add-in.
 
 ### 6c. Run the add-in's own test suite
 
-**Use case:** Qualify the add-in's own source-built version in a fresh disposable
-development host. Normal user-database workflows remain separate.
-
-**Preparation and completion:** Follow the add-in's maintained
-[test-host lifecycle](../../msaccess-vcs-addin/docs/agent-test-runs.md). Prepare a
-complete isolated repository context, use a closed source-built `.accda`, run the
-suite, validate retained fixtures and compilation after owned close/fresh reopen,
-preserve evidence, then dispose of the whole host. A43 implementation/qualification
-are pending; copying the current cleanup-enabled binary alone is insufficient.
-
-**Run against the prepared disposable host:**
-```python
-vcs_run_tests(r"C:\scratch\addin-suite\msaccess-vcs-addin\Version Control.accda", filter="clsTestInstall")
-```
-
-MCP progress is best-effort in Cursor. For live per-test output:
-
-```text
-msaccess-vcs run-tests "C:\scratch\addin-suite\msaccess-vcs-addin\Version Control.accda" --filter clsTestInstall
-```
-
-Keep the CLI in the foreground so its stream stays in the primary chat. It
-exits when the run finishes; that process exit is the completion signal.
-The stream is dots for fast passes, a named line for tests ≥ 1s, and
-full FAIL/ERROR/EMPTY lines. The last stdout line is a human summary such as
-`Tests passed. 12 subs, 40 assertions in 1.48s`. Headless means no add-in UI
-(no web runner, no console form), not a hidden Access window.
-
-**Why the path is the disposable development copy:** a run needs two projects and they are different files. The installed add-in loads as a library and supplies the runner and `TestAssert`; the code under test is whatever the current database holds. The runner scans the current VBA project, so the disposable host must contain the version under test and its repository context; a user database or the `Testing` sample finds different tests. Access will not bind a file moniker to an `.accda`, so the server opens the development copy as the current database explicitly; you do not need to open it first.
-
-**The installed add-in is never a target.** No tool accepts it as `database_path`, `output_path`, or `template_path` — not this one, not export, import, rebuild, `vcs_run_vba`, or `vcs_call_vba`. That file exists to be loaded as a library: opening it as a database, or writing into it, resets a VBA project while it is executing. It also has no source tree beside it for the tests that read one. The check runs before the Access gate and any COM work, and returns `error_pattern: installed_addin_refused`; the add-in refuses such a run itself, so the server's refusal is the earlier of two. `vcs_get_version_info()` reports the installed version without opening anything. The comparison ignores the extension, because a compiled install is a `.accde` built from the same `.accda`.
-
-**Tips:**
-- Run through the MCP server, not from the add-in's own window; assertions route to the installed add-in while the runner lives in the calling project, so a development-copy run discards them all
-- An all-`EMPTY` result (zero assertions) is a bypassed harness, not a pass
-- A rebuild closes server-owned Access that held the files it replaces, so expect a cold start on the next call
+For add-in development, follow
+[Running the add-in's own tests](ADDIN_DEVELOPMENT.md#running-the-add-ins-own-tests).
+User-project tests target the user's database, as shown below.
 
 ### 7. Iterative Development Cycle
 
@@ -381,84 +370,97 @@ full FAIL/ERROR/EMPTY lines. The last stdout line is a human summary such as
 
 **Steps:**
 ```python
-def develop_feature(db_path, src_path, feature_name):
-    """Iterative development cycle for a feature."""
-    
-    while not feature_complete:
-        # 1. Export current state
-        vcs_export_database(db_path, src_path, object_types=["modules"])
-        
-        # 2. Make incremental changes
-        # (AI agent modifies code)
-        
-        # 3. Merge changes
-        vcs_import_objects(db_path, src_path)
-        
-        # 4. Test
-        test_result = run_tests(db_path)
-        
-        # 5. Evaluate and iterate
-        if test_result.passed:
-            # Commit this iteration
-            git_commit(f"Progress on {feature_name}")
-        else:
-            # Debug and retry
-            analyze_errors(test_result.errors)
+# Capture Access edits at the start, after preserving source edits, if needed
+vcs_export_database(database_path=r"C:\mydb.accdb", object_types=["modules"])
+
+# Edit one coherent change using the project's exported guidance
+# Apply it and check the final result before running tests
+vcs_import_objects(
+    database_path=r"C:\mydb.accdb",
+    source_dir=r"C:\mydb.accdb.src",
+    decision_policy="block",
+)
+
+# Run relevant tests defined in this USER project, after confirmed import
+vcs_run_tests(database_path=r"C:\mydb.accdb", filter="modTestUtilities")
+# Inspect actual test keys, assertions, failures/errors, and EMPTY entries
+# Verify the requested behavior, review the source diff, then commit as authorized
 ```
 
-**Tips:**
-- Export frequently to track progress
-- Test each iteration
-- Commit working iterations
-- Use fast save for speed
+Export again only when needed to capture Access normalization or subsequent
+Access edits; preserve source work first. A failed or uncertain operation ends
+this iteration until its outcome is reconciled. Test filters must come from the
+user's project, not the example name or the add-in's development suite.
+
+### 8. Apply a single object or category
+
+For a deliberate replacement of one named object:
+
+```python
+vcs_import_object(
+    database_path=r"C:\mydb.accdb",
+    object_type="module",
+    object_name="Utilities",
+)
+```
+
+This path bypasses index-based conflict detection even with `block`; establish
+source-replacement intent first. Use conflict-aware merge when independent
+Access edits must be reconciled. A single import is not a way around a previously
+reported conflict.
+
+For complete categories:
+
+```python
+vcs_import_objects(
+    database_path=r"C:\mydb.accdb",
+    source_dir=r"C:\mydb.accdb.src",
+    object_types=["queries"],
+    full_import=False,
+    decision_policy="block",
+)
+```
+
+Category import deletes objects absent from the category source and takes no
+backup. Confirm complete source and intended deletions first. `full_import=True`
+forces source replacement and skips conflict detection; it is ignored for a
+whole-project merge. Use the operation-choice reference for scope and backup
+tradeoffs.
 
 ## Best Practices
 
 ### File Organization
 
-The VCS add-in exports to a structured folder:
-
-```
-mydb.src/
-├── queries/          # SQL query files (.sql)
-├── modules/          # VBA standard modules (.bas)
-├── forms/            # Form definitions (.bas, .cls)
-├── reports/          # Report definitions (.bas, .cls)
-├── macros/           # Macro definitions (.bas)
-├── tables/           # Table data (if enabled)
-├── tbldefs/          # Table structure (.sql, .xml)
-├── vcs-options.json  # Export options
-└── vcs-index.json    # Fast save index
-```
-
-### Encoding
-
-**Critical:** All source files use UTF-8 with BOM encoding.
-
-- Always preserve UTF-8 BOM when editing files
-- The add-in requires BOM for proper import
-- Check file encoding before writing changes
+Follow the target export's `AGENTS.md` and file-type references for structure,
+encoding, paired definitions/code, and the index. Preserve existing encoding and
+BOM conventions when editing; leave the generated binary index to the add-in.
+The actual exported project, rather than a generic directory sketch, determines
+where objects live.
 
 ### Error Handling
 
 ```python
 # Always check for errors
-result = vcs_export_database(db_path, src_path)
+result = vcs_export_database(database_path=db_path)
 
 if not result["success"]:
     print(f"Export failed: {result.get('error')}")
-    # Check if add-in is installed
-    # Check database path
-    # Review error message
+    # Inspect error_pattern, decisions, and the matching operation log
+    # Reconcile completion_unconfirmed/timeouts before issuing another mutation
 ```
 
 ### Testing
 
-Test database changes immediately:
-1. Open database in Access
-2. Test affected objects
-3. Run any VBA tests
-4. Verify data integrity
+After confirmed import or rebuild, read the user's exported testing guidance.
+Compile VBA changes using `vcs_compile_vba` and follow its `agent_guidance` if
+compilation fails. Run relevant tests on the user's database or confirmed rebuilt
+output; the installed add-in supplies the runner as a library.
+
+Check that returned test keys and assertions cover the intended change. A run
+against the development add-in, zero selected tests, or an all-EMPTY result does
+not validate the user project. Some tests mutate data or contact services; use
+the project's fixture and authorization conventions. Verify affected queries,
+layouts, and data behavior as needed, and report checks that remain outstanding.
 
 ### Version Control
 
@@ -484,20 +486,22 @@ git commit -m "Update invoice report layout"
 **Error:** Import/merge build fails
 
 **Solution:**
-1. Check Build.log for details
-2. Verify source files are valid
-3. Ensure UTF-8 BOM encoding
-4. Try full rebuild if merge fails
+1. Inspect the attempt's returned `log_path`; otherwise correlate the `Merge_*.log`
+   with this database and timestamp using the exported troubleshooting reference.
+2. Verify source files against the project's exported guidance.
+3. Inspect `decision_required` and cleanup errors before proceeding.
+4. A full rebuild needs its own intended outcome and authorized output; a failed
+   merge alone is not a reason to replace the entire database.
 
 ### Objects Not Exporting
 
 **Error:** Some objects missing from export
 
 **Solution:**
-1. Check Export.log for errors
-2. Ensure objects aren't open in Access
-3. Verify object names don't contain invalid characters
-4. Check VCS options (vcs-options.json)
+1. Correlate the attempt's Export log and outcome with the intended database.
+2. Check export scope and VCS options (`vcs-options.json`).
+3. If an open object or native save dialog blocked the operation, inspect it using
+   [DIALOGS.md](DIALOGS.md); preserve unsaved work before closing anything.
 
 ### Merge Conflicts
 
@@ -509,13 +513,30 @@ git commit -m "Update invoice report layout"
 3. Test merged result in Access
 4. Re-export to verify
 
+### Busy server, timeout, or blocked dialog
+
+Inspect before retrying:
+
+```python
+vcs_get_recent_calls(limit=10)
+vcs_automation_status(database_path=r"C:\mydb.accdb")
+vcs_list_dialogs(database_path=r"C:\mydb.accdb")
+```
+
+Match the operation ID, database, timestamps, and logs. Readiness is not proof a
+previous mutation completed; recent-call absence is not proof it never started.
+Follow [DIALOGS.md](DIALOGS.md) for supported dismissal and cancellation, or the
+[recovery skill](../skills/access-vcs-recover/SKILL.md) for reconciliation steps.
+Preserve user-owned Access windows. Retry only after the prior outcome and any
+required decision are resolved.
+
 ## Advanced Patterns
 
 ### Conditional Logic Updates
 
 When updating complex VBA logic:
-1. Export current version
-2. Add comprehensive comments
+1. Preserve and export the relevant current version if needed
+2. Record non-obvious constraints in the project's existing comment conventions
 3. Make incremental changes
 4. Test each change
 5. Commit working versions
@@ -523,8 +544,8 @@ When updating complex VBA logic:
 ### Schema Migrations
 
 When changing table structure:
-1. Export table definitions (`tbldefs/`)
-2. Modify SQL CREATE TABLE statements
+1. Read the target project's table-definition and data guidance
+2. Edit the actual exported representation; do not assume it is SQL CREATE TABLE
 3. Handle data migration separately
 4. Test with sample data first
 5. Document migration steps
@@ -540,7 +561,9 @@ Forms and reports are exported but harder to edit as text:
 ## Resources
 
 - [MSAccess VCS Add-in Documentation](https://github.com/joyfullservice/msaccess-vcs-integration/wiki)
-- [Export File Format Reference](EXPORT_FORMATS.md)
+- Target export's `AGENTS.md` and `vcs-agent-docs/` — authoritative file-format,
+  testing, and compile-error guidance for that project
+- [Dialogs and noninteractive automation](DIALOGS.md) — policies and recovery
 - [VBA Integration Guide](VBA_INTEGRATION.md)
 - [AGENTS.md](https://github.com/joyfullservice/msaccess-vcs-integration/blob/main/Version%20Control.accda.src/AGENTS.md) - Comprehensive file structure guide
 
@@ -548,10 +571,29 @@ Forms and reports are exported but harder to edit as text:
 
 For issues or questions:
 1. Check the [Wiki](https://github.com/joyfullservice/msaccess-vcs-integration/wiki)
-2. Review Export.log or Build.log
+2. Read the returned attempt `log_path`; correlate a missing path by time/operation identity
+   using the [operation log families](CONTRIBUTING.md#vcs-operation-logs-written-by-the-add-in-not-the-server)
 3. Open an issue on GitHub
 4. Include error messages and context
 
 ## Automatic compatibility sessions (X17)
 
-Workflow preflight is an independent workflow requirement. Operational commands automatically negotiate the server/add-in session even without agent preflight. Only the handshake transmits versions; every dependent command carries a validated session ID. Read-only metadata does not establish admission. See [release compatibility](RELEASE_COMPATIBILITY.md) for cache identity, invalidation, migration and unfinished qualification.
+Workflow preflight is an independent workflow requirement. Operational commands automatically negotiate the server/add-in session even without agent preflight. Only the handshake transmits versions; every dependent command carries a validated session ID. Read-only metadata does not establish admission. See [release compatibility](RELEASE_COMPATIBILITY.md) for cache identity, invalidation, migration and completed X17 qualification.
+
+## Optional skill installation and distribution
+
+The maintained sources are this MCP repository's `skills/` directory. Release
+the skills with the MCP version they describe and use that release's supported
+add-in combination. Preserve the shared `skills/release-policy.md` and each skill's
+references when delivering them. Individual directories are not independently
+supported artifacts; install the skills supplied by the connected server's release.
+
+The wheel bundles the complete tree under `msaccess_vcs_mcp/guidance/`: both
+skills, shared release policy, a copy of the authoritative workflow declaration,
+and generated `release.json`. The sdist contains their maintained sources; wheel
+builds derive provenance from the package version. Preserve the complete tree.
+For source checkouts, compare the server identity in `src/msaccess_vcs_mcp/__init__.py`
+and read the original `workflow_requirement.json` beside it. Release packages
+carry their own manifest; independently copied skill directories are unsupported.
+Client integration packages are the preferred delivery route; their implementation
+belongs to the separate X14 project. Skills remain optional for following this guide.

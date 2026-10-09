@@ -1,12 +1,18 @@
 # Dialogs and noninteractive Access automation
 
-> Release compatibility policy (owner decision, 2026-10-02): every add-in release changes its version. The supported release version defines the API contract; capability probing is not required to establish release compatibility. The spec assumes the server checks the installed add-in version and refuses unsupported releases before starting operations. The minimum supported release version must be stated when the release is assigned; do not infer it from a development rebuild. Per-call mode and policy acknowledgments still confirm the requested state and remain required. This policy supersedes earlier statements requiring capability checks instead of a version gate. It is a specification change, not evidence that version enforcement is already implemented.
+This reference explains noninteractive workflows and recovery tools for agents
+operating on users' Access databases, and the contracts contributors must preserve.
+For common edit/export/import recipes, see [AGENT_WORKFLOWS.md](AGENT_WORKFLOWS.md).
+The optional [sync](../skills/access-vcs-sync/SKILL.md) and
+[recovery](../skills/access-vcs-recover/SKILL.md) skills provide portable workflow
+entry points. Read live tool schemas for parameter contracts.
 
-X16 implements the version gate before add-in-dependent tool bodies. See
-[release compatibility](RELEASE_COMPATIBILITY.md) for assigned unpublished ranges,
-development identities, stable errors and recovery exceptions.
+X17 automatically admits the installed/loaded add-in and validates dependent
+commands. [Release compatibility](RELEASE_COMPATIBILITY.md) owns declarations,
+cache invalidation, migration and permitted recovery after refusal. Capability
+probing is optional; per-call mode and policy acknowledgments remain required.
 
-Agent calls default to a scoped noninteractive mode. Interactive ribbon and
+Agent calls with policy parameters default to a scoped noninteractive mode. Interactive ribbon and
 Immediate Window use is unchanged unless a decision policy is passed.
 
 `DoCmd.SetWarnings` is not a dialog suppressor. It does not cover `MsgBox`,
@@ -22,9 +28,10 @@ vcs_import_objects(r"C:\db.accdb", r"C:\db.src")
 vcs_import_objects(
     r"C:\db.accdb",
     r"C:\db.src",
-    decision_policy="prefer_source",
+    decision_policy="prefer_source",  # Only for authorized source-winning intent
 )
 
+# Deliberate source replacement; this path bypasses index conflict detection
 vcs_import_object(r"C:\db.accdb", "module", "modHelpers")
 vcs_export_object(r"C:\db.accdb", "form", "frmMain")
 ```
@@ -273,6 +280,10 @@ forms only while Access is responsive. A modal dialog blocks that call.
 These tools do not use the Access COM gate. Call them while another tool is
 still waiting.
 
+The following are separate examples, not a sequence to execute. Use dialog IDs,
+PID, and creation time returned by inspection; the numbers are placeholders.
+Apply the authorization and outcome rules below before dismissing or cancelling.
+
 ```python
 vcs_list_dialogs(r"C:\db.accdb")
 vcs_list_dialogs(r"C:\db.accdb", pid=12345, create_time=133000000000000000)
@@ -493,7 +504,6 @@ always describes the box that was clicked.
   blocking COM step returns. Sync bodies continue to completion. Interruption
   records stay attached to that original call and are consumed before the
   worker releases its slot, including when no caller is still waiting.
-- Known gap (M43): `vcs_rebuild_database` attaches to an Access instance that
-  is already running instead of starting its own. The build then fails ("You
-  already have the database open"), and its cleanup closes that instance's
-  database and quits it. Close other Access windows before a rebuild.
+- `vcs_rebuild_database` uses an isolated `DispatchEx` host. Cleanup closes only
+  that host; an already-open output is refused without closing its holder.
+  `tests/test_build_host_ownership.py` covers this boundary.
