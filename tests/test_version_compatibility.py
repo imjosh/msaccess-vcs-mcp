@@ -227,7 +227,7 @@ def test_metadata_survives_incompatible_or_missing_access(public, monkeypatch):
     connect = MagicMock(side_effect=AssertionError("Access started"))
     monkeypatch.setattr(tools, "AccessConnection", connect)
     result = asyncio.run(tools.vcs_get_version_info())
-    assert result["mcp_version"] == "0.3.0-dev.18"
+    assert result["mcp_version"] == "0.3.0-dev.18+verify2.0"
     assert result["server_runtime"]["pid"] > 0
     assert result["server_runtime"]["python_executable"]
     assert result["server_runtime"]["package_root"]

@@ -44,6 +44,7 @@ Which windows are the server's own is recorded on disk, keyed by process id *and
 
 - **Python**: 3.11 or higher
 - **Microsoft Access**: Installed on Windows (for COM automation)
+- **Access versions**: Follow the [upstream add-in support](https://github.com/joyfullservice/msaccess-vcs-addin#readme): Access 2010, 2013, 2016, 2019, and 365. This MCP integration's 32-bit Access support is currently untested.
 - **pywin32**: Python COM interface (installed automatically)
 
 If MCP startup fails with a `CLSIDToClassMap` / `win32com.gen_py` error, the server deletes the stale type-library folder under `%TEMP%\gen_py` and retries once automatically. If it still fails after that, Microsoft Access is probably not installed or not registered for COM automation.

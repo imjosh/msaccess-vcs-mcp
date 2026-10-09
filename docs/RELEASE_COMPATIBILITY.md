@@ -16,12 +16,20 @@ is the existing procedure-call transport; compatibility does not drive the UI.
 The add-in requirement comes from its command contract, independently of the
 workflow requirement. Protocol: **msaccess-vcs.session/1**. Development pair:
 add-in **6.0.0-dev.18**, server **0.3.0-dev.18**; package metadata uses PEP 440
-**0.3.0.dev18**. The coordinated development bump includes the A36–A40 fixes; consumer declarations admit the new development pair. These assignments are **unpublished**.
+**0.3.0.dev18+verify2.0**, reported by the server as **0.3.0-dev.18+verify2.0**.
+The coordinated development bump includes the A36–A40 fixes; consumer declarations
+admit the new development pair. These assignments are **unpublished**.
 Legacy refusal breaks the add-in API (major 6) and the major-zero server API
 (minor 0.3). Historical X16 receipts qualify only the previous contract.
 Release owners must verify and separately authorize publication of stable identities.
 
 ## Version policy
+
+Workflow skills are maintained in this MCP repository and released with the MCP
+version they describe. Use the skills from that server release and its supported
+add-in combination. Individual skill directories are not independently supported
+release artifacts. Package generation must obtain the skill release identity from
+the MCP package version; keep compatibility requirements in their existing declarations.
 
 Use [SemVer 2.0.0](https://semver.org/spec/v2.0.0.html). Project range syntax is
 `>=MIN <MAX; prerelease=V1,V2`, inclusive minimum/exclusive maximum. Stable
