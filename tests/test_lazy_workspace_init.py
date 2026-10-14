@@ -58,6 +58,103 @@ def _metadata_tool(monkeypatch, session):
     return tools_module.mcp._tool_manager.get_tool("vcs_get_version_info").fn
 
 
+class TestGlobalProjectRecipes:
+    @pytest.mark.parametrize("launch,personal,expected", [
+        (None, None, "base.accdb"),
+        ("launch.accdb", None, "launch.accdb"),
+        ("", None, ""),
+        ("launch.accdb", "personal.accdb", "personal.accdb"),
+    ])
+    def test_initial_precedence_through_metadata(self, tmp_path, monkeypatch, launch, personal, expected):
+        selected = tmp_path / "project with spaces"
+        selected.mkdir()
+        (selected / ".env").write_text("ACCESS_VCS_DATABASE=base.accdb\n", encoding="utf-8")
+        if personal is not None:
+            (selected / ".env.local").write_text(f"ACCESS_VCS_DATABASE={personal}\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("ACCESS_VCS_PROJECT_DIR", str(selected))
+        monkeypatch.setenv("ACCESS_VCS_ENABLE_LOGGING", "false")
+        if launch is not None:
+            monkeypatch.setenv("ACCESS_VCS_DATABASE", launch)
+        session = MagicMock()
+        result = asyncio.run(_metadata_tool(monkeypatch, session)())
+        assert result["target_database"] == expected
+        assert result["project_configuration"] == {
+            "project_root": str(selected), "resolution_method": "ACCESS_VCS_PROJECT_DIR",
+        }
+        session.send_request.assert_not_called()
+        events = _read_diagnostic_events()
+        assert any(e["event"] == "startup_env_load" and e["project_root"] == str(selected)
+                   and e["env_loaded"] and e["env_local_loaded"] == (personal is not None)
+                   for e in events)
+
+    @pytest.mark.parametrize("personal", [False, True])
+    def test_reload_precedence_and_removed_key_through_metadata(self, tmp_path, monkeypatch, personal):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("ACCESS_VCS_PROJECT_DIR", str(tmp_path))
+        monkeypatch.setenv("ACCESS_VCS_DATABASE", "launch.accdb")
+        monkeypatch.setenv("ACCESS_VCS_ENABLE_LOGGING", "false")
+        env = tmp_path / ".env"
+        env.write_text("ACCESS_VCS_DATABASE=base.accdb\n", encoding="utf-8")
+        if personal:
+            (tmp_path / ".env.local").write_text("ACCESS_VCS_DATABASE=personal.accdb\n", encoding="utf-8")
+        tool = _metadata_tool(monkeypatch, MagicMock())
+        assert asyncio.run(tool())["target_database"] == ("personal.accdb" if personal else "launch.accdb")
+        mtime = env.stat().st_mtime
+        env.write_text("ACCESS_VCS_DATABASE=edited.accdb\nACCESS_VCS_ENABLE_LOGGING=false\n", encoding="utf-8")
+        os.utime(env, (mtime + 10, mtime + 10))
+        expected = "personal.accdb" if personal else "edited.accdb"
+        assert asyncio.run(tool())["target_database"] == expected
+        env.write_text("ACCESS_VCS_ENABLE_LOGGING=false\n", encoding="utf-8")
+        os.utime(env, (mtime + 20, mtime + 20))
+        assert asyncio.run(tool())["target_database"] == expected
+        assert config_module.get_project_root_info()["project_root"] == str(tmp_path)
+
+    def test_new_and_deleted_files_do_not_trigger_reload(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("ACCESS_VCS_PROJECT_DIR", str(tmp_path))
+        monkeypatch.setenv("ACCESS_VCS_ENABLE_LOGGING", "false")
+        tool = _metadata_tool(monkeypatch, MagicMock())
+        assert asyncio.run(tool())["target_database"] == ""
+        env = tmp_path / ".env"
+        env.write_text("ACCESS_VCS_DATABASE=created.accdb\n", encoding="utf-8")
+        assert asyncio.run(tool())["target_database"] == ""
+        # Simulate a restart's fresh configuration load.
+        config_module._env_loaded = False
+        assert asyncio.run(tool())["target_database"] == "created.accdb"
+        (tmp_path / ".env.local").write_text("ACCESS_VCS_DATABASE=new-local.accdb\n", encoding="utf-8")
+        assert asyncio.run(tool())["target_database"] == "created.accdb"
+        env.unlink()
+        assert asyncio.run(tool())["target_database"] == "created.accdb"
+
+    @pytest.mark.parametrize("context", ["first project", "second project", "missing", "invalid"])
+    def test_documented_claude_launch_mapping(self, tmp_path, monkeypatch, context):
+        import runpy
+
+        # Execute the exact documented -c argument without starting the server.
+        doc = (Path(__file__).parents[1] / "docs" / "PROJECT_SELECTION.md").read_text(encoding="utf-8")
+        command = next(line for line in doc.splitlines() if line.startswith("claude mcp add "))
+        snippet = command.split(" -c '", 1)[1][:-1]
+        launched = MagicMock()
+        monkeypatch.setattr(runpy, "run_module", launched)
+        monkeypatch.setenv("ACCESS_VCS_PROJECT_DIR", "wrong-home-fallback")
+        if context == "missing":
+            monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        else:
+            selected = tmp_path / context
+            if context != "invalid":
+                selected.mkdir()
+            monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(selected))
+        if context in ("missing", "invalid"):
+            with pytest.raises(SystemExit, match="existing project directory"):
+                exec(snippet, {})
+            launched.assert_not_called()
+        else:
+            exec(snippet, {})
+            assert os.environ["ACCESS_VCS_PROJECT_DIR"] == str(selected)
+            launched.assert_called_once_with("msaccess_vcs_mcp.main", run_name="__main__")
+
+
 class TestSDKWorkspaceRecovery:
     @pytest.mark.parametrize("native_format", ["backslashes", "slashes"])
     def test_native_windows_root_loads_project_via_metadata(self, tmp_path, monkeypatch, native_format):

@@ -88,33 +88,10 @@ remain unresolved. The upstream change was merged for branch synchronization;
 remote SSE support is deferred and existing client configurations should continue
 using stdio.
 
-Add the server entry to your MCP client config. Both Cursor and Claude Code use the same `mcpServers` format, just in different files:
-
-| Client | Project-level config | User-level (global) config |
-|--------|---------------------|---------------------------|
-| Cursor | `.cursor/mcp.json` | `~/.cursor/mcp.json` |
-| Claude Code | `.mcp.json` | `~/.claude.json` |
-
-Add this to the appropriate config file:
-
-```json
-{
-  "mcpServers": {
-    "msaccess-vcs-mcp": {
-      "command": "uvx",
-      "args": ["msaccess-vcs-mcp@latest"]
-    }
-  }
-}
-```
-
-The `@latest` suffix ensures `uvx` always pulls the latest version from [PyPI](https://pypi.org/project/msaccess-vcs-mcp/) instead of using a cached copy.
-
-**Alternative for Claude Code** -- you can use the CLI instead of editing JSON:
-
-```bash
-claude mcp add msaccess-vcs-mcp -- uvx msaccess-vcs-mcp@latest
-```
+Follow [Select a project for a globally registered MCP server](docs/PROJECT_SELECTION.md)
+for Cursor, Claude Code, or Claude Desktop. Registering the server makes its
+tools available; selecting the project determines which environment files supply
+`ACCESS_VCS_DATABASE`. Verify both before database operations.
 
 ### 4. Configure your database
 
@@ -133,7 +110,9 @@ ACCESS_VCS_DATABASE=C:\Projects\MyApp\database.accdb
 
 ### 5. Restart your client
 
-Close and reopen Cursor or Claude Code. The MCP server will be detected and loaded automatically.
+Restart the client or its MCP server. Call `vcs_get_version_info()` and verify
+the selected project and database using the
+[configuration check](docs/PROJECT_SELECTION.md#verify-configuration-before-database-work).
 
 ### 6. Try it out
 
@@ -193,24 +172,17 @@ For personal overrides that shouldn't affect the team:
 ACCESS_VCS_DATABASE=C:\Users\YourName\dev\testdb.accdb
 ```
 
-### Environment Variable Precedence
+### Environment variable precedence and project selection
 
-1. **MCP server `env` section** (highest priority) -- values set in the MCP config file
-2. **`.env.local`** -- personal overrides
-3. **`.env`** -- project-specific configuration (lowest priority)
+On initial load, `.env.local` overrides existing process values, including client
+`env` settings. The base `.env` fills unset keys. On environment-file reload,
+`.env` also overwrites existing values, followed by `.env.local`.
 
-### Using msaccess-vcs-mcp from Another Project
-
-When the server is installed once at the user level (in `~/.cursor/mcp.json` rather than per-project), it still needs to find each individual project's `.env` so that settings like `ACCESS_VCS_DATABASE` and `ACCESS_VCS_ENABLE_LOGGING` take effect. The server resolves the project root in the following order:
-
-1. **`ACCESS_VCS_PROJECT_DIR`** -- explicit override, set in the MCP `env` section if needed.
-2. **MCP workspace roots** -- when the client (Cursor, VS Code, Claude Code, etc.) supports `roots/list`, the server lazily discovers the workspace on the first tool call and loads `.env` from it. No configuration required.
-3. **Upward search from the working directory** -- works automatically when the IDE launches the server with the workspace as `cwd` (the typical case).
-4. **Upward search from the installed package location** -- last-resort fallback for development installs.
-
-`.env` files are also hot-reloaded: editing `.env` while the server is running causes the next tool call to pick up the new values, including `ACCESS_VCS_ENABLE_LOGGING`.
-
-The server prints diagnostics to stderr at startup (visible in Cursor's MCP server output pane) showing the resolved project root and which files were loaded -- check there first if a setting isn't taking effect.
+See [project selection](docs/PROJECT_SELECTION.md) for client recipes,
+configuration diagnostics, discovery order, and reload limits. Set
+`ACCESS_VCS_PROJECT_DIR` explicitly for reliable global registration. Startup
+searches from the working directory; lazy MCP roots discovery is available when
+startup finds no environment file. The installed package is not a fallback project.
 
 ## Available Tools
 
@@ -661,43 +633,9 @@ db_compare_queries(
 
 ## MCP Client Setup
 
-### Cursor
-
-**Project-level** -- add `.cursor/mcp.json` to your project root (can be version-controlled for team sharing):
-
-```json
-{
-  "mcpServers": {
-    "msaccess-vcs-mcp": {
-      "command": "uvx",
-      "args": ["msaccess-vcs-mcp@latest"]
-    }
-  }
-}
-```
-
-**User-level** -- add to `~/.cursor/mcp.json` to make the server available in all projects.
-
-### Claude Code
-
-**Project-level** -- add `.mcp.json` to your project root:
-
-```json
-{
-  "mcpServers": {
-    "msaccess-vcs-mcp": {
-      "command": "uvx",
-      "args": ["msaccess-vcs-mcp@latest"]
-    }
-  }
-}
-```
-
-**CLI alternative** -- register without editing JSON:
-
-```bash
-claude mcp add msaccess-vcs-mcp -- uvx msaccess-vcs-mcp@latest
-```
+Use the [project-selection recipes](docs/PROJECT_SELECTION.md) for Cursor,
+Claude Code user scope, and Claude Desktop's separate named project servers.
+They include a read-only metadata check before using database tools.
 
 ### Development Install
 

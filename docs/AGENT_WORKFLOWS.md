@@ -26,6 +26,9 @@ The server's add-in requirement is independently owned by its release; consult
 
 Before database work, and after a reconnection, server replacement, or changed
 connection identity, call the existing read-only `vcs_get_version_info()` tool.
+Verify `project_configuration.project_root` and `target_database` against the
+intended project before relying on a default database. For global registrations
+or a missing or wrong target, follow [project selection](PROJECT_SELECTION.md).
 Read `mcp_version`, even if `success` is false because installation diagnostics
 failed. Apply strict SemVer comparison to this workflow's own range. Accept a
 stable 0.3.x at or above 0.3.0, or exactly 0.3.0-dev.18 ignoring build metadata.
