@@ -76,6 +76,22 @@ def _write_env(path: Path, contents: str) -> Path:
 class TestFindProjectRoot:
     """Tests for ``_find_project_root`` resolution order."""
 
+    def test_unresolved_workspace_never_uses_server_development_env(self, tmp_path, monkeypatch):
+        home = tmp_path / "client-home"
+        home.mkdir()
+        server = tmp_path / "server-checkout"
+        server.mkdir()
+        _write_env(server, "ACCESS_VCS_DATABASE=server-test.accdb\n")
+        monkeypatch.chdir(home)
+        monkeypatch.setattr(config_module, "__file__", str(server / "src" / "msaccess_vcs_mcp" / "config.py"))
+        # Hide ancestor markers so only the controlled server .env can be found.
+        exists = Path.exists
+        is_file = Path.is_file
+        monkeypatch.setattr(Path, "exists", lambda path: exists(path) if path.is_relative_to(server) else False)
+        monkeypatch.setattr(Path, "is_file", lambda path: is_file(path) if path.is_relative_to(server) else False)
+        assert _find_project_root() == home
+        assert load_config()["ACCESS_VCS_DATABASE"] == ""
+
     def test_explicit_project_dir_wins(self, tmp_path, monkeypatch):
         """ACCESS_VCS_PROJECT_DIR overrides CWD-based discovery."""
         project = tmp_path / "explicit_project"

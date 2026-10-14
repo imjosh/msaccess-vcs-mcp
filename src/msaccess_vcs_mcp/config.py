@@ -43,8 +43,10 @@ def _find_project_root() -> Path:
     Resolution order:
     1. ``ACCESS_VCS_PROJECT_DIR`` env-var (explicit override)
     2. Upward search from the current working directory
-    3. Upward search from the installed package location
-    4. Falls back to the current working directory
+    3. Falls back to the current working directory
+
+    The installed server's source tree is not a user project. Never load its
+    development environment as a fallback for an unresolved client workspace.
 
     When Cursor (or another IDE) launches the MCP server, it normally sets
     the working directory to the open workspace root -- so the automatic
@@ -82,40 +84,22 @@ def _find_project_root() -> Path:
                 file=sys.stderr,
             )
 
-    # 2-3. Automatic search from CWD and package location
+    # 2. Automatic search from CWD only
     cwd_root = Path.cwd().resolve()
-    search_roots: list[tuple[Path, str, str]] = [
-        (cwd_root, RESOLUTION_CWD_ENV, RESOLUTION_CWD_MARKER),
-    ]
+    current = cwd_root
+    while current != current.parent:
+        if any((current / name).is_file() for name in (".env", ".env.local")):
+            _project_root_method = RESOLUTION_CWD_ENV
+            return current
+        if (current / ".cursor" / "mcp.json").exists():
+            _project_root_method = RESOLUTION_CWD_MARKER
+            return current
+        if (current / "pyproject.toml").exists():
+            _project_root_method = RESOLUTION_CWD_MARKER
+            return current
+        current = current.parent
 
-    try:
-        # Walk up to find project root (should be parent of src/)
-        package_dir = Path(__file__).parent.parent.parent.resolve()
-        if (package_dir.parent / "pyproject.toml").exists():
-            search_roots.append(
-                (package_dir.parent, RESOLUTION_PACKAGE_ENV, RESOLUTION_PACKAGE_MARKER),
-            )
-        search_roots.append(
-            (package_dir.parent, RESOLUTION_PACKAGE_ENV, RESOLUTION_PACKAGE_MARKER),
-        )
-    except Exception:
-        pass
-
-    for root, env_method, marker_method in search_roots:
-        current = root
-        while current != current.parent:
-            if (current / ".env").exists():
-                _project_root_method = env_method
-                return current
-            if (current / ".cursor" / "mcp.json").exists():
-                _project_root_method = marker_method
-                return current
-            if (current / "pyproject.toml").exists():
-                _project_root_method = marker_method
-                return current
-            current = current.parent
-
-    # 4. Fall back to current working directory
+    # 3. Fall back to current working directory
     _project_root_method = RESOLUTION_CWD_FALLBACK
     return Path.cwd().resolve()
 
@@ -198,7 +182,9 @@ def _load_env_files() -> None:
     reloading = _is_reload
     _is_reload = False
 
-    project_root = _find_project_root()
+    project_root = (
+        _project_root if reloading and _project_root is not None else _find_project_root()
+    )
     _project_root = project_root
     cwd = Path.cwd().resolve()
 

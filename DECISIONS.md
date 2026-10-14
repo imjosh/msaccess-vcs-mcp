@@ -1682,3 +1682,39 @@ async Runner cleanup and submission failure. No live Access operations are used.
 The developer requires automatic mutual version/protocol acceptance, cached for specific running incarnations, and a session ID validated on every dependent command. Named handshake/execute APIs replace the earlier per-command version draft. COM remains the existing procedure transport; no compatibility ribbon interaction is required. Assigned unpublished pair: MCP 0.3.0-dev.17 / add-in 6.0.0-dev.17, protocol msaccess-vcs.session/1. Per-call policy/mode acknowledgments and operation ownership remain separate.
 
 X17 stays in progress: bootstrap before target execution, unrestricted manual/direct VBA automation routes, native same-PID reset/replacement proof and exhaustive owner/lifecycle qualification remain unfinished. Policy-owner entries are pinned until owner cleanup/disconnect, preventing expiry checks from changing another caller's policy; abandoned-policy disposal needs qualification. See the shared tracker verification/X17/README.md and active compatibility guidance. X16 and historical gate receipts remain unchanged; M52, full gates, X13/X14 and publication are separate.
+
+
+## 2026-10-14 - Recover workspace configuration after roots failures (M58)
+
+**Trigger**: Cursor returned a native Windows path in roots/list. The SDK rejected
+it while validating ListRootsResult, before our URI converter ran. A process-wide
+attempted flag then prevented recovery on later requests.
+
+**Decision**: Send roots/list through the SDK's public send_request API using a
+local ListRootsResult subtype. Its before-validator converts only absolute Windows
+drive paths to file URIs, then retains all inherited SDK validation. Standard file
+URIs remain the protocol input. Native UNC, device and relative paths are outside
+this compatibility adapter. No SDK monkeypatch or global validation change occurs.
+The roots contract remains https://modelcontextprotocol.io/specification/2025-11-25/client/roots.
+
+Unresolved discovery retries on later tool calls. Each request has a two-second
+timeout. Cooldowns are 2, 4, 8, 16, then at most 30 seconds, with no background
+polling. Only one roots request is in flight. Calls during cooldown are quiet;
+each actual failure records its cause and next retry delay. A successful load
+records whether it recovered from earlier failures and fixes the selected project
+for the process, including environment-file reloads.
+
+A valid explicit ACCESS_VCS_PROJECT_DIR remains authoritative without an environment
+file. Working-directory discovery and initial environment precedence remain supported,
+including .env.local overrides. The installed package directory is no longer a
+fallback project: its development database must not become an unresolved client's
+default. Starting from the server checkout still selects it through the working
+directory. vcs_get_version_info reports the selected root and resolution method
+in project_configuration; an unresolved database remains empty.
+
+**Validation**: Controlled JSON-RPC responses cross a real ServerSession and SDK
+validation, then the registered public metadata wrapper. Native drive paths and
+standard encoded file URIs load disposable project settings. Tests cover malformed
+responses, recovery, timeouts, concurrency, capped cooldowns, explicit selection,
+personal overrides, stable reloads and refusal to use a server development fallback.
+No Access database is opened. Actual Cursor runtime qualification is not claimed.

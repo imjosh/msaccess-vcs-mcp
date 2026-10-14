@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from msaccess_vcs_mcp import compatibility, exempt_workers, tools, validation
+from msaccess_vcs_mcp import __version__, compatibility, exempt_workers, tools, validation
 from .test_dialog_dispatch import public_tools, _install_backend, _dialog_call, DIALOG_TOOLS
 from .test_dialog_recovery import FakeBackend, _button, _win
 
@@ -55,7 +55,7 @@ def test_version_probe_keeps_recovery_responsive_without_touching_access(
             if completion == "timeout":
                 result = await task
                 assert result["error_pattern"] == "tool_timeout"
-                assert result["mcp_version"] == "0.3.0-dev.18"
+                assert result["mcp_version"] == __version__
                 assert result["server_runtime"]["pid"] == os.getpid()
                 assert result["server_runtime"]["python_executable"] == sys.executable
                 assert result["server_runtime"]["package_root"] == str(Path(compatibility.__file__).resolve().parent)

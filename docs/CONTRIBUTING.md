@@ -80,6 +80,38 @@ All settings come from environment variables (loaded from `.env` / `.env.local` 
 Read [`.env.example`](../.env.example) for settings and `config.py` for defaults;
 keep configuration facts there rather than caching another variable catalog.
 
+### Workspace discovery and recovery
+
+`ACCESS_VCS_PROJECT_DIR` selects an existing project directory explicitly, even
+when it has no environment file. Otherwise, discovery walks up from the working
+directory. The installed server's source directory is never a fallback project.
+Starting in the server checkout still selects that checkout through the working
+directory search.
+
+When startup finds no `.env` or `.env.local`, tool requests can discover the
+project through MCP `roots/list`. A request has a two-second timeout. An unresolved
+project retries on later tool calls after cooldowns of 2, 4, 8, 16, then 30 seconds.
+No background polling occurs. Concurrent calls do not send duplicate roots
+requests. Calls during cooldown do not repeat discovery diagnostics.
+
+The roots specification requires file URIs. A local compatibility adapter also
+accepts absolute Windows drive paths such as `C:\\Projects\\Example` and
+`C:/Projects/Example`. It converts them to file URIs before SDK validation.
+Relative paths, native UNC or device paths, and unrelated malformed responses
+remain rejected. This adapter applies only to this server's roots request.
+
+The first root containing `.env` or `.env.local` selects the project. Successful
+selection stays fixed for the process, including environment-file reloads.
+The base file preserves launch environment values on initial load; `.env.local`
+overrides them. Reloads retain the existing edited-value behavior.
+
+`vcs_get_version_info` reports `target_database` and `project_configuration`,
+including the selected root and its resolution method. An unresolved database
+remains empty. Diagnostics distinguish `invalid_client_response`,
+`unresolved_project`, `missing_env_file`, request failures, and a successful
+`lazy_init_loaded` with `recovered: true` after earlier failures. Explicit project
+selection without an environment file emits `explicit_project_no_env`.
+
 ### Which Access windows the server may close
 
 Persistence only pays off if the server can still get a file back when it needs to replace one, so it has to know which windows are its own. That is recorded on disk in the ownership registry, keyed by PID *and* process creation time — a PID alone is reused by Windows, and a reused PID would authorize closing a stranger's process.

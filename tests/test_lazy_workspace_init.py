@@ -1,6 +1,7 @@
 """Tests for lazy MCP workspace-roots .env discovery in tools.py."""
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import anyio
+from mcp import types
+from mcp.server.models import InitializationOptions
+from mcp.server.session import ServerSession
+from mcp.shared.message import SessionMessage
+from pydantic import ValidationError
 
 import msaccess_vcs_mcp.config as config_module
 import msaccess_vcs_mcp.tools as tools_module
@@ -15,8 +22,223 @@ import msaccess_vcs_mcp.usage_logging as logging_module
 from msaccess_vcs_mcp.tools import _ensure_env_loaded, _file_uri_to_path
 
 
+@asynccontextmanager
+async def _wire_session(responses):
+    """Feed raw JSON-RPC results through the SDK's receive/validation boundary."""
+    to_server, server_read = anyio.create_memory_object_stream(1)
+    server_write, from_server = anyio.create_memory_object_stream(1)
+    requests = []
+
+    async def client():
+        async with from_server, to_server:
+            async for message in from_server:
+                request = message.message.root
+                requests.append(request)
+                response = responses[min(len(requests) - 1, len(responses) - 1)]
+                await to_server.send(SessionMessage(message=types.JSONRPCMessage(
+                    types.JSONRPCResponse(jsonrpc="2.0", id=request.id, result=response)
+                )))
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(client)
+        async with ServerSession(server_read, server_write, InitializationOptions(
+            server_name="m58-test", server_version="1", capabilities=types.ServerCapabilities(),
+        ), stateless=True) as session:
+            try:
+                yield session, requests
+            finally:
+                tasks.cancel_scope.cancel()
+
+
+def _metadata_tool(monkeypatch, session):
+    monkeypatch.setattr(tools_module.mcp, "get_context", lambda: SimpleNamespace(session=session))
+    monkeypatch.setattr(tools_module, "inspect_installed_addin", lambda **kw: {
+        "installed_version": "6.0.0", "addin_path": "mock-install.accda",
+    })
+    return tools_module.mcp._tool_manager.get_tool("vcs_get_version_info").fn
+
+
+class TestSDKWorkspaceRecovery:
+    @pytest.mark.parametrize("native_format", ["backslashes", "slashes"])
+    def test_native_windows_root_loads_project_via_metadata(self, tmp_path, monkeypatch, native_format):
+        monkeypatch.chdir(tmp_path)
+        workspace = tmp_path / "project with spaces % #"
+        workspace.mkdir()
+        database = str(workspace / "intended.accdb")
+        (workspace / ".env").write_text(f"ACCESS_VCS_DATABASE='{database}'\n", encoding="utf-8")
+
+        async def exercise():
+            uri = str(workspace) if native_format == "backslashes" else workspace.as_posix()
+            async with _wire_session([{"roots": [{"uri": uri, "name": "project"}]}]) as (session, requests):
+                # Confirm this is the actual Cursor incompatibility, not a permissive mock.
+                with pytest.raises(ValidationError, match="file"):
+                    await session.list_roots()
+                tool = _metadata_tool(monkeypatch, session)
+                result = await tool()
+                assert result["target_database"] == database
+                assert result["project_configuration"] == {
+                    "project_root": str(workspace), "resolution_method": "mcp_workspace_roots",
+                }
+                assert requests[-1].method == "roots/list"
+        asyncio.run(exercise())
+
+    def test_failed_response_recovers_on_later_metadata_call(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        (workspace / ".env").write_text("ACCESS_VCS_DATABASE=recovered.accdb\n", encoding="utf-8")
+
+        async def exercise():
+            async with _wire_session([
+                {"roots": [{"uri": "https://invalid.example/project"}]},
+                {"roots": [{"uri": workspace.as_uri()}]},
+            ]) as (session, requests):
+                tool = _metadata_tool(monkeypatch, session)
+                assert (await tool())["target_database"] == ""
+                # Advance the retry clock without sleeping, once the policy exists.
+                monkeypatch.setattr(tools_module, "_lazy_init_next_retry", 0.0, raising=False)
+                assert (await tool())["target_database"] == "recovered.accdb"
+                assert len(requests) == 2
+                events = _read_diagnostic_events()
+                assert any(e["event"] == "list_roots_failed" and e["reason"] == "invalid_client_response" for e in events)
+                assert any(e["event"] == "lazy_init_loaded" and e["recovered"] for e in events)
+        asyncio.run(exercise())
+
+    @pytest.mark.parametrize("root", [
+        {"uri": "https://invalid.example/project"}, {"uri": "C:relative"},
+        {"uri": "relative/path"}, {"uri": 123}, {"name": "missing uri"},
+        {"uri": "C:\\bad\x00path"}, {"uri": "C:\\bad?path"},
+        {"uri": "C:\\absolute", "name": 123},
+    ])
+    def test_invalid_roots_remain_rejected_by_sdk(self, root, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        async def exercise():
+            async with _wire_session([{"roots": [root]}]) as (session, requests):
+                result = await _metadata_tool(monkeypatch, session)()
+                assert result["target_database"] == ""
+                assert len(requests) == 1
+                assert any(e["event"] == "list_roots_failed" and e["error_type"] == "ValidationError"
+                           for e in _read_diagnostic_events())
+        asyncio.run(exercise())
+
+    def test_file_uri_selection_is_stable_through_reload(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        workspace = tmp_path / "file uri with spaces"
+        workspace.mkdir()
+        env = workspace / ".env"
+        env.write_text("ACCESS_VCS_DATABASE=first.accdb\n", encoding="utf-8")
+        other = tmp_path / "other"
+        other.mkdir()
+        (other / ".env").write_text("ACCESS_VCS_DATABASE=wrong.accdb\n", encoding="utf-8")
+
+        async def exercise():
+            async with _wire_session([
+                {"roots": [{"uri": workspace.as_uri()}]},
+                {"roots": [{"uri": other.as_uri()}]},
+            ]) as (session, requests):
+                tool = _metadata_tool(monkeypatch, session)
+                assert (await tool())["target_database"] == "first.accdb"
+                assert (await tool())["target_database"] == "first.accdb"
+                old_mtime = env.stat().st_mtime
+                env.write_text("ACCESS_VCS_DATABASE=edited.accdb\n", encoding="utf-8")
+                os.utime(env, (old_mtime + 10, old_mtime + 10))
+                assert (await tool())["target_database"] == "edited.accdb"
+                assert config_module.get_project_root_info()["project_root"] == str(workspace)
+                assert len(requests) == 1
+        asyncio.run(exercise())
+
+    @pytest.mark.parametrize("has_env", [False, True])
+    def test_explicit_project_never_switches_to_client_root(self, tmp_path, monkeypatch, has_env):
+        monkeypatch.chdir(tmp_path)
+        selected = tmp_path / "selected"
+        selected.mkdir()
+        monkeypatch.setenv("ACCESS_VCS_PROJECT_DIR", str(selected))
+        if has_env:
+            (selected / ".env").write_text("ACCESS_VCS_DATABASE=base.accdb\n", encoding="utf-8")
+            (selected / ".env.local").write_text("ACCESS_VCS_DATABASE=personal.accdb\n", encoding="utf-8")
+        other = tmp_path / "other"
+        other.mkdir()
+        (other / ".env").write_text("ACCESS_VCS_DATABASE=wrong.accdb\n", encoding="utf-8")
+        monkeypatch.setenv("ACCESS_VCS_DATABASE", "launch.accdb")
+
+        async def exercise():
+            async with _wire_session([{"roots": [{"uri": other.as_uri()}]}]) as (session, requests):
+                result = await _metadata_tool(monkeypatch, session)()
+                assert result["target_database"] == ("personal.accdb" if has_env else "launch.accdb")
+                assert result["project_configuration"]["resolution_method"] == "ACCESS_VCS_PROJECT_DIR"
+                assert config_module.get_project_root_info()["project_root"] == str(selected)
+                assert not requests
+        asyncio.run(exercise())
+
+    def test_retry_cooldown_and_diagnostics_are_bounded(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        async def exercise():
+            async with _wire_session([{"roots": []}]) as (session, requests):
+                tool = _metadata_tool(monkeypatch, session)
+                for attempt in range(7):
+                    monkeypatch.setattr(tools_module, "_lazy_init_next_retry", 0.0)
+                    assert (await tool())["target_database"] == ""
+                    before = len(_read_diagnostic_events())
+                    for _ in range(5):
+                        await tool()
+                    # Tool usage may be logged separately; discovery remains quiet.
+                    assert len(_read_diagnostic_events()) == before
+                assert len(requests) == 7
+                retries = [e["retry_after_seconds"] for e in _read_diagnostic_events()
+                           if e["event"] == "lazy_init_retry_scheduled"]
+                assert retries == [2, 4, 8, 16, 30, 30, 30]
+                assert any(e.get("reason") == "unresolved_project" for e in _read_diagnostic_events())
+        asyncio.run(exercise())
+
+    def test_missing_env_can_appear_on_later_call(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        workspace = tmp_path / "later"
+        workspace.mkdir()
+
+        async def exercise():
+            async with _wire_session([{"roots": [{"uri": workspace.as_uri()}]}]) as (session, requests):
+                tool = _metadata_tool(monkeypatch, session)
+                assert (await tool())["target_database"] == ""
+                assert any(e.get("reason") == "missing_env_file" for e in _read_diagnostic_events())
+                (workspace / ".env.local").write_text("ACCESS_VCS_DATABASE=later.accdb\n", encoding="utf-8")
+                monkeypatch.setattr(tools_module, "_lazy_init_next_retry", 0.0)
+                assert (await tool())["target_database"] == "later.accdb"
+                assert len(requests) == 2
+        asyncio.run(exercise())
+
+    def test_timeout_recovers_without_concurrent_roots_requests(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(tools_module, "WORKSPACE_ROOTS_TIMEOUT_SEC", 0.05)
+
+        async def exercise():
+            entered = asyncio.Event()
+            async def hung(*args):
+                entered.set()
+                await asyncio.Event().wait()
+            session = SimpleNamespace(send_request=AsyncMock(side_effect=hung))
+            tool = _metadata_tool(monkeypatch, session)
+            first = asyncio.create_task(tool())
+            await entered.wait()
+            assert (await tool())["target_database"] == ""
+            assert (await first)["target_database"] == ""
+            assert session.send_request.call_count == 1
+            assert not tools_module._lazy_init_in_flight
+            assert any(e.get("error_type") == "TimeoutError" for e in _read_diagnostic_events())
+            (tmp_path / "workspace").mkdir()
+            workspace = tmp_path / "workspace"
+            (workspace / ".env").write_text("ACCESS_VCS_DATABASE=after-timeout.accdb\n", encoding="utf-8")
+            session.send_request = AsyncMock(return_value=types.ListRootsResult(
+                roots=[types.Root(uri=workspace.as_uri())],
+            ))
+            monkeypatch.setattr(tools_module, "_lazy_init_next_retry", 0.0)
+            assert (await tool())["target_database"] == "after-timeout.accdb"
+        asyncio.run(exercise())
+
+
 @pytest.fixture(autouse=True)
-def _reset_state(monkeypatch, tmp_path_factory):
+def _reset_state(monkeypatch, tmp_path_factory, tmp_path):
     """Clear the lazy-init flag and cached config state between tests.
 
     Also redirects the diagnostic stream to a per-test temp directory
@@ -27,6 +249,11 @@ def _reset_state(monkeypatch, tmp_path_factory):
     """
     tools_module._lazy_init_attempted = False
     tools_module._lazy_init_skip_logged = False
+    monkeypatch.setattr(tools_module, "_lazy_init_failures", 0, raising=False)
+    monkeypatch.setattr(tools_module, "_lazy_init_next_retry", 0.0, raising=False)
+    monkeypatch.setattr(tools_module, "_lazy_init_in_flight", False, raising=False)
+    # Stop discovery at this disposable project, never the checkout's real .env.
+    (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
     config_module._env_loaded = False
     config_module._is_reload = False
     config_module._project_root = None
@@ -96,7 +323,7 @@ def _make_ctx(root_uris: list[str]) -> MagicMock:
     list_roots_result = SimpleNamespace(roots=roots)
 
     session = MagicMock()
-    session.list_roots = AsyncMock(return_value=list_roots_result)
+    session.send_request = AsyncMock(return_value=list_roots_result)
 
     ctx = MagicMock()
     ctx.session = session
@@ -155,15 +382,15 @@ class TestEnsureEnvLoaded:
 
     def test_only_runs_once(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-
-        ctx = _make_ctx([])
+        (tmp_path / ".env").write_text("ACCESS_VCS_DATABASE=selected.accdb\n", encoding="utf-8")
+        ctx = _make_ctx([tmp_path.as_uri()])
         asyncio.run(_ensure_env_loaded(ctx))
         assert tools_module._lazy_init_attempted is True
 
         # Second call must not invoke list_roots again.
-        ctx.session.list_roots.reset_mock()
+        ctx.session.send_request.reset_mock()
         asyncio.run(_ensure_env_loaded(ctx))
-        ctx.session.list_roots.assert_not_called()
+        ctx.session.send_request.assert_not_called()
 
     def test_skips_when_startup_env_already_found(
         self, tmp_path, monkeypatch,
@@ -193,7 +420,7 @@ class TestEnsureEnvLoaded:
 
         # The startup-discovered value should still be in place.
         assert os.environ["ACCESS_VCS_DATABASE"] == "startup.accdb"
-        ctx.session.list_roots.assert_not_called()
+        ctx.session.send_request.assert_not_called()
 
     def test_handles_list_roots_failure_gracefully(
         self, tmp_path, monkeypatch,
@@ -205,7 +432,7 @@ class TestEnsureEnvLoaded:
 
         ctx = MagicMock()
         ctx.session = MagicMock()
-        ctx.session.list_roots = AsyncMock(side_effect=RuntimeError("not supported"))
+        ctx.session.send_request = AsyncMock(side_effect=RuntimeError("not supported"))
 
         asyncio.run(_ensure_env_loaded(ctx))
 
@@ -216,7 +443,7 @@ class TestEnsureEnvLoaded:
         failure = next(e for e in events if e["event"] == "list_roots_failed")
         assert failure["error_type"] == "RuntimeError"
         assert "not supported" in failure["error"]
-        assert tools_module._lazy_init_attempted is True
+        assert tools_module._lazy_init_attempted is False
 
 
 class TestDiagnosticEvents:
@@ -233,6 +460,7 @@ class TestDiagnosticEvents:
     def test_emits_already_attempted_skip(self, tmp_path, monkeypatch):
         """A repeated call records lazy_init_skipped(reason='already_attempted')."""
         monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("ACCESS_VCS_DATABASE=selected.accdb\n", encoding="utf-8")
         ctx = _make_ctx([])
 
         asyncio.run(_ensure_env_loaded(ctx))
@@ -323,7 +551,7 @@ class TestDiagnosticEvents:
         events = _read_diagnostic_events()
         skipped = [e for e in events if e["event"] == "lazy_init_skipped"]
         assert any(e.get("reason") == "startup_env_present" for e in skipped)
-        ctx.session.list_roots.assert_not_called()
+        ctx.session.send_request.assert_not_called()
 
     def test_emits_no_session_skip_for_request_unavailable_ctx(self, tmp_path, monkeypatch):
         """Context.request_context raises ValueError outside a request.
@@ -465,6 +693,7 @@ class TestVcsToolWrapper:
         """
         monkeypatch.chdir(tmp_path)
 
+        (tmp_path / ".env").write_text("ACCESS_VCS_DATABASE=selected.accdb\n", encoding="utf-8")
         ctx = _make_ctx([])
         asyncio.run(_ensure_env_loaded(ctx))
 

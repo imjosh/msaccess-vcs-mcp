@@ -108,6 +108,7 @@ from .usage_logging import (
     with_logging,
 )
 from .rebuild_watcher import get_rebuild_timeout, wait_for_rebuild_status
+from .workspace_roots import list_workspace_roots
 from .operation_manager import (
     ERROR_DIAGNOSTIC_FIELDS,
     INLINE_TEST_RESULT_FIELDS,
@@ -891,7 +892,13 @@ mcp = FastMCP(
 # dispatching any tool handler, so this works uniformly across the entire
 # tool surface.
 
+# True only after project selection is settled, never after a failed attempt.
 _lazy_init_attempted = False
+_lazy_init_failures = 0
+_lazy_init_next_retry = 0.0
+_lazy_init_in_flight = False
+WORKSPACE_ROOTS_TIMEOUT_SEC = 2.0
+WORKSPACE_RETRY_MAX_SEC = 30.0
 # Set after the first post-init "already_attempted" diagnostic is emitted.
 # Subsequent tool calls take the same fast path but skip the disk write so
 # we don't spam the diagnostic log once per tool invocation. The first
@@ -933,18 +940,19 @@ def _resolve_session(ctx: Context | None):
 async def _ensure_env_loaded(ctx: Context | None) -> None:
     """Lazily load the project's ``.env`` from MCP workspace roots.
 
-    Only fires once per process. Every branch emits a diagnostic event to
-    the always-on diagnostic stream so an operator can answer "why didn't
-    my .env get loaded?" without having to enable usage logging first
-    (which is exactly the case where ``.env`` may have been missed).
+    Cache successful selection; retry unresolved discovery on later calls.
+    Each request is bounded and failures back off to at most one per 30 seconds.
     """
     global _lazy_init_attempted, _lazy_init_skip_logged
+    global _lazy_init_failures, _lazy_init_next_retry, _lazy_init_in_flight
     if _lazy_init_attempted:
         # Emit the skip once so tests / operators can verify the cache is
         # functioning, then go silent for the lifetime of the process.
         if not _lazy_init_skip_logged:
             log_diagnostic_event("lazy_init_skipped", reason="already_attempted")
             _lazy_init_skip_logged = True
+        return
+    if _lazy_init_in_flight or time.monotonic() < _lazy_init_next_retry:
         return
     session = _resolve_session(ctx)
     if session is None:
@@ -956,27 +964,49 @@ async def _ensure_env_loaded(ctx: Context | None) -> None:
         else:
             log_diagnostic_event("lazy_init_skipped", reason="no_session")
         return
-    _lazy_init_attempted = True
-
-    from .config import _get_project_root
+    from .config import _get_project_root, get_project_root_info, RESOLUTION_PROJECT_DIR_ENV
     startup_root = _get_project_root()
-    startup_has_env = (startup_root / ".env").exists()
+    startup_has_env = any((startup_root / name).is_file() for name in (".env", ".env.local"))
     log_diagnostic_event(
         "lazy_init_started",
         startup_root=str(startup_root),
         startup_root_has_env=startup_has_env,
     )
     if startup_has_env:
+        _lazy_init_attempted = True
         log_diagnostic_event("lazy_init_skipped", reason="startup_env_present")
         return
+    if get_project_root_info()["resolution_method"] == RESOLUTION_PROJECT_DIR_ENV:
+        _lazy_init_attempted = True
+        log_diagnostic_event("lazy_init_skipped", reason="explicit_project_no_env",
+                             project_root=str(startup_root))
+        return
 
+    _lazy_init_in_flight = True
     try:
-        roots_result = await session.list_roots()
+        await _discover_workspace(session)
+    finally:
+        _lazy_init_in_flight = False
+        if not _lazy_init_attempted:
+            _lazy_init_failures += 1
+            delay = min(2.0 ** min(_lazy_init_failures, 5), WORKSPACE_RETRY_MAX_SEC)
+            _lazy_init_next_retry = time.monotonic() + delay
+            log_diagnostic_event("lazy_init_retry_scheduled", retry_after_seconds=delay,
+                                 failure_count=_lazy_init_failures)
+
+
+async def _discover_workspace(session) -> None:
+    global _lazy_init_attempted
+    try:
+        roots_result = await asyncio.wait_for(
+            list_workspace_roots(session), timeout=WORKSPACE_ROOTS_TIMEOUT_SEC,
+        )
     except Exception as exc:
         log_diagnostic_event(
             "list_roots_failed",
             error=str(exc),
             error_type=type(exc).__name__,
+            reason="invalid_client_response" if isinstance(exc, ValueError) else "request_failed",
         )
         return
 
@@ -988,15 +1018,17 @@ async def _ensure_env_loaded(ctx: Context | None) -> None:
         if workspace is None:
             continue
         env_path = workspace / ".env"
-        if not env_path.exists():
+        if not any((workspace / name).is_file() for name in (".env", ".env.local")):
             continue
         try:
+            initialize_from_workspace(workspace)
+            _lazy_init_attempted = True
             log_diagnostic_event(
                 "lazy_init_loaded",
                 workspace=str(workspace),
                 env_path=str(env_path),
+                recovered=_lazy_init_failures > 0,
             )
-            initialize_from_workspace(workspace)
             return
         except Exception as exc:
             log_diagnostic_event(
@@ -1006,7 +1038,8 @@ async def _ensure_env_loaded(ctx: Context | None) -> None:
                 error_type=type(exc).__name__,
             )
 
-    log_diagnostic_event("lazy_init_no_env_in_roots", roots=root_uris)
+    log_diagnostic_event("lazy_init_no_env_in_roots", roots=root_uris,
+                         reason="missing_env_file" if root_uris else "unresolved_project")
 
 
 EXEMPT_WORKER_MARGIN_SEC = 5.0
@@ -2368,6 +2401,8 @@ def _with_rebuild_fields(
 
 def _probe_version_info() -> dict[str, Any]:
     """Read installed metadata without attaching to Access or opening a target."""
+    from .config import get_project_root_info
+
     admission = inspect_installed_addin(fresh=True)
     return {
         **server_metadata(), "success": True,
@@ -2375,6 +2410,7 @@ def _probe_version_info() -> dict[str, Any]:
         "addin_path": admission["addin_path"], "addin_compatibility": admission,
         "access_version": None, "bitness": None,
         "target_database": get_config().get("ACCESS_VCS_DATABASE"),
+        "project_configuration": get_project_root_info(),
         "errors": [],
         "warnings": ["Access version/bitness are not probed: this read-only check never starts or attaches to Access."],
     }
@@ -2412,6 +2448,7 @@ async def vcs_get_version_info(
         - supported_addin_range: Consumer-owned server requirement
         - addin_compatibility: Installed add-in admission verdict when obtainable
         - target_database: Configured database path from ACCESS_VCS_DATABASE
+        - project_configuration: Selected project root and its resolution method
         - addin_path: Path to the VCS add-in file
         - callback_url: URL for async callbacks (None if not available)
         - async_available: Boolean indicating if async operations are supported
