@@ -104,6 +104,14 @@ The `@latest` suffix ensures `uvx` always pulls the latest version from [PyPI](h
 claude mcp add msaccess-vcs-mcp -- uvx msaccess-vcs-mcp@latest
 ```
 
+**Client on another machine (SSE)** -- Access must run on Windows, but the MCP client need not: for example Claude Code on a Mac, with Access in a Windows VM. Start the server on the Windows machine with the SSE transport, listening on that machine's own address on the network the client is on:
+
+```bash
+msaccess-vcs-mcp --transport sse --host 10.211.55.3 --port 8765
+```
+
+then point the client at it (`claude mcp add --transport sse msaccess-vcs-mcp http://10.211.55.3:8765/sse`). `--host` defaults to `127.0.0.1`, and must be one address: `0.0.0.0` is refused, because the server checks each request's Host header against the address it listens on. The SSE transport has no authentication, so allow its port through the Windows firewall from the client's network only. Run the server in the logged-in Windows session (not as a service), so Access can show its windows.
+
 ### 4. Configure your database
 
 Create a `.env` file in your project root:
