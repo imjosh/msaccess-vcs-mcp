@@ -150,3 +150,93 @@ def test_raw_launch_uses_supplied_outer_id_after_admission(tmp_path, monkeypatch
         assert wire[0].endswith(".APIMCP")
         assert wire[1:3] == ("registered-outer-id", "RebuildAddIn")
     assert json.loads(wire[-1])["operation_id"] == "registered-child-id"
+
+
+@pytest.mark.parametrize("callback_url", [None, "http://127.0.0.1:54321/callback"])
+def test_busy_gate_preserves_prior_database_operation(rebuild, monkeypatch, callback_url):
+    import threading
+    from msaccess_vcs_mcp import access_gate
+    source, manager, order, registrations = rebuild
+    host = str(source.parent / "Version Control.accda")
+    prior_id, _ = manager.register_operation(database_path=host, command="Build")
+    prior = manager.get_active_operation_for_database(host)
+    registrations.clear()
+    order.clear()
+    monkeypatch.setattr(tools, "get_callback_url", lambda: callback_url)
+    monkeypatch.setattr(access_gate, "_read_busy_wait_sec", lambda: 0.01)
+    monkeypatch.setattr(access_gate, "_init_com_apartment", lambda: None)
+    gate = access_gate.AccessGate()
+    monkeypatch.setattr(tools, "get_access_gate", lambda: gate)
+    execute = Mock(side_effect=AssertionError("busy rebuild must not dispatch"))
+    close = Mock(side_effect=AssertionError("busy rebuild must not close Access"))
+    monkeypatch.setattr(tools, "_execute_call_vba", execute)
+    monkeypatch.setattr(tools, "close_owned_instances_holding", close)
+    started, release = threading.Event(), threading.Event()
+    def prior_work():
+        started.set()
+        assert release.wait(5), "test failed to release prior operation"
+    async def exercise():
+        running = asyncio.create_task(gate.run_exclusive("vcs_build_database", host, prior_work, False))
+        try:
+            assert await asyncio.to_thread(started.wait, 2)
+            in_flight = gate.current_in_flight()
+            assert in_flight.tool == "vcs_build_database"
+            result = await unwrap(tools.vcs_rebuild_addin)(str(source))
+            assert result["error_pattern"] == "server_busy"
+            assert "operation_id" not in result and "build_operation_id" not in result
+            assert registrations == []
+            assert manager.get_active_operation_for_database(host) is prior
+            assert manager.get_operation(prior_id) is prior
+            assert manager.pending_count() == 1
+            assert gate.current_in_flight() is in_flight
+            execute.assert_not_called()
+            close.assert_not_called()
+        finally:
+            release.set()
+            await running
+    try:
+        asyncio.run(exercise())
+    finally:
+        gate._executor.shutdown(wait=True)
+        manager.unregister_operation(prior_id)
+
+
+def test_admitted_gate_registers_both_ids_before_close_and_actual_run(rebuild, monkeypatch):
+    from msaccess_vcs_mcp import access_gate
+    from tests.test_call_vba_guards import _fake_access
+    source, manager, order, registrations = rebuild
+    monkeypatch.setattr(access_gate, "_init_com_apartment", lambda: None)
+    gate = access_gate.AccessGate()
+    monkeypatch.setattr(tools, "get_access_gate", lambda: gate)
+    monkeypatch.setattr(tools, "get_config", lambda: {"ACCESS_VCS_ADDIN_PATH": str(source.parent / "Version Control.accda")})
+    monkeypatch.setattr(tools, "validate_database_path", Path)
+    monkeypatch.setattr(tools, "get_call_vba_timeout", lambda _: 5)
+    def close(*args):
+        assert gate.current_in_flight().tool == "vcs_rebuild_addin"
+        assert order == ["register:RebuildAddIn", "register:Build"]
+        assert manager.pending_count() == 2
+        order.append("close")
+        return []
+    monkeypatch.setattr(tools, "close_owned_instances_holding", close)
+    def run(endpoint, outer_id, method, source_path, callback_info):
+        assert gate.current_in_flight().tool == "vcs_rebuild_addin"
+        assert order == ["register:RebuildAddIn", "register:Build", "close"]
+        assert endpoint.endswith(".APIMCP") and method == "RebuildAddIn"
+        assert outer_id == registrations[0][0]
+        child_id = json.loads(callback_info)["operation_id"]
+        assert child_id == registrations[1][0] and child_id != outer_id
+        assert source_path == str(source)
+        order.append("run")
+        return json.dumps({"success": False, "status": "refused", "error": "controlled refusal"})
+    app = _fake_access(monkeypatch, run_side_effect=run)
+    try:
+        result = asyncio.run(unwrap(tools.vcs_rebuild_addin)(str(source)))
+        assert result["success"] is False
+        assert result["operation_id"] == registrations[0][0]
+        assert result["build_operation_id"] == registrations[1][0]
+        app.Run.assert_called_once()
+        assert order[-1] == "run"
+        assert manager.pending_count() == 0
+        assert gate.current_in_flight() is None
+    finally:
+        gate._executor.shutdown(wait=True)

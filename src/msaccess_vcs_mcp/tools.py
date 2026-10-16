@@ -2106,9 +2106,10 @@ async def vcs_rebuild_addin(
                 return [*call_args, callback_info]
             return call_args
 
-        registered_args = _registered_args(["RebuildAddIn", str(src_path)])
-
         def _launch() -> dict[str, Any]:
+            # Registration belongs to the admitted worker. A busy refusal must
+            # leave the existing database operation and callback ownership intact.
+            registered_args = _registered_args(["RebuildAddIn", str(src_path)])
             # Inside the gate, on its COM apartment thread: another window's
             # tool call could otherwise open a fresh instance between the
             # close and the launch, and the rebuild would refuse on a file we
