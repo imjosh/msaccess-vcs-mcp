@@ -255,60 +255,12 @@ def _scripted_sync(import_result, clear_error=None):
     return _call
 
 
-def test_operation_and_cleanup_both_raise_returns_original_error(tmp_path):
-    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
-        addin.call_sync.side_effect = _scripted_sync(
-            RuntimeError("import exploded"), clear_error=RuntimeError("clear exploded")
-        )
-        result = _run((db, src), object_types=["forms"])
-    assert result["success"] is False
-    assert result["error"] == "import exploded"
-    assert result["policy_cleanup_error"] == "clear exploded"
 
 
-def test_cleanup_failure_is_attached_and_logged_on_success(tmp_path):
-    from unittest.mock import patch
-
-    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
-        addin.call_sync.side_effect = _scripted_sync(
-            {"success": True}, clear_error=RuntimeError("clear exploded")
-        )
-        with patch("msaccess_vcs_mcp.decision_policy.log_diagnostic_event") as log:
-            result = _run((db, src), object_types=["forms"])
-    assert result["success"] is True
-    assert result["policy_cleanup_error"] == "clear exploded"
-    log.assert_called_once_with("policy_cleanup_failed", error="clear exploded")
 
 
-def test_policy_set_refusal_is_a_normal_result(tmp_path):
-    refusal = {"success": False, "error_pattern": "operation_already_running", "error": "busy"}
-    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
-        addin.call_sync.return_value = json.dumps(refusal)
-        result = _run((db, src), object_types=["forms"])
-    assert result["error_pattern"] == "operation_already_running"
-    commands = [c.args[0] for c in addin.call_sync.call_args_list]
-    assert "ImportByType" not in commands
 
 
-@pytest.mark.parametrize("scoped", [False, True])
-def test_interactive_sends_explicit_mode_before_operation(tmp_path, scoped):
-    kwargs = {"noninteractive": False}
-    if scoped:
-        kwargs["object_types"] = ["forms"]
-    with _patch_import_tool(tmp_path, call_sync_result=json.dumps({"success": True})) as (
-        db, src, addin, ops,
-    ):
-        events = []
-        addin.call_sync.side_effect = lambda c, *a: events.append(c) or json.dumps(
-            INTERACTIVE_CONFIRMED if c == "SetInteractionMode" else {"success": True}
-        )
-        addin.call_async.side_effect = lambda *a: events.append("async") or {"async": True}
-        addin.merge_build.side_effect = lambda *a: events.append("merge") or {"success": True}
-        _run((db, src), **kwargs)
-    assert events[0] == "SetInteractionMode"
-    assert len(events) > 1
-    assert "SetOperationPolicy" not in events
-    addin.call_sync.assert_any_call("SetInteractionMode", 0)
 
 
 def test_noninteractive_never_sends_interactive_mode(tmp_path):
@@ -319,55 +271,11 @@ def test_noninteractive_never_sends_interactive_mode(tmp_path):
     assert "SetInteractionMode" not in commands
 
 
-def test_cleanup_failure_reaches_usage_log_and_keeps_operation_error(tmp_path, monkeypatch):
-    import msaccess_vcs_mcp.usage_logging as usage_logging
-
-    log_dir = tmp_path / "usage"
-    monkeypatch.setenv("ACCESS_VCS_ENABLE_LOGGING", "true")
-    monkeypatch.setenv("ACCESS_VCS_LOG_DIR", str(log_dir))
-    monkeypatch.setenv("ACCESS_VCS_DIAGNOSTIC_LOG_DIR", str(tmp_path / "diag"))
-    usage_logging.reset_logging()
-    try:
-        with _patch_import_tool(tmp_path) as (db, src, addin, ops):
-            addin.call_sync.side_effect = _scripted_sync(
-                {"success": False, "error": "merge failed"},
-                clear_error=RuntimeError("clear exploded"),
-            )
-            result = _run((db, src), object_types=["forms"])
-    finally:
-        usage_logging.reset_logging()
-
-    assert result["success"] is False
-    assert result["error"] == "merge failed"
-    assert result["policy_cleanup_error"] == "clear exploded"
-    entries = [
-        json.loads(line)
-        for line in (log_dir / "vcs-mcp-usage.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
-    cleanup = [e for e in entries if e.get("event") == "policy_cleanup_failed"]
-    assert len(cleanup) == 1
-    assert cleanup[0]["error"] == "clear exploded"
 
 
 INTERACTION_REFUSAL = INTERACTIVE_REFUSED
 
 
-@pytest.mark.parametrize("scoped", [False, True])
-def test_refused_interactive_mode_is_the_result_and_nothing_starts(tmp_path, scoped):
-    kwargs = {"noninteractive": False}
-    if scoped:
-        kwargs["object_types"] = ["forms"]
-    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
-        addin.call_sync.side_effect = lambda c, *a: (
-            json.dumps(INTERACTION_REFUSAL) if c == "SetInteractionMode" else json.dumps({"success": True})
-        )
-        result = _run((db, src), **kwargs)
-    assert result["success"] is False
-    assert result == INTERACTIVE_REFUSED
-    commands = [c.args[0] for c in addin.call_sync.call_args_list]
-    assert commands == ["SetInteractionMode"]
-    addin.call_async.assert_not_called()
-    addin.merge_build.assert_not_called()
 
 
 STARTED = {"success": True, "started": True, "operation_id": "op-9"}
@@ -468,16 +376,14 @@ def _single_object_sync(command, result, *, set_result=None, clear_error=None, e
 
 
 @pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
-def test_single_object_sets_block_policy_and_clears_it(tmp_path, tool_name, command):
+def test_single_object_passes_block_in_the_request(tmp_path, tool_name, command):
     events = []
     with _patch_import_tool(tmp_path) as (db, src, addin, ops):
         addin.call_sync.side_effect = _single_object_sync(command, {"success": True}, events=events)
         result = _single_object_tool(tool_name)(db, "form", "frmVCSMain")
     assert result["success"] is True
     assert events == [
-        ("SetOperationPolicy", "block"),
-        (command, "form", "frmVCSMain"),
-        ("ClearOperationPolicy",),
+        (command, "form", "frmVCSMain", "block"),
     ]
 
 
@@ -487,22 +393,22 @@ def test_single_object_passes_decision_policy(tmp_path, tool_name, command):
     with _patch_import_tool(tmp_path) as (db, src, addin, ops):
         addin.call_sync.side_effect = _single_object_sync(command, {"success": True}, events=events)
         _single_object_tool(tool_name)(db, "query", "qryFoo", decision_policy="prefer_source")
-    assert events[0] == ("SetOperationPolicy", "prefer_source")
+    assert events == [(command, "query", "qryFoo", "prefer_source")]
 
 
 @pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
-def test_single_object_failure_is_returned_and_policy_cleared(tmp_path, tool_name, command):
+def test_single_object_failure_preserves_request_result(tmp_path, tool_name, command):
     events = []
     with _patch_import_tool(tmp_path) as (db, src, addin, ops):
         addin.call_sync.side_effect = _single_object_sync(command, MERGE_REFUSED, events=events)
         result = _single_object_tool(tool_name)(db, "form", "frmVCSMain")
     assert result["success"] is False
     assert "Merging not supported for add-in forms" in result["error"]
-    assert events[-1] == ("ClearOperationPolicy",)
+    assert events[-1] == (command, "form", "frmVCSMain", "block")
 
 
 @pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
-def test_single_object_clears_policy_when_the_call_raises(tmp_path, tool_name, command):
+def test_single_object_exception_returns_original_error(tmp_path, tool_name, command):
     events = []
     with _patch_import_tool(tmp_path) as (db, src, addin, ops):
         addin.call_sync.side_effect = _single_object_sync(
@@ -511,34 +417,11 @@ def test_single_object_clears_policy_when_the_call_raises(tmp_path, tool_name, c
         result = _single_object_tool(tool_name)(db, "form", "frmVCSMain")
     assert result["success"] is False
     assert result["error"] == "call exploded"
-    assert events[-1] == ("ClearOperationPolicy",)
+    assert events[-1] == (command, "form", "frmVCSMain", "block")
 
 
-@pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
-def test_single_object_call_and_cleanup_both_raise_returns_original_error(
-    tmp_path, tool_name, command,
-):
-    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
-        addin.call_sync.side_effect = _single_object_sync(
-            command, RuntimeError("call exploded"), clear_error=RuntimeError("clear exploded")
-        )
-        result = _single_object_tool(tool_name)(db, "form", "frmVCSMain")
-    assert result["success"] is False
-    assert result["error"] == "call exploded"
-    assert result["policy_cleanup_error"] == "clear exploded"
 
 
-@pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
-def test_single_object_policy_set_refusal_is_the_result(tmp_path, tool_name, command):
-    events = []
-    refusal = {"success": False, "error_pattern": "operation_already_running", "error": "busy"}
-    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
-        addin.call_sync.side_effect = _single_object_sync(
-            command, {"success": True}, set_result=refusal, events=events
-        )
-        result = _single_object_tool(tool_name)(db, "form", "frmVCSMain")
-    assert result["error_pattern"] == "operation_already_running"
-    assert command not in [e[0] for e in events]
 
 
 @pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
@@ -583,29 +466,18 @@ def test_single_object_addin_decision_result_is_kept_whole(tmp_path, tool_name, 
     assert result["runtime_error"] == "Object variable not set"
     assert result["errorNumber"] == 91
     assert result["log_path"] == r"C:\src\logs\Merge_1.log"
-    assert events[-1] == ("ClearOperationPolicy",)
+    assert events[-1] == (command, "module", "modFoo", "block")
 
 
 @pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
-def test_single_object_interactive_sends_explicit_mode_and_no_policy(tmp_path, tool_name, command):
+def test_single_object_omitted_policy_keeps_legacy_behavior(tmp_path, tool_name, command):
     events = []
     with _patch_import_tool(tmp_path) as (db, src, addin, ops):
         addin.call_sync.side_effect = _single_object_sync(command, {"success": True}, events=events)
         _single_object_tool(tool_name)(db, "form", "frmVCSMain", noninteractive=False)
-    assert events == [("SetInteractionMode", 0), (command, "form", "frmVCSMain")]
+    assert events == [(command, "form", "frmVCSMain")]
 
 
-@pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
-def test_single_object_refused_interactive_mode_is_the_result(tmp_path, tool_name, command):
-    events = []
-    with _patch_import_tool(tmp_path) as (db, src, addin, ops):
-        def _call(name, *args):
-            events.append(name)
-            return json.dumps(INTERACTION_REFUSAL if name == "SetInteractionMode" else {"success": True})
-        addin.call_sync.side_effect = _call
-        result = _single_object_tool(tool_name)(db, "form", "frmVCSMain", noninteractive=False)
-    assert result == INTERACTIVE_REFUSED
-    assert events == ["SetInteractionMode"]
 
 
 @pytest.mark.parametrize("tool_name,command", SINGLE_OBJECT_TOOLS)
@@ -689,6 +561,9 @@ def test_public_import_result_contract(tmp_path, monkeypatch, path, outcome):
                     started=True, completion_unconfirmed=True,
                     error=result["error"], log_excerpt="merge details",
                 )
+            if outcome == "started":
+                expected["operation_id"] = "op-9"
+                expected["started"] = True
             assert result == expected
             if path in {"async", "inline"}:
                 addin.merge_build.assert_not_called()

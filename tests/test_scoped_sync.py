@@ -147,9 +147,7 @@ class TestImportObjectsScoped:
                 )
             )
 
-        assert mock_addin.call_sync.call_args_list[0] == call("SetOperationPolicy", "block")
-        assert mock_addin.call_sync.call_args_list[1] == call("ImportByType", "modules", False)
-        assert mock_addin.call_sync.call_args_list[2] == call("ClearOperationPolicy")
+        mock_addin.call_sync.assert_called_once_with("ImportByType", "modules", False, "block")
         mock_addin.call_async.assert_not_called()
         mock_addin.merge_build.assert_not_called()
         assert result["success"] is True
@@ -174,11 +172,7 @@ class TestImportObjectsScoped:
                 )
             )
 
-        assert mock_addin.call_sync.call_args_list[0] == call("SetOperationPolicy", "block")
-        assert mock_addin.call_sync.call_args_list[1] == call(
-            "ImportByType", ["queries", "forms"], True
-        )
-        assert mock_addin.call_sync.call_args_list[2] == call("ClearOperationPolicy")
+        mock_addin.call_sync.assert_called_once_with("ImportByType", ["queries", "forms"], True, "block")
 
     def test_none_object_types_uses_async_merge(self, tmp_path):
         from msaccess_vcs_mcp.tools import vcs_import_objects
@@ -255,7 +249,7 @@ class TestExportDatabaseScoped:
                 )
             )
 
-        mock_addin.call_sync.assert_called_once_with("ExportByType", "modules", False)
+        mock_addin.call_sync.assert_called_once_with("ExportByType", "modules", False, "block")
         mock_addin.call_async.assert_not_called()
         assert result["success"] is True
         assert result["log_path"] == str(log)
@@ -279,7 +273,7 @@ class TestExportDatabaseScoped:
                 )
             )
 
-        mock_addin.call_sync.assert_called_once_with("ExportByType", "queries", True)
+        mock_addin.call_sync.assert_called_once_with("ExportByType", "queries", True, "block")
 
     def test_none_object_types_uses_async_export(self, tmp_path):
         from msaccess_vcs_mcp.tools import vcs_export_database

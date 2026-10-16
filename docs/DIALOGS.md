@@ -1,6 +1,6 @@
 # Dialogs and noninteractive Access automation
 
-> Release compatibility policy (owner decision, 2026-10-02): every add-in release changes its version. The supported release version defines the API contract; capability probing is not required to establish release compatibility. The spec assumes the server checks the installed add-in version and refuses unsupported releases before starting operations. The minimum supported release version must be stated when the release is assigned; do not infer it from a development rebuild. Per-call mode and policy acknowledgments still confirm the requested state and remain required. This policy supersedes earlier statements requiring capability checks instead of a version gate. It is a specification change, not evidence that version enforcement is already implemented.
+> Release compatibility policy (owner decision, 2026-10-02): every add-in release changes its version. The supported release version defines the API contract; capability probing is not required to establish release compatibility. The spec assumes the server checks the installed add-in version and refuses unsupported releases before starting operations. The minimum supported release version must be stated when the release is assigned; do not infer it from a development rebuild. Request policies travel on individual operations; release compatibility and request admission remain separate checks. This policy supersedes earlier statements requiring capability checks instead of a version gate. It is a specification change, not evidence that version enforcement is already implemented.
 
 Agent calls default to a scoped noninteractive mode. Interactive ribbon and
 Immediate Window use is unchanged unless a decision policy is passed.
@@ -8,111 +8,107 @@ Immediate Window use is unchanged unless a decision policy is passed.
 `DoCmd.SetWarnings` is not a dialog suppressor. It does not cover `MsgBox`,
 the conflict form, VBA runtime dialogs, or compile errors.
 
-## Run tests and merge without a dialog
+## Request-owned policies
 
-```python
-vcs_run_tests(r"C:\db.accdb", filter="modTestEncoding")
-vcs_run_tests(r"C:\db.accdb", noninteractive=True, decision_policy="block")
+`vcs_import_objects`, `vcs_import_object`, `vcs_export_object`,
+`vcs_export_database`, and `vcs_run_tests` default to `noninteractive=True`
+and `decision_policy="block"`. Each operation receives the policy as its own
+argument. The add-in retains it through queued continuations and releases it
+when that operation ends. MCP sends no persistent policy setter or cleanup call.
+Other requests cannot replace the active operation's policy, source, or journal.
 
-vcs_import_objects(r"C:\db.accdb", r"C:\db.src")
-vcs_import_objects(
-    r"C:\db.accdb",
-    r"C:\db.src",
-    decision_policy="prefer_source",
-)
+For import and export tools, `noninteractive=False` omits the policy and preserves
+legacy add-in behavior. It does not issue `SetInteractionMode(0)`. Legacy agent
+calls can automatically apply the requested import or export action, including
+deletions. Omitting a policy is not recovery for a blocked conflict or deletion.
+Automation tests remain headless and reject `noninteractive=False`.
 
-vcs_import_object(r"C:\db.accdb", "module", "modHelpers")
-vcs_export_object(r"C:\db.accdb", "form", "frmMain")
+`SetOperationPolicy` is retired and returns `policy_activation_retired`.
+`ClearOperationPolicy` is a harmless success. Standalone `SetInteractionMode(2)`
+returns a refusal without changing the effective mode or active operation.
+Older clients that require setter acknowledgments need migration to request
+arguments. Older add-in pairs that bypassed single-object conflict checks are
+historical limitations and do not provide this contract.
+
+## Conflict outcomes
+
+The following rules apply to detected conflicts in either single-object export
+branch, single-object import, category calls, and full operations with a policy.
+Unchanged destinations, identical content, and one-sided edits can transfer safely.
+Missing or stale history does not authorize discarding independent changes.
+
+| Detected conflict | `prefer_source` | `prefer_database` | `skip` or `decline` | `block` |
+| --- | --- | --- | --- | --- |
+| Import would overwrite an edited database object | Import source | Preserve object | Preserve object | Require decision |
+| Export would overwrite an edited source file | Preserve file | Export database version | Preserve file | Require decision |
+| Import would delete an edited database object with missing source | Require decision | Preserve object | Preserve object | Require decision |
+| Export would delete a tracked, changed orphan file | Preserve file | Require decision | Preserve file | Require decision |
+| Export finds a new, untracked source file | Preserve file | Preserve file | Preserve file | Preserve file |
+
+`skip` and `prefer_database` differ on export. No noninteractive policy authorizes
+deletion of a conflicting edited object or tracked, changed orphan file in this
+stage. Review and resolve those deletions interactively, or preserve the item if
+that matches the user's intent. Existing cleanup of unchanged indexed orphans is
+unchanged. A conflict list containing a blocked deletion applies no resolutions
+to that list, but earlier scanning and non-conflict work may already have occurred.
+
+`decline` answers No, Cancel, or Abort on confirmations and preserves conflicts.
+Yes/No/Cancel receives Cancel. Preference policies do not approve unrelated
+confirmations. Informational OK-only notices can be acknowledged unattended.
+
+## Inspect results before retrying
+
+An actual transfer reports its transfer outcome. A preserving call reports
+`skipped: true` and leaves the conflicting destination unchanged. Read the returned
+`transferred`, `skipped`, `decisions`, and error fields rather than inferring success
+from a journal resolution string. Journals can add resolution values and fields.
+MCP preserves them through synchronous results and terminal callbacks.
+Successful transfers update synchronization history. Skipped and blocked objects
+remain unsynchronized so a later export can detect their conflicts after reopen.
+
+For `decision_required`, inspect the journal's object, direction, requested action,
+classification, policy, and recovery information. Reuse an existing user instruction
+only when it covers that exact action and scope. Otherwise ask for the unresolved
+choice. Never automatically retry with `prefer_source` or `prefer_database`, change
+scope to bypass checks, or remove the policy to make a blocked deletion proceed.
+
+In ordinary export/edit/import/test cycles, check the final transfer result before
+running the relevant tests. Preserve independent edits. Reconcile skipped, blocked,
+partial, failed, or uncertain results before the next mutation.
+
+## Dispatch results and compatibility
+
+The repaired intermediate API accepts trailing request policies:
+
+```text
+Export(policy), FullExport(policy), ExportVBA(policy)
+Build(sourceFolder, policy), MergeBuild(policy)
+ImportObject(type, name, policy), ExportObject(type, name, policy)
+ImportByType(types, fullImport, policy), ExportByType(types, fullExport, policy)
+RunFilteredTests(policy)
 ```
 
-`noninteractive` defaults to true on all four tools. `decision_policy`
-defaults to `block`. `vcs_run_tests` accepts only true: an automation test run
-is always headless (see "Test runs are always headless" below). On `vcs_import_object` and `vcs_export_object` an
-add-in error that would have been a message box (for example "Merging not
-supported for add-in forms") comes back as `success: false` with the
-message in `error` and the run's `log_path`.
+`APIAsync(callbackInfo, method, arg1, arg2, arg3)` carries up to three method
+arguments. The add-in queues a typed JSON array, preserving booleans, empty strings,
+and embedded pipes. A successful admission returns `async: true` and the supplied
+public `operation_id`. Admission is separate from terminal completion. An immediate
+`success: false` refusal causes MCP to unregister that callback and return without
+waiting or dispatching a fallback operation.
 
-| Policy | Confirmations | Merge conflicts |
-| --- | --- | --- |
-| `block` | Return `decision_required`. Do not approve. | Same. The database is not overwritten. |
-| `decline` | Answer No, Cancel, or Abort. | Keep the database object. |
-| `prefer_source` | Still `decision_required` (this policy is for conflicts). | Each conflict takes the action it asks for; source overwrites when it asks for none. |
-| `prefer_database` | Still `decision_required`. | Keep the database object. Same as `skip`. |
-| `skip` | Still `decision_required`. | Keep the database object and skip the source file. |
+`Export`, `FullExport`, and `ExportVBA` return final structured JSON.
+`Build` and `MergeBuild` can return a `started: true` admission requiring a terminal
+callback. Empty or unknown legacy export returns remain completion-unconfirmed.
+Refusals and terminal outcomes preserve the operation ID and diagnostic fields.
 
-Pass `noninteractive=False` to `vcs_import_objects`, `vcs_import_object` and
-`vcs_export_object` to select interactive mode explicitly and show the normal
-prompts. MCP sends the mode before the operation starts, so the run does not
-depend on the mode the add-in was last left in. All three tools
-require `SetInteractionMode(0)` to confirm `success: true` and numeric
-`effective_mode: 0` before dispatching any operation or registering its callback.
-The A24 add-in contract returns a JSON string:
+The production MCP counterpart retains its existing release and compatibility-session
+gates and session-envelope positions. Request-policy forwarding does not admit an
+intermediate add-in through those gates. The historical-derived submission consumer
+requires qualification with the exact repaired UP-004 add-in revision. Neither a
+version string alone nor a successful historical setter call establishes this pair.
 
-```json
-{"success":true,"requested_mode":0,"effective_mode":0}
-{"success":false,"requested_mode":0,"effective_mode":2,"error_pattern":"interaction_mode_refused","error":"..."}
-```
-
-An enclosing caller-owned noninteractive scope (including one left open after
-`policy_cleanup_error`) refuses interactive selection with
-`interaction_mode_refused`. MCP returns that refusal unchanged and starts
-nothing. It never clears or weakens the enclosing policy; its owner must clear
-it with `ClearOperationPolicy`, or finish an active root, before retrying.
-
-Explicit interactive requests require an **A24 build or later**. Earlier builds
-return VBA `Empty` (Python `None`), which cannot confirm acceptance. Empty,
-missing, malformed, or otherwise unconfirmed responses return
-`success: false, error_pattern: interaction_mode_unconfirmed` without starting
-work. Upgrade the add-in for unsupported responses. These checks confirm the
-requested interaction state; they do not replace the release-version contract.
-The add-in documents the same contract in
-[`docs/noninteractive-dialogs.md`](../../msaccess-vcs-addin/docs/noninteractive-dialogs.md).
-
-MCP sets the policy before the call and clears it in `finally`, so the
-add-in's interaction mode is restored whether the operation finishes, fails,
-or is cancelled. `vcs_run_tests` and a full `vcs_import_objects` merge pass the
-policy inline to `RunFilteredTests` and `MergeBuild`. A category-scoped
-`vcs_import_objects`, `vcs_import_object` and `vcs_export_object` set it with
-`SetOperationPolicy`. A session policy set that way is caller-owned: the
-add-in's `Finish` does not close it, and `ClearOperationPolicy` does. Clearing
-is idempotent. A clear counts only on `{success: true}`; Empty or malformed is
-a failure too. A failed clear is attached as `policy_cleanup_error` (and
-written to the usage log as `policy_cleanup_failed`); it never replaces the
-operation's own result.
-
-MCP dispatches a noninteractive operation only after `SetOperationPolicy`
-returns `{success: true, policy: <the requested policy>}`. An add-in refusal is
-the tool result unchanged; Empty, malformed JSON, a missing or different
-`policy` is `error_pattern: policy_unconfirmed`. Nothing starts and no clear is
-sent. This acknowledgment confirms the requested policy. A policy method
-that throws is a separate case and not handled.
-
-If the add-in refuses the interaction-mode request (for example while an
-enclosing noninteractive scope is open), that refusal is the tool result, with
-the add-in's `error`, and the operation is not started.
-
-A blocked prompt is `success: false` with `error_pattern: decision_required`
-and a `decisions` array. It is not a successful merge or a successful test run.
-
-MCP passes these add-in refusals through unchanged, with `success: false` and
-an `error`:
-
-| `error_pattern` | Meaning |
-| --- | --- |
-| `invalid_decision_policy` | Unknown policy name. The message lists the valid names. MCP also refuses this before calling Access. |
-| `operation_already_running` | Another add-in operation is running. Setting a policy or starting a merge is refused and nothing changed. A normal refusal, not a cleanup failure. The add-in's dispatcher refusal of a reentrant call (`VCS_API_REFUSED: ...` from `API`, or the marked `{success: false}` envelope from `APIAsync`) uses this pattern too, with `api_refused: true`, on every hard-coded call; no dependent call follows. |
-| `api_self_dispatch` | The dispatcher refused a call that arrived back in the project that sent it. This is an add-in defect, so waiting and retrying cannot help. Also carries `api_refused: true`. |
-| `invalid_addin_response` | A JSON-contract method (`ExportByType`, `ImportByType`, `ExportObject`, `ImportObject`, `ExecuteSQL`, `RunVBA`, `SetOption`) returned something that is not JSON. Never a success. Raw-contract calls (`GetOption` values, `GetLogContent` text, `vcs_call_vba`) still wrap a plain value as success. |
-| `merge_not_available` | The database has no merge to run (for example a blank database). It is not retried. Run a full build (`vcs_rebuild_database`). |
-| `decision_required` | A prompt or merge conflict the policy did not cover. Carries `decisions`. |
-| `interaction_mode_refused` | The add-in could not make interactive mode effective. Its enclosing scope or active operation must be released by its owner; nothing starts. |
-| `policy_unconfirmed` | MCP could not confirm `SetOperationPolicy` (Empty, malformed, no echoed `policy`, or a different policy). Nothing starts and no clear is sent; requires an add-in whose `SetOperationPolicy` returns `{success: true, policy}`. |
-| `interaction_mode_unconfirmed` | MCP could not confirm interactive mode, including VBA Empty from an older add-in. Nothing starts; unsupported responses require an A24 or later build. |
-| `interactive_tests_unsupported` | `vcs_run_tests(noninteractive=False)`. An automation test run is always headless. Refused by MCP before any add-in call; nothing started. |
-| `build_output_unsupported` | `vcs_rebuild_database` with an `output_path`, against an add-in whose `APICapabilities` does not list `build_as_paths` (missing, returned Empty or malformed JSON, or left the name out). Refused by MCP before any build starts; upgrade the add-in. |
-| `invalid_build_path` | `vcs_rebuild_database` was given a relative `output_path` (refused by MCP), or the add-in rejected the pair: a source folder without `vcs-options.json`, an output with no folder or extension, a missing output folder, or the add-in itself. Nothing started. |
-| `export_folder_mismatch` | `vcs_export_database` was given an `output_dir` that is not the add-in's configured export folder. Refused by MCP before anything is exported; the result carries `configured_export_folder` and `requested_output_dir`, and `export_path` is `None`. |
-| `export_folder_unavailable` | `vcs_export_database` could not read the add-in's export folder (`GetExportFolder` raised, was refused, or returned nothing or JSON). Nothing is exported. |
+`RebuildAddIn(sourceFolder, callbackInfo, policy)` and fixed unattended
+`BuildHeadless(sourceFolder, policy)` and `MergeHeadless(sourceFolder, policy)`
+reject nonempty policies. Their recovery and compatibility contracts remain separate.
 
 The add-in's return from `MergeBuild` is a start result, not the outcome:
 the outcome arrives on the completion callback. When MCP had to start the
@@ -121,98 +117,13 @@ fell back to a sync call), `vcs_import_objects` cannot confirm the outcome.
 It returns `success: false` with `started: true` and
 `completion_unconfirmed: true`. The merge may have finished either way, so
 do not retry it blindly. Read `log_path`, or call `vcs_get_recent_calls()`
-and `vcs_get_log(log_type="Merge")`. A refusal arrives both as the sync return
-and on the callback; MCP returns it once.
+and `vcs_get_log(log_type="Merge")`. An immediate queue refusal is synchronous
+and stops waiting. A later execution refusal arrives through that queued request's
+own terminal emitter. MCP preserves either outcome without redispatch.
 
-Whole-database export and build follow the same rule. `Export`, `FullExport`,
-`ExportVBA` and `Build` are Subs or form starts, so their API return is Empty
-and says nothing about the outcome. `vcs_export_database` and
-`vcs_rebuild_database` report success only from a terminal callback. Any path
-that has none returns the unconfirmed-start result above, with the operation
-named in `error` and `vcs_get_log(log_type="Export")` or `"Build"`:
-
-- the sync fallback (no callback server, an async start that raised, or a
-  start result with neither `async` nor `sync`);
-- an inline `{sync: true, result}` marker. MCP parses the nested `result`:
-  a dispatcher refusal or a failure object with `success: false` fails and
-  keeps its `error_pattern`, `decisions` and `decision_required`; Empty or
-  anything else is unconfirmed. It is never run a second time.
-
-A COM exception still fails. The integration helpers `export_source`,
-`export_vba` and `build_from_source` never return `success: true` for the same
-reason. `full_export=True` dispatches `FullExport` on the async, inline and
-sync-fallback paths. A final-result sync API in the add-in is deferred (see
-`DECISIONS.md`); until it exists, an agent that needs the outcome without the
-callback server reads the log.
-
-Operation log paths supplied by the add-in (`log_path` or `logPath`) remain
-authoritative, including on refusals and unconfirmed starts. When no explicit
-path is supplied, MCP can attach only the newest matching
-`<source>/logs/<Export|Build|Merge>_*.log` whose modification time is at or
-after the call started, and only with evidence that the operation ran.
-Pre-start refusals and `started: false` never use that fallback. A decision
-result keeps its own execution evidence; an unconfirmed start keeps its
-uncertain verdict even when a current log is found. Root-level legacy
-`Export.log` and `Build.log` are never inferred as operation logs. If no log
-is attributable, `log_path` is null and `log_excerpt` is absent.
-
-`vcs_rebuild_database` with an `output_path` calls `BuildAs(source, output)`
-on every path (async, inline and sync fallback), so the add-in opens neither
-the source-folder nor the save-as picker. MCP first runs the add-in's
-`APICapabilities` procedure by name and needs `build_as_paths` in its reply;
-anything else is `build_output_unsupported` and nothing starts, because an
-older add-in's `BuildAs` ignores the arguments and opens the pickers. The probe
-never goes through `API`: on an add-in without the method, `API` stops in a
-modal "Run-time error '438'" inside Access, while `Application.Run` of a
-missing procedure fails at once with error 2517 and leaves no dialog. `output_path` in the result is the path the completion callback
-reports, never the request. It is None on every other result; an unconfirmed
-start keeps the request as `requested_output_path`. The call is hosted in a
-blank temporary database (Access exits if the add-in runs with no database
-open), which is closed and removed when the call returns.
-
-`RunFilteredTests` is different: it runs the tests before it returns, and its
-return is the final results JSON (or a refusal). `vcs_run_tests` returns a
-refusal once, normalised, and does not call `RunFilteredTests` a second time.
-A `runtime_error` in the results, or on the completion callback when the
-run went async, is kept on the result with its `errorNumber`.
-
-When a blocked decision and compile failure occur together (A35), the primary
-result is `decision_required: true`, `error_pattern: decision_required`,
-`success: false`, and `cancelled: false`. The translated decision text stays in
-`error`; `run_error` retains the compile explanation and `run_error_pattern`
-is `project_not_compiled`. These are runner diagnostics, separate from
-`runtime_error`/`errorNumber`. Compile failure alone keeps the compile text and
-`project_not_compiled` as the primary error, with `cancelled: false`.
-Both transports preserve the decision journal, the operation's `log_path` and
-`logPath`, results path or available inline partial results, and `results_error`.
-If completion construction fails, `completion_error` and
-`completion_error_number` retain that secondary fault; even passing saved
-assertions cannot turn it into success. The add-in restores its owned state
-before making its single terminal delivery attempt.
-
-`vcs_run_tests` gives the same verdict whether the result came by callback,
-as an inline sync marker, or through the sync fallback. Highest precedence
-first: `decision_required`; a runtime error or the add-in's own
-`success: false`; `cancelled`; `results_error`; then the add-in's `allPassed`,
-which needs at least one passed test. An add-in without `allPassed` falls back
-to nothing failed or errored and `passed > 0`. An all-EMPTY run is
-`success: false` with an `error` that names the EMPTY count and no
-`error_pattern`; passing tests mixed with EMPTY ones are still a success.
-Results keep `decisions`, `log_path` and `logPath` when there is no
-`decision_required`.
-
-From VBA, the same switch is the optional policy argument:
-
-```vba
-VCS.MergeBuild "block"
-VCS.RunFilteredTests "decline"
-```
-
-`VCS.MergeBuild` and `VCS.RunTests` with no policy stay interactive.
-`VCS.RunTests` still uses silent mode internally so test code does not stop
-on add-in message boxes, and it still shows the console. That is the add-in's
-own behaviour for a person at the ribbon; a call that arrives through the MCP
-server is automation and is headless (next section).
+Final export JSON establishes completion. A build's `started: true` only
+establishes admission. An older Empty result establishes neither success nor failure.
+Reconcile its operation log before retrying an uncertain call.
 
 ## Test runs are always headless
 
@@ -361,7 +272,7 @@ and then uses up its records:
   on the same call still makes it `execution_interrupted`. A cancel posted with
   no call running on that database records nothing.
 
-Decisions, `runtime_error`, `policy_cleanup_error` and the original error text
+Decisions, transfer fields, `runtime_error`, and the original error text
 are kept. This happens before the usage log is written, so the `tool_call`
 entry, and `vcs_get_recent_calls`, record the same `success`, `error_pattern`,
 `execution_interrupted` and `interruption_uncertain` the client got. A
@@ -495,3 +406,21 @@ always describes the box that was clicked.
   is already running instead of starting its own. The build then fails ("You
   already have the database open"), and its cleanup closes that instance's
   database and quits it. Close other Access windows before a rebuild.
+
+## Synchronous MCP identities
+
+The repaired historical consumer calls
+`APIMCP(operation_id, method, arg1, arg2, arg3)` for synchronous operation methods.
+It generates a fresh UUID per request, independently of callback registration.
+The add-in captures MCP as the initiating source and retains that public ID through
+completion. External callers can continue to use `API` with add-in-generated IDs.
+Metadata and inspection calls do not start an operation and retain their existing API.
+The MCP never replays a synchronous operation after a COM exception. That failure
+retains its ID and `operation_outcome_unconfirmed` for reconciliation.
+
+The production counterpart requires its admitted request-policy marker before
+using `APIExecuteMCP(envelope, operation_id, method, arg1, arg2, arg3)`. UP-009 must
+implement that session-enforcing wrapper along with `APIMCP` before advertising
+the marker. Old admitted production libraries retain their existing envelope-first
+legacy calls when no new argument or result contract is needed. They do not establish
+the repaired pair's MCP-origin guarantee and remain outside its qualification.

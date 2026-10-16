@@ -218,7 +218,10 @@ class TestVCSAddinIntegration:
         result = addin.export_source(db_path)
         
         assert result["success"] is False
-        assert "export failed" in result["message"]
+        assert "Export failed" in result["message"]
+        assert result["error_pattern"] == "operation_outcome_unconfirmed"
+        assert result["operation_id"]
+        mock_app.Run.assert_called_once()
         assert "completion_unconfirmed" not in result
     
     def test_export_vba(self, tmp_path):
@@ -238,7 +241,9 @@ class TestVCSAddinIntegration:
         
         assert result["success"] is False
         assert result["completion_unconfirmed"] is True
-        assert mock_app.Run.call_args.args[1] == "ExportVBA"
+        assert mock_app.Run.call_args.args[0].endswith(".APIMCP")
+        assert mock_app.Run.call_args.args[1]
+        assert mock_app.Run.call_args.args[2] == "ExportVBA"
     
     def test_merge_build(self, tmp_path):
         """Test merge build operation."""
@@ -307,7 +312,9 @@ class TestVCSAddinIntegration:
         
         assert result["success"] is False
         assert result["completion_unconfirmed"] is True
-        assert mock_app.Run.call_args.args[1:] == ("Build", source_folder)
+        assert mock_app.Run.call_args.args[0].endswith(".APIMCP")
+        assert mock_app.Run.call_args.args[1]
+        assert mock_app.Run.call_args.args[2:] == ("Build", source_folder)
     
     def test_parse_log_file_exists(self, tmp_path):
         """Test parsing existing log file."""

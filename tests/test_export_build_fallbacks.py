@@ -64,8 +64,12 @@ class FakeAccess:
         self.probe_names: list[str] = []
         self.export_folder: object = ""
         self.folder_queries = 0
+        self.operation_ids = []
 
     def run(self, name, *args):
+        if name.endswith(".APIMCP"):
+            self.operation_ids.append(args[0])
+            name, args = name[:-6] + "API", args[1:]
         entry = name.rsplit(".", 1)[1]
         if entry == "APICapabilities":
             self.probes += 1
@@ -216,9 +220,13 @@ def _assert_unconfirmed(result):
 
 @pytest.mark.parametrize("raw", [None, "", "   ", "not json", "[1]", '{"success": true}',
                                  '{"started": true}', {"success": True}, 7])
-def test_a_return_that_proves_nothing_is_unconfirmed(raw):
+def test_final_export_json_and_unknown_legacy_returns(raw):
     result = start_only_result(raw, "export", "Export")
-    assert result == unconfirmed_start_result("export", "Export")
+    if raw in ({"success": True}, '{"success": true}'):
+        assert result == {"success": True}
+        return
+    else:
+        assert result == unconfirmed_start_result("export", "Export")
     assert result["success"] is False
     assert "error_pattern" not in result
 

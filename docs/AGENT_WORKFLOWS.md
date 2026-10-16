@@ -2,6 +2,24 @@
 
 This guide documents common workflows for AI agents working with Microsoft Access databases using the msaccess-vcs-mcp tool.
 
+## Preserve conflicts during each edit cycle
+
+Import and export tools default to an explicit request-owned `block` policy.
+Single-object calls protect independent destination changes, including both export
+branches. Follow [the policy and deletion rules](DIALOGS.md#conflict-outcomes).
+Export, edit source, import, and test after confirmed transfers. Read `skipped`,
+`transferred`, and `decisions` on every result. A skipped transfer did not apply
+the proposed change. Reconcile blocked or uncertain results before continuing.
+
+Use a preference policy only when existing user instructions authorize its actual
+direction and scope. `prefer_source` preserves source on export, while
+`prefer_database` exports the database version. `skip` preserves conflicting source
+on export. Do not automatically retry a blocked call with an overwrite policy.
+No policy authorizes conflicting edited deletions in this stage. Resolve those
+items interactively, or preserve them if that is the requested outcome. Omitting
+the policy restores legacy automatic choices and is not conflict recovery.
+
+
 ## Overview
 
 The MCP tool enables AI agents to work iteratively with Access databases by:
