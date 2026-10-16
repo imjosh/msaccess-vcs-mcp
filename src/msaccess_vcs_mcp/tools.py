@@ -1430,10 +1430,6 @@ async def vcs_export_database(
     
     except InvalidDecisionPolicy as e:
         return invalid_policy_result(e)
-    except InvalidDecisionPolicy as e:
-        return invalid_policy_result(e)
-    except InvalidDecisionPolicy as e:
-        return invalid_policy_result(e)
     except Exception as e:
         return {
             "success": False,
@@ -2057,11 +2053,21 @@ async def vcs_rebuild_addin(
 
     Returns:
         Terminal rebuild status, including ``status``, ``status_file``,
-        ``phaseStarted``, and ``buildLog`` when present.
+        ``phaseStarted``, and ``buildLog`` when present. ``operation_id`` identifies
+        the outer rebuild job. ``build_operation_id`` identifies its separate child
+        callback stream when a listener is available.
     """
     operation_id: str | None = None
+    build_operation_id: str | None = None
     op_manager = None
     callback_task: asyncio.Task | None = None
+
+    def _with_identities(result):
+        if operation_id is not None:
+            result["operation_id"] = operation_id
+        if build_operation_id is not None:
+            result["build_operation_id"] = build_operation_id
+        return result
 
     try:
         check_write_permission(get_config())
@@ -2080,19 +2086,27 @@ async def vcs_rebuild_addin(
         callback_state: dict[str, Any] = {"log_messages": []}
         reporter = MonotonicProgressReporter()
 
-        if callback_url:
-            op_manager = _get_operation_manager()
-            if op_manager:
-                operation_id, callback_queue = op_manager.register_operation(
-                    timeout_ms=int(timeout * 1000),
-                    database_path=str(host_path),
-                    command="RebuildAddIn",
+        op_manager = _get_operation_manager()
+        if op_manager is None:
+            return {"success": False, "error_pattern": "operation_manager_unavailable",
+                    "error": "Rebuild operation registration is unavailable; nothing launched."}
+
+        def _registered_args(call_args):
+            nonlocal operation_id, build_operation_id, callback_queue, callback_info
+            operation_id, _outer_queue = op_manager.register_operation(
+                timeout_ms=int(timeout * 1000), database_path=str(host_path), command="RebuildAddIn",
+            )
+            if callback_url:
+                build_operation_id, callback_queue = op_manager.register_operation(
+                    timeout_ms=int(timeout * 1000), command="Build",
                 )
-                callback_info = op_manager.create_callback_info(
-                    operation_id,
-                    callback_url,
-                    "cursor",
-                )
+                if build_operation_id == operation_id:
+                    raise RuntimeError("Rebuild and child build require distinct operation IDs")
+                callback_info = op_manager.create_callback_info(build_operation_id, callback_url, "cursor")
+                return [*call_args, callback_info]
+            return call_args
+
+        registered_args = _registered_args(["RebuildAddIn", str(src_path)])
 
         def _launch() -> dict[str, Any]:
             # Inside the gate, on its COM apartment thread: another window's
@@ -2108,13 +2122,8 @@ async def vcs_rebuild_addin(
                 [str(installed)] if installed else [],
             )
 
-            call_args = ["RebuildAddIn", str(src_path)]
-            if callback_info:
-                call_args.append(callback_info)
             return _execute_call_vba(
-                str(host_path),
-                "VCS.API",
-                call_args,
+                str(host_path), "VCS.API", registered_args, operation_id=operation_id,
             )
 
         # The COM launch reports nothing until RebuildAddIn returns, so emit
@@ -2131,11 +2140,11 @@ async def vcs_rebuild_addin(
             False,
         )
         if isinstance(launch, dict) and launch.get("error_pattern") == "server_busy":
-            return launch
+            return _with_identities(launch)
 
         launch = _with_rebuild_fields(launch, status_file, status_before)
         if not launch.get("success"):
-            return launch
+            return _with_identities(launch)
 
         parsed = _parse_rebuild_launch(launch.get("result"))
         status = parsed.get("status")
@@ -2150,20 +2159,20 @@ async def vcs_rebuild_addin(
                         "error",
                         parsed.get("error") or f"Rebuild ended with status {status}",
                     )
-            return result
+            return _with_identities(result)
 
         if status != "launched":
             result = dict(launch)
             result.update(parsed)
             result["status_file"] = status_file
-            return result
+            return _with_identities(result)
 
         phase_started = (
             parsed.get("phaseStarted")
             or launch.get("rebuild_phase_started")
         )
         if not phase_started:
-            return {
+            return _with_identities({
                 "success": False,
                 "error": (
                     "Rebuild launched but did not return phaseStarted; "
@@ -2171,7 +2180,7 @@ async def vcs_rebuild_addin(
                 ),
                 "status_file": status_file,
                 "result": launch.get("result"),
-            }
+            })
 
         await reporter.emit(
             ctx,
@@ -2210,12 +2219,12 @@ async def vcs_rebuild_addin(
             watched["rebuild_status_before"] = status_before
         if launch.get("rebuild_status_superseded") is not None:
             watched["rebuild_status_superseded"] = launch["rebuild_status_superseded"]
-        return watched
+        return _with_identities(watched)
 
     except PermissionError as e:
-        return {"success": False, "error": str(e)}
+        return _with_identities({"success": False, "error": str(e)})
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return _with_identities({"success": False, "error": str(e)})
     finally:
         if callback_task is not None:
             callback_task.cancel()
@@ -2223,8 +2232,11 @@ async def vcs_rebuild_addin(
                 await callback_task
             except asyncio.CancelledError:
                 pass
-        if op_manager is not None and operation_id is not None:
-            op_manager.unregister_operation(operation_id)
+        if op_manager is not None:
+            if build_operation_id is not None:
+                op_manager.unregister_operation(build_operation_id)
+            if operation_id is not None:
+                op_manager.unregister_operation(operation_id)
 
 
 async def _forward_rebuild_callbacks(
@@ -2919,6 +2931,7 @@ def _execute_call_vba(
     function_name: str,
     args: list[str] | None = None,
     timeout_seconds: float | None = None,
+    *, operation_id: str | None = None,
 ) -> dict[str, Any]:
     """Invoke Application.Run and normalize the result. Used by vcs_call_vba
     and by vcs_rebuild_addin for the launch phase only.
@@ -2965,7 +2978,7 @@ def _execute_call_vba(
             if (_is_addin_api_resolved_name(resolved_name) and resolved_name.lower().endswith(".api") and call_args
                     and is_operation_method(call_args[0])):
                 resolved_name = resolved_name[:-3] + "APIMCP"
-                call_args = [str(uuid.uuid4()), *call_args]
+                call_args = [operation_id or str(uuid.uuid4()), *call_args]
             run_result = _run_application_call_with_timeout(
                 app, resolved_name, call_args, timeout, str(db_path)
             )

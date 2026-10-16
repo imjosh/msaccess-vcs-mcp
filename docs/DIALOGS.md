@@ -424,3 +424,20 @@ implement that session-enforcing wrapper along with `APIMCP` before advertising
 the marker. Old admitted production libraries retain their existing envelope-first
 legacy calls when no new argument or result contract is needed. They do not establish
 the repaired pair's MCP-origin guarantee and remain outside its qualification.
+
+## Rebuild launcher and child build identities
+
+`vcs_rebuild_addin` registers the outer rebuild job and a distinct child Build
+callback operation before launch. APIMCP uses the registered outer ID. The explicit
+second RebuildAddIn method argument contains callback information for the child ID.
+The production wrapper preserves session/version admission before registration
+and uses APIExecuteMCP only for the advertised request contract.
+
+The child callback queue supplies progress and build-phase log metadata. Its
+terminal callback ends that progress stream. The existing status-file watcher
+determines the outer rebuild's final compile/install outcome. Launch and final
+results identify the outer `operation_id` and separate `build_operation_id`.
+Both registrations are released on return. Without a callback listener, the
+outer job remains registered and the add-in uses its checked direct Build path
+without claiming a child callback stream. This identity migration does not
+change post-launch recovery, worker authorization, or status-file correlation.
