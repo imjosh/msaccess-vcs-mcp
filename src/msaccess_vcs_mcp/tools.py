@@ -2986,6 +2986,48 @@ def vcs_call_vba(
     return _execute_call_vba(database_path, function_name, args, timeout_seconds)
 
 
+_CALL_VBA_RESULT_TAG = "msaccess-vcs.call-vba-result/1"
+
+
+def _decode_call_vba_result(raw: Any) -> dict[str, Any]:
+    result = raw
+    tagged = isinstance(result, (tuple, list)) and len(result) > 0 and result[0] == _CALL_VBA_RESULT_TAG
+    if not tagged and isinstance(result, tuple) and len(result) == 31:
+        result = result[0]
+        tagged = isinstance(result, (tuple, list)) and len(result) > 0 and result[0] == _CALL_VBA_RESULT_TAG
+
+    if tagged:
+        if len(result) == 3 and result[1] == "returned":
+            return {"success": True, "result": result[2]}
+        if (len(result) == 4 and result[1] == "failed"
+                and isinstance(result[2], int) and not isinstance(result[2], bool)
+                and isinstance(result[3], str)):
+            return {
+                "success": False, "error_pattern": "vba_execution_failed",
+                "error_number": result[2], "error": result[3],
+            }
+    else:
+        if isinstance(result, str) and result.startswith(_API_REFUSED_PREFIX):
+            return {"success": False, "error": result[len(_API_REFUSED_PREFIX):]}
+        if isinstance(result, str) and result.startswith("{"):
+            try:
+                admission_reply = json.loads(result)
+            except json.JSONDecodeError:
+                admission_reply = None
+            if (isinstance(admission_reply, dict)
+                    and isinstance(admission_reply.get("error_pattern"), str)
+                    and admission_reply["error_pattern"] in {
+                "compatibility_session_invalid", "version_incompatible", "version_unconfirmed",
+            }):
+                return {**admission_reply, "success": False}
+
+    return {
+        "success": False, "error_pattern": "vba_result_contract_invalid",
+        "error": "The add-in did not return a valid CallVBAResult outcome.",
+        "provider_response": repr(raw),
+    }
+
+
 def _execute_call_vba(
     database_path: str,
     function_name: str,
@@ -3052,7 +3094,7 @@ def _execute_call_vba(
                 library = os.path.splitext(os.path.abspath(addin.addin_path))[0]
                 run_result = _run_application_call_with_timeout(
                     app, library + ".APIExecute",
-                    [envelope, "CallVBA", resolved_name, json.dumps(call_args)], timeout, str(db_path)
+                    [envelope, "CallVBAResult", resolved_name, json.dumps(call_args)], timeout, str(db_path)
                 )
 
             if run_result.get("timed_out"):
@@ -3075,6 +3117,14 @@ def _execute_call_vba(
                 })
 
             result = run_result["result"]
+
+            if not _is_addin_api_resolved_name(resolved_name):
+                response = _decode_call_vba_result(result)
+                response["function"] = resolved_name
+                if response.get("success"):
+                    value = response["result"]
+                    response["result"] = str(value) if value is not None else None
+                return _with_rebuild_context(response)
 
             # Early-bound Run returns a tuple: the function's return value followed by
             # Run's own 30 Arg slots (unused ones show DISP_E_PARAMNOTFOUND). Only the

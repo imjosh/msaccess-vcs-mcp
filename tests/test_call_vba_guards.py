@@ -317,12 +317,12 @@ def test_raw_target_call_uses_accepted_dispatcher(_config_installed_addin, monke
     captured = {}
     def bounded(_app, procedure, args, *_rest):
         captured.update(procedure=procedure, args=args)
-        return {"success": True, "result": "echo"}
+        return {"success": True, "result": ["msaccess-vcs.call-vba-result/1", "returned", "echo"]}
     monkeypatch.setattr(tools_module, "_run_application_call_with_timeout", bounded)
     result = _call_vba(REPO_ADDIN, "TargetEcho", ["hello"])
     assert result["success"]
     assert captured["procedure"].endswith(".APIExecute")
-    assert captured["args"][1:] == ["CallVBA", "TargetEcho", '["hello"]']
+    assert captured["args"][1:] == ["CallVBAResult", "TargetEcho", '["hello"]']
 
 
 def test_rebuild_admission_failure_registers_no_callback(_config_installed_addin, monkeypatch):
