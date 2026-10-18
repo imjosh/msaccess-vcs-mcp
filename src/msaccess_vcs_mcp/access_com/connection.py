@@ -16,7 +16,10 @@ import shutil
 import tempfile
 import sys
 import threading
-from typing import Any
+import time
+import traceback
+from dataclasses import asdict, dataclass, replace
+from typing import Any, Callable
 
 try:
     import pythoncom
@@ -290,97 +293,200 @@ def _resolve_instance_for_record(record) -> Any:
     return app
 
 
-def _quit_with_timeout(app, timeout_sec: float) -> bool:
-    """Run CloseCurrentDatabase + Quit in a daemon thread with a hard timeout.
+@dataclass(frozen=True)
+class _CloseEvidence:
+    quit_returned_at: float | None = None
+    apartment_released: bool = False
+    worker_completed: bool = False
+    process_exited: bool = False
+    force_requested: bool = False
+    force_accepted: bool = False
+    errors: tuple[str, ...] = ()
 
-    This runs against an instance that has usually just failed a health
-    probe, so the COM call may never return. A blocking call here would
-    hang the Access gate thread and take the whole server down with it.
-    """
-    done: dict[str, bool] = {}
 
-    def worker() -> None:
-        if COM_AVAILABLE:
-            try:
-                pythoncom.CoInitialize()
-            except Exception:
-                pass
+class _QuitAttempt:
+    def __init__(self, app):
+        self.evidence = _CloseEvidence()
+        self._lock = threading.Lock()
+        self._handoff = {}
+        self.thread = None
         try:
+            self._handoff['stream'] = pythoncom.CoMarshalInterThreadInterfaceInStream(
+                pythoncom.IID_IDispatch, app._oleobj_)
+        except Exception as error:
+            self._error(error)
+
+    def _update(self, **fields):
+        with self._lock:
+            self.evidence = replace(self.evidence, **fields)
+
+    def _error(self, error):
+        with self._lock:
+            self.evidence = replace(self.evidence, errors=self.evidence.errors +
+                                    (f"{type(error).__name__}: {error}",))
+
+    def _release_unused(self):
+        stream = self._handoff.pop('stream', None)
+        if stream is not None:
             try:
-                app.CloseCurrentDatabase()
-            except Exception:
-                pass
-            app.Quit()
-            done["ok"] = True
-        except Exception:
-            done["ok"] = False
+                pythoncom.CoReleaseMarshalData(stream)
+            except Exception as error:
+                self._error(error)
+                return False
+        return True
+
+    def start(self):
+        if not self._handoff:
+            self._update(worker_completed=True, apartment_released=True)
+            return
+        self.thread = threading.Thread(target=self._worker, daemon=True, name='vcs-access-quit')
+        try:
+            self.thread.start()
+        except Exception as error:
+            self._error(error)
+            self.thread = None
+            released = self._release_unused()
+            self._update(worker_completed=True, apartment_released=released)
+
+    def _worker(self):
+        worker_app = interface = stream = None
+        initialized = False
+        released = False
+        try:
+            pythoncom.CoInitialize()
+            initialized = True
+            stream = self._handoff.pop('stream')
+            interface = pythoncom.CoGetInterfaceAndReleaseStream(stream, pythoncom.IID_IDispatch)
+            stream = None
+            worker_app = win32com.client.Dispatch(interface)
+            interface = None
+            try:
+                worker_app.CloseCurrentDatabase()
+            except Exception as error:
+                self._error(error)
+            worker_app.Quit()
+            self._update(quit_returned_at=time.monotonic())
+        except Exception as error:
+            self._error(error)
         finally:
-            if COM_AVAILABLE:
+            worker_app = interface = stream = None
+            if initialized:
                 try:
                     pythoncom.CoUninitialize()
-                except Exception:
-                    pass
+                    released = True
+                except Exception as error:
+                    self._error(error)
+            else:
+                released = True
+            self._update(apartment_released=released)
 
-    thread = threading.Thread(target=worker, daemon=True, name="vcs-access-quit")
-    thread.start()
-    thread.join(timeout=timeout_sec)
-    return bool(done.get("ok"))
+    def join(self, timeout):
+        if self.thread is not None:
+            self.thread.join(timeout=max(0.0, timeout))
+            if self.thread.is_alive():
+                return False
+        released = self._release_unused()
+        self._update(worker_completed=True,
+                     apartment_released=self.evidence.apartment_released and released)
+        return self.evidence.apartment_released
 
 
-def _close_owned_record(record) -> dict[str, Any] | None:
-    """Close one verified server-created instance. Returns a result or None.
-
-    Graceful Quit first; a hung instance is force-terminated, which is only
-    reachable for a PID whose identity was confirmed against the registry.
-    """
-    from .instance_registry import unregister_owned
-    from .process_qos import process_is_alive, terminate_pid
-
-    app = _resolve_instance_for_record(record)
-    if app is None:
-        # Either the process is gone, or the path now resolves to somebody
-        # else's instance. Drop a stale claim; never close what we cannot
-        # prove is ours.
-        if process_is_alive(record.pid) is False:
-            unregister_owned(record.pid, record.create_time)
-        else:
-            _log_instance_event(
-                "owned_instance_close_skipped",
-                pid=record.pid,
-                database=record.database_path,
-            )
-        return None
-
-    quit_ok = _quit_with_timeout(app, get_close_timeout())
+def _quit_with_timeout(app, timeout_sec: float) -> bool:
+    if not COM_AVAILABLE:
+        return False
+    attempt = _QuitAttempt(app)
     app = None
-    terminated = False
+    attempt.start()
+    return attempt.join(timeout_sec) and attempt.evidence.quit_returned_at is not None
 
-    if process_is_alive(record.pid) is not False:
-        terminated = terminate_pid(record.pid)
-        _log_instance_event(
-            "owned_instance_terminated",
-            pid=record.pid,
-            database=record.database_path,
-            succeeded=terminated,
-        )
 
-    if process_is_alive(record.pid) is not False and not terminated:
-        return None
+@dataclass
+class _PendingClose:
+    target: str
+    record: Any
+    process: Any = None
+    attempt: _QuitAttempt | None = None
+    admission_worker: Any = None
 
+
+_pending_closes: dict[tuple[str, int, int | None], _PendingClose] = {}
+_recycle_closed: dict[str, list[dict[str, Any]]] = {}
+NATURAL_EXIT_SECONDS = 60.0
+FORCE_SETTLEMENT_SECONDS = 5.0
+
+
+def _pending_for(target):
+    return [pending for pending in _pending_closes.values() if _paths_match(pending.target, target)]
+
+
+def owned_recovery_pending(target: str) -> bool:
+    return bool(_pending_for(target) or
+                os.path.normcase(os.path.abspath(target)) in _recycle_closed)
+
+
+def _close_owned_record(record, *, target=None, app=None) -> dict[str, Any] | None:
+    from .instance_registry import unregister_owned
+    from .process_qos import open_exact_process
+
+    target = target or record.database_path
+    key = (os.path.normcase(os.path.abspath(target)), record.pid, record.create_time)
+    pending = _pending_closes.get(key)
+    if pending is None:
+        pending = _PendingClose(target, record)
+        _pending_closes[key] = pending
+    if pending.admission_worker is not None:
+        if pending.admission_worker.is_alive():
+            return None
+        pending.admission_worker = None
+    if pending.process is None:
+        pending.process = open_exact_process(record.pid, record.create_time)
+        if pending.process is None:
+            return None
+    evidence = _CloseEvidence(process_exited=True)
+    if pending.attempt is None and pending.process.exited() is not True:
+        if app is None:
+            app = _resolve_instance_for_record(record)
+        if app is None:
+            return None
+        pending.attempt = _QuitAttempt(app)
+        app = None
+        pending.attempt.start()
+    if pending.attempt is not None:
+        attempt = pending.attempt
+        attempt.join(get_close_timeout())
+        returned = attempt.evidence.quit_returned_at
+        if returned is not None and not attempt.evidence.force_requested:
+            while time.monotonic() < returned + NATURAL_EXIT_SECONDS:
+                exited = pending.process.exited()
+                if exited is not False:
+                    break
+                attempt.join(min(0.05, returned + NATURAL_EXIT_SECONDS - time.monotonic()))
+                time.sleep(0.05)
+        exited = pending.process.exited()
+        if exited is None:
+            return None
+        if not exited and not attempt.evidence.force_requested:
+            accepted = pending.process.force()
+            attempt._update(force_requested=True, force_accepted=accepted)
+        deadline = time.monotonic() + FORCE_SETTLEMENT_SECONDS
+        while True:
+            settled = attempt.join(0)
+            exited = pending.process.exited()
+            if exited is True and settled:
+                break
+            if exited is None or time.monotonic() >= deadline:
+                return None
+            attempt.join(min(0.05, deadline - time.monotonic()))
+            time.sleep(0.05)
+        evidence = replace(attempt.evidence, process_exited=True)
+    pending.process.close()
+    del _pending_closes[key]
     unregister_owned(record.pid, record.create_time)
-    _log_instance_event(
-        "owned_instance_closed",
-        pid=record.pid,
-        database=record.database_path,
-        quit=quit_ok,
-        terminated=terminated,
-    )
-    return {
-        "pid": record.pid,
-        "database_path": record.database_path,
-        "quit": quit_ok,
-        "terminated": terminated,
-    }
+    result = {"pid": record.pid, "database_path": record.database_path,
+              "quit": evidence.quit_returned_at is not None,
+              "terminated": evidence.force_accepted, "evidence": asdict(evidence)}
+    _log_instance_event('owned_instance_closed', **result)
+    return result
 
 
 def _log_instance_event(event: str, **fields: Any) -> None:
@@ -414,20 +520,34 @@ def close_owned_instances_holding(
     return closed
 
 
-def recycle_owned_instance(database_path: str) -> bool:
-    """Close a server-owned instance for ``database_path`` and open a fresh one.
-
-    Returns True only when an owned instance was closed and a replacement
-    was started. User-owned windows are never touched.
-    """
+def recycle_owned_instance(database_path: str, *, settle_predecessor: Callable[[], bool] | None = None) -> bool:
+    """Replace only after every exact host and predecessor worker has settled."""
     from .instance_registry import owned_records_for_paths
 
-    if not owned_records_for_paths([database_path]):
+    records = {(r.pid, r.create_time): r for r in owned_records_for_paths([database_path])}
+    for pending in _pending_for(database_path):
+        records[(pending.record.pid, pending.record.create_time)] = pending.record
+    target_key = os.path.normcase(os.path.abspath(database_path))
+    closed = _recycle_closed.setdefault(target_key, [])
+    if not records and not closed:
+        _recycle_closed.pop(target_key, None)
         return False
-    if not close_owned_instances_holding([database_path]):
+    results = [_close_owned_record(record, target=database_path) for record in records.values()]
+    closed.extend(result for result in results if result is not None)
+    if any(result is None for result in results):
         return False
-    with AccessConnection(database_path) as conn:
-        conn.connect()
+    if settle_predecessor is not None and not settle_predecessor():
+        return False
+    _recycle_closed.pop(target_key, None)
+    try:
+        with AccessConnection(database_path):
+            pass
+    except Exception as error:
+        _recycle_closed[target_key] = closed
+        _log_instance_event('owned_instance_recycle_refused', database=database_path,
+                            error=str(error), closed=closed)
+        return False
+    _recycle_closed.pop(target_key, None)
     return True
 
 
@@ -494,6 +614,8 @@ class AccessConnection:
         is a normal interactive Access app, not an automation ghost.
         """
         if self._app is None:
+            if owned_recovery_pending(self._db_path):
+                raise RuntimeError("Owned recovery is still pending for this target")
             from ..compatibility_session import target_admission_path
 
             library = target_admission_path()
@@ -535,8 +657,8 @@ class AccessConnection:
         """
         from ..addin_integration import VCSAddinIntegration
         from ..compatibility_session import ensure_session
-        from .instance_registry import process_create_time, unregister_owned
-        from .process_qos import pid_from_access_app, process_is_alive, prefer_full_power_app
+        from .instance_registry import OwnedInstance, process_create_time
+        from .process_qos import pid_from_access_app, prefer_full_power_app
 
         if not os.path.isfile(self._db_path):
             raise FileNotFoundError(self._db_path)
@@ -555,6 +677,7 @@ class AccessConnection:
         if not created:
             # No target or bootstrap has been opened; identity loss fails closed.
             from ..compatibility_session import AdmissionError, session_failure
+            app = None
             raise AdmissionError(session_failure("access_identity_unconfirmed"))
         self._app = app
         self._resolve_ownership(True)
@@ -573,31 +696,49 @@ class AccessConnection:
             self._db_opened_as_current = True
             self._ensure_owned_instance_interactive()
             return app
-        except TimeoutError:
-            # A timed-out admission worker can still be blocked inside Access.
-            # Even reading app.hWndAccessApp or calling Quit would defeat its
-            # timeout. Retain the captured ownership and actual neutral path
-            # for later recovery, without any further COM call or target open.
-            from .instance_registry import register_owned
-
-            register_owned(pid, neutral, create_time=created)
-            _log_instance_event("bootstrap_cleanup_deferred", pid=pid,
-                                create_time=created, path=neutral,
-                                error="admission probe timed out")
+        except Exception as error:
+            failure = error
+            timed_out = isinstance(error, TimeoutError)
+            chain = [error]
+            seen = set()
+            while chain:
+                item = chain.pop()
+                if id(item) in seen:
+                    continue
+                seen.add(id(item))
+                chain.extend(e for e in (item.__context__, item.__cause__) if e is not None)
+                traceback.clear_frames(item.__traceback__)
+                item.__traceback__ = item.__context__ = item.__cause__ = None
+            record = OwnedInstance(pid, neutral, created)
             self._app = None
             self._owns_app = False
-            raise
-        except Exception:
-            if (pid_from_access_app(app) == pid
-                    and process_create_time(pid) == created):
-                try:
-                    app.Quit(2)  # acQuitSaveNone; only this newly created process
-                finally:
-                    if process_is_alive(pid) is False:
-                        unregister_owned(pid, created)
-            self._app = None
-            self._owns_app = False
-            raise
+            if timed_out:
+                from .instance_registry import register_owned
+                register_owned(pid, neutral, create_time=created)
+                key = (os.path.normcase(os.path.abspath(self._db_path)), pid, created)
+                _pending_closes[key] = _PendingClose(
+                    self._db_path, record,
+                    admission_worker=VCSAddinIntegration._active_probe_thread)
+                app = None
+            else:
+                from .process_qos import open_exact_process
+                process = open_exact_process(pid, created)
+                if process is not None:
+                    attempt = _QuitAttempt(app)
+                    key = (os.path.normcase(os.path.abspath(self._db_path)), pid, created)
+                    _pending_closes[key] = _PendingClose(self._db_path, record, process, attempt)
+                    app = None
+                    attempt.start()
+                    try:
+                        _close_owned_record(record, target=self._db_path)
+                    except Exception as cleanup_error:
+                        _log_instance_event('bootstrap_cleanup_deferred', pid=pid,
+                                            error=str(cleanup_error))
+                else:
+                    app = None
+                    key = (os.path.normcase(os.path.abspath(self._db_path)), pid, created)
+                    _pending_closes[key] = _PendingClose(self._db_path, record)
+            raise failure from None
         finally:
             # Exact files in our mkdtemp directory; no recursive deletion.
             for path in (neutral, os.path.splitext(neutral)[0] + ".laccdb"):

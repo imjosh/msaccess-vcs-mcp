@@ -26,6 +26,7 @@ from typing import Any
 PROCESS_SET_INFORMATION = 0x0200
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 PROCESS_TERMINATE = 0x0001
+SYNCHRONIZE = 0x00100000
 PROCESS_POWER_THROTTLING = 4
 PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1
 PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 0x1
@@ -68,8 +69,78 @@ def _kernel32():
     kernel32.TerminateProcess.restype = ctypes.c_bool
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
     kernel32.CloseHandle.restype = ctypes.c_bool
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.WaitForSingleObject.restype = ctypes.c_uint32
     _kernel32_mod = kernel32
     return kernel32
+
+
+class ExactProcess:
+    """Observe and terminate one creation-time-verified process handle."""
+
+    def __init__(self, kernel32, handle):
+        self._kernel32 = kernel32
+        self._handle = handle
+
+    def exited(self) -> bool | None:
+        try:
+            result = self._kernel32.WaitForSingleObject(self._handle, 0)
+        except Exception:
+            return None
+        if result == 0:
+            return True
+        if result == 258:
+            return False
+        return None
+
+    def force(self) -> bool:
+        try:
+            return bool(self._kernel32.TerminateProcess(self._handle, 1))
+        except Exception:
+            return False
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._kernel32.CloseHandle(self._handle)
+            self._handle = None
+
+
+def open_exact_process(pid: int, create_time: int | None) -> ExactProcess | None:
+    """Pin identity before observation or force. Unknown identity is refused."""
+    if sys.platform != "win32" or not pid or create_time is None:
+        return None
+    from .instance_registry import FILETIME, _coerce_filetime
+
+    kernel32 = _kernel32()
+    handle = kernel32.OpenProcess(
+        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+        False, int(pid),
+    )
+    if not handle:
+        return None
+    try:
+        try:
+            import win32process
+            times = win32process.GetProcessTimes(handle)
+            stamp = _coerce_filetime(times["CreationTime"] if isinstance(times, dict) else times[0])
+        except ImportError:
+            kernel32.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(FILETIME)] * 4
+            kernel32.GetProcessTimes.restype = ctypes.c_bool
+            creation, exit_time, kernel, user = (FILETIME() for _ in range(4))
+            if not kernel32.GetProcessTimes(handle, ctypes.byref(creation), ctypes.byref(exit_time),
+                                            ctypes.byref(kernel), ctypes.byref(user)):
+                return None
+            stamp = (int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime)
+        if stamp != create_time:
+            return None
+        process = ExactProcess(kernel32, handle)
+        handle = None
+        return process
+    except Exception:
+        return None
+    finally:
+        if handle is not None:
+            kernel32.CloseHandle(handle)
 
 
 def prefer_full_power_pid(pid: int) -> bool:

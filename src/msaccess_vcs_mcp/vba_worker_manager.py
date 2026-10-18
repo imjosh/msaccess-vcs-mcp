@@ -19,6 +19,7 @@ except ImportError:
 from .access_com.connection import (
     AccessConnection,
     ensure_access_visible,
+    owned_recovery_pending,
     recycle_owned_instance,
 )
 from .addin_integration import VCSAddinIntegration
@@ -179,7 +180,8 @@ class VBAWorkerManager:
         database_path: str,
         addin_path: str | None,
     ) -> dict[str, Any] | None:
-        if not self.recovery.should_probe(database_path):
+        pending = owned_recovery_pending(database_path)
+        if not pending and not self.recovery.should_probe(database_path):
             return None
 
         state = self.recovery.mark_probing(database_path)
@@ -193,6 +195,24 @@ class VBAWorkerManager:
             database=str(database_path),
             status=state.status,
         )
+
+        if pending:
+            try:
+                settled = recycle_owned_instance(
+                    database_path, settle_predecessor=self._settle_predecessor)
+            except Exception as exc:
+                log_diagnostic_event(
+                    "owned_instance_recycle_failed", database=str(database_path),
+                    error=str(exc))
+                settled = False
+            if not settled:
+                state = self.recovery.mark_failure(
+                    database_path, "Owned recovery is still pending for this target",
+                    "access_unresponsive")
+                return self._recoverable_error(
+                    state.last_error, state.error_pattern,
+                    hint="Wait for the previous recovery to settle, then retry.",
+                    recovery_status=state.status)
 
         probe_result = self.probe(database_path, addin_path)
         if probe_result.get("success"):
@@ -236,7 +256,8 @@ class VBAWorkerManager:
 
         recycled = False
         try:
-            recycled = recycle_owned_instance(database_path)
+            recycled = recycle_owned_instance(
+                database_path, settle_predecessor=self._settle_predecessor)
         except Exception as exc:
             log_diagnostic_event(
                 "owned_instance_recycle_failed",
@@ -283,6 +304,16 @@ class VBAWorkerManager:
             ),
             recovery_status=state.status,
         )
+
+    def _settle_predecessor(self) -> bool:
+        cls = type(self)
+        worker = cls._active_worker
+        if worker is not None:
+            worker.join(timeout=5.0)
+            if worker.is_alive():
+                return False
+            cls._active_worker = None
+        return True
 
     def _handle_run_failure(
         self,
@@ -661,6 +692,8 @@ def _find_or_open_access(database_path: str) -> tuple[Any, Any]:
     would quit the instance under ``ACCESS_VCS_LEAVE_ACCESS_OPEN=false``,
     leaving the ROT lookup on the next line to find nothing.
     """
+    if owned_recovery_pending(database_path):
+        raise RuntimeError("Owned recovery is still pending for this target")
     worker_app = VCSAddinIntegration._find_access_in_rot(database_path)
     if worker_app is not None:
         return worker_app, None

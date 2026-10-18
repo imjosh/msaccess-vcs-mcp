@@ -359,7 +359,7 @@ def test_failed_probe_recycles_owned_instance_then_retries(monkeypatch):
     )
 
     assert result["success"] is True
-    recycle.assert_called_once_with("C:\\db.accdb")
+    recycle.assert_called_once_with("C:\\db.accdb", settle_predecessor=manager._settle_predecessor)
     assert [c["operation"] for c in calls] == ["probe", "probe", "run_vba"]
 
 
@@ -393,7 +393,7 @@ def test_failed_probe_does_not_recycle_user_owned_instance(monkeypatch):
     assert result["success"] is False
     assert result["error_pattern"] == "access_unresponsive"
     assert "close and reopen" in result["hint"]
-    recycle.assert_called_once_with("C:\\db.accdb")
+    recycle.assert_called_once_with("C:\\db.accdb", settle_predecessor=manager._settle_predecessor)
     assert [c["operation"] for c in calls] == ["probe"]
 
 

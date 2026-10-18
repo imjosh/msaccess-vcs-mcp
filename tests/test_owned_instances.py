@@ -37,20 +37,30 @@ def _process_table(monkeypatch, *, alive, terminated=None):
     ``alive`` is consulted after each close attempt, so a test can make a
     process survive its Quit and then disappear on terminate.
     """
-    monkeypatch.setattr(
-        "msaccess_vcs_mcp.access_com.process_qos.process_is_alive",
-        lambda pid: alive(pid),
-    )
-    if terminated is not None:
-        monkeypatch.setattr(
-            "msaccess_vcs_mcp.access_com.process_qos.terminate_pid", terminated
-        )
+    class Process:
+        def exited(self):
+            value = alive(4242)
+            return None if value is None else not value
+        def force(self):
+            return terminated(4242) if terminated else False
+        def close(self):
+            pass
+    monkeypatch.setattr('msaccess_vcs_mcp.access_com.process_qos.open_exact_process',
+                        lambda pid, created: Process())
+
 
 
 @pytest.fixture(autouse=True)
-def _com_available():
-    with patch.object(conn_mod, "COM_AVAILABLE", True):
-        yield
+def _com_available(monkeypatch):
+    monkeypatch.setattr(conn_mod, 'COM_AVAILABLE', True)
+    monkeypatch.setattr('msaccess_vcs_mcp.addin_integration.VCSAddinIntegration._find_access_in_rot', lambda path: None)
+    monkeypatch.setattr(conn_mod, '_pending_closes', {})
+    monkeypatch.setattr(conn_mod, '_recycle_closed', {})
+    monkeypatch.setattr('msaccess_vcs_mcp.access_com.process_qos.prefer_full_power_app', lambda app: True)
+    monkeypatch.setattr(conn_mod.pythoncom, 'CoMarshalInterThreadInterfaceInStream', lambda iid, app: app)
+    monkeypatch.setattr(conn_mod.pythoncom, 'CoGetInterfaceAndReleaseStream', lambda stream, iid: stream)
+    monkeypatch.setattr(conn_mod.win32com.client, 'Dispatch', lambda app: app)
+    yield
 
 
 def _app_with_current_db(path, hwnd=1):
@@ -206,9 +216,16 @@ def _owned_app(monkeypatch, pid=4242, create_time=111):
 def test_close_owned_instances_holding_quits_only_owned(monkeypatch):
     registry.register_owned(4242, DB, create_time=111)
     app = _owned_app(monkeypatch)
-    _process_table(monkeypatch, alive=lambda _pid: False)
+    _process_table(monkeypatch, alive=lambda _pid: not app.Quit.called)
 
-    closed = close_owned_instances_holding([DB])
+    with (
+        patch.object(conn_mod, "pythoncom") as com,
+        patch.object(conn_mod, "win32com") as win32,
+    ):
+        com.CoMarshalInterThreadInterfaceInStream.return_value = object()
+        com.CoGetInterfaceAndReleaseStream.return_value = app
+        win32.client.Dispatch.return_value = app
+        closed = close_owned_instances_holding([DB])
 
     assert len(closed) == 1
     assert closed[0]["pid"] == 4242
@@ -248,9 +265,17 @@ def test_hung_instance_is_terminated_after_quit_times_out(monkeypatch):
     """
     registry.register_owned(4242, DB, create_time=111)
     _owned_app(monkeypatch)
-    monkeypatch.setattr(conn_mod, "_quit_with_timeout", lambda _app, _t: False)
+    class FailedQuit:
+        evidence = conn_mod._CloseEvidence(worker_completed=True, apartment_released=True)
+        def __init__(self, app): pass
+        def start(self): pass
+        def _update(self, **fields):
+            from dataclasses import replace
+            self.evidence = replace(self.evidence, **fields)
+        def join(self, timeout): return True
+    monkeypatch.setattr(conn_mod, "_QuitAttempt", FailedQuit)
 
-    states = iter([True, False, False])
+    states = iter([True, True, False])
     terminated: list[int] = []
 
     def _terminate(pid):
@@ -275,11 +300,20 @@ def test_surviving_instance_keeps_its_registry_record(monkeypatch):
     """
     registry.register_owned(4242, DB, create_time=111)
     _owned_app(monkeypatch)
-    monkeypatch.setattr(conn_mod, "_quit_with_timeout", lambda _app, _t: False)
+    class FailedQuit:
+        evidence = conn_mod._CloseEvidence(worker_completed=True, apartment_released=True)
+        def __init__(self, app): pass
+        def start(self): pass
+        def _update(self, **fields):
+            from dataclasses import replace
+            self.evidence = replace(self.evidence, **fields)
+        def join(self, timeout): return True
+    monkeypatch.setattr(conn_mod, "_QuitAttempt", FailedQuit)
     _process_table(
         monkeypatch, alive=lambda _pid: True, terminated=lambda _pid: False
     )
 
+    monkeypatch.setattr(conn_mod, "FORCE_SETTLEMENT_SECONDS", 0)
     assert close_owned_instances_holding([DB]) == []
     assert registry.is_owned(4242, 111) is True
 

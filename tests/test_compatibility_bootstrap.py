@@ -16,7 +16,16 @@ def host(monkeypatch, tmp_path):
     target = tmp_path / "target.accdb"
     target.write_bytes(b"target startup sentinel")
     app = Mock()
+    app._oleobj_ = app
     events = []
+    monkeypatch.setattr(connection, '_pending_closes', {})
+    monkeypatch.setattr(connection, '_recycle_closed', {})
+    monkeypatch.setattr(connection.pythoncom, 'CoMarshalInterThreadInterfaceInStream', lambda iid, obj: obj)
+    monkeypatch.setattr(connection.pythoncom, 'CoGetInterfaceAndReleaseStream', lambda stream, iid: stream)
+    monkeypatch.setattr(connection.win32com.client, 'Dispatch', lambda obj: obj)
+    process = Mock()
+    process.exited.return_value = True
+    monkeypatch.setattr(process_qos, 'open_exact_process', lambda *args: process)
     app.NewCurrentDatabase.side_effect = lambda path: (events.append("neutral"), Path(path).touch())
     app.OpenCurrentDatabase.side_effect = lambda path: events.append("target-autoexec")
     app.CloseCurrentDatabase.side_effect = lambda: events.append("close-neutral")
@@ -49,7 +58,7 @@ def test_refused_bootstrap_never_opens_or_mutates_target(host, monkeypatch, reas
     with sessions.target_admission("library.accda"):
         with pytest.raises(sessions.AdmissionError):
             connection.AccessConnection(str(target)).connect()
-    assert events == ["neutral", "handshake-refused", "quit-owned"]
+    assert events == ["neutral", "handshake-refused", "close-neutral", "quit-owned"]
     app.OpenCurrentDatabase.assert_not_called()
     assert target.read_bytes() == before
     assert not folder.exists()
@@ -100,3 +109,68 @@ def test_probe_timeout_does_not_make_blocking_com_cleanup_calls(host, monkeypatc
     records = instance_registry.list_owned()
     assert len(records) == 1 and records[0].create_time == 100
     assert Path(records[0].database_path) == folder / "bootstrap.accdb"
+    assert connection._pending_for(str(target))
+
+
+def test_early_refusal_releases_owner_and_traceback_proxies_before_wait(host, monkeypatch):
+    import gc
+    import weakref
+
+    _, _, target, _ = host
+    reference = []
+
+    class App:
+        _oleobj_ = object()
+        def NewCurrentDatabase(self, path):
+            Path(path).touch()
+
+    def create():
+        app = App()
+        reference.append(weakref.ref(app))
+        return app
+
+    def refuse(self, app, **kwargs):
+        try:
+            raise ValueError('inner refusal retains app in traceback')
+        except ValueError as cause:
+            raise sessions.AdmissionError(sessions.session_failure('server_incompatible')) from cause
+
+    class Attempt:
+        def __init__(self, app):
+            pass
+        def start(self):
+            pass
+
+    def settle(record, **kwargs):
+        gc.collect()
+        assert reference[0]() is None
+        return None
+
+    monkeypatch.setattr(connection, 'create_isolated_access_app', create)
+    monkeypatch.setattr(connection, '_QuitAttempt', Attempt)
+    monkeypatch.setattr(connection, '_close_owned_record', settle)
+    monkeypatch.setattr(VCSAddinIntegration, 'load_addin', refuse)
+    conn = connection.AccessConnection(str(target))
+    with pytest.raises(sessions.AdmissionError) as caught:
+        conn._get_admitted_access_app('library.accda')
+    assert caught.value.result['compatibility_reason'] == 'server_incompatible'
+    assert conn._app is None
+
+
+def test_timeout_barrier_survives_registry_pruning_without_new_com(host, monkeypatch):
+    _, _, target, _ = host
+    pending_worker = Mock()
+    pending_worker.is_alive.return_value = True
+    monkeypatch.setattr(VCSAddinIntegration, '_active_probe_thread', pending_worker)
+    def timeout(*args, **kwargs):
+        raise TimeoutError('admission is still running')
+    monkeypatch.setattr(VCSAddinIntegration, 'load_addin', timeout)
+    with pytest.raises(TimeoutError):
+        connection.AccessConnection(str(target))._get_admitted_access_app('library.accda')
+    monkeypatch.setattr(instance_registry, 'owned_records_for_paths', lambda paths: [])
+    def unexpected(*args):
+        pytest.fail('timeout retry attempted process or COM work before admission settled')
+    monkeypatch.setattr(process_qos, 'open_exact_process', unexpected)
+    assert connection.recycle_owned_instance(str(target)) is False
+    with pytest.raises(RuntimeError, match='recovery is still pending'):
+        connection.AccessConnection(str(target)).get_app()
