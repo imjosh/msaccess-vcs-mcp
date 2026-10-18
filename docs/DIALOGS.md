@@ -300,6 +300,14 @@ vcs_recover_dialogs(r"C:\db.accdb", policy="end_runtime_error")
 vcs_automation_status(r"C:\db.accdb")
 ```
 
+Target selection reports `matched_by: owned_registry`, `window_title`, or `pid`.
+A title is a selection hint, not proof of the open database. If title matches
+conflict with a creation-time-confirmed owned instance, selection returns
+`target_identity_conflict` without clicking or closing anything. Multiple
+confirmed owned hosts remain ambiguous even when only one title matches.
+Pass the intended `pid` and `create_time` explicitly to resolve ambiguity.
+Process identity and the window are checked again immediately before action.
+
 `action=close` closes a finished add-in window and does not cancel a running
 operation. If the gate is busy with an operation on the same database
 (compared after path normalisation), close is refused with

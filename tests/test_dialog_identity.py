@@ -236,6 +236,77 @@ def test_registry_identity_is_reverified_before_action(retained_registry, tool):
     assert backend.clicked == backend.closed == []
 
 
+@pytest.mark.parametrize("tool", ["list", "status", "dismiss", "recover", "close", "cancel"])
+def test_title_collision_refuses_conflicting_owned_target(retained_registry, tool):
+    retained_registry(1000)
+    backend = _registry_backend(tool, title="Custom business title")
+    windows = backend.list_windows() + [_main(hwnd=3, pid=20)]
+    backend.script_windows(windows)
+    backend.script_identity(20, ProcessIdentity("MSACCESS.EXE", 2000, True))
+    result = _registry_call(backend, tool)
+    assert result["success"] is False
+    assert result["error_pattern"] == "target_identity_conflict"
+    assert [item["pid"] for item in result["owned_candidates"]] == [10]
+    assert [item["pid"] for item in result["title_candidates"]] == [20]
+    assert backend.clicked == backend.closed == []
+
+
+@pytest.mark.parametrize("tool", ["dismiss", "recover", "close", "cancel"])
+def test_explicit_identity_resolves_title_collision(retained_registry, tool):
+    retained_registry(1000)
+    backend = _registry_backend(tool, title="Custom business title")
+    windows = backend.list_windows() + [_main(hwnd=3, pid=20)]
+    backend.script_windows(windows, windows, [_main(title="Custom business title"), windows[-1]])
+    backend.script_identity(20, ProcessIdentity("MSACCESS.EXE", 2000, True))
+    result = _registry_call(backend, tool, pid=10, create_time=1000)
+    assert result["success"] is True
+    assert result["pid"] == 10
+    assert backend.clicked == ([21] if tool in {"dismiss", "recover"} else [])
+    assert backend.closed == ([2] if tool in {"close", "cancel"} else [])
+
+
+def test_title_does_not_disambiguate_two_confirmed_owned_hosts(monkeypatch):
+    records = [instance_registry.OwnedInstance(10, DB, 1000),
+               instance_registry.OwnedInstance(20, DB, 2000)]
+    monkeypatch.setattr(dialog_recovery, "list_owned", lambda: records)
+    windows = [_main(), _main(hwnd=3, pid=20, title="Custom business title")]
+    backend = ScriptedBackend(windows, {20: ProcessIdentity("MSACCESS.EXE", 2000, True)})
+    result = dialog_recovery.resolve_target(windows, DB, backend)
+    assert result["success"] is False
+    assert result["error_pattern"] == "ambiguous_instance"
+    assert {item["pid"] for item in result["candidates"]} == {10, 20}
+
+
+def test_title_hint_is_reported_separately_from_owned_database_identity():
+    windows = [_main()]
+    result = dialog_recovery.resolve_target(windows, DB, ScriptedBackend(windows))
+    assert result["matched_by"] == "window_title"
+    assert result["identity_confirmed"] is True
+
+
+@pytest.mark.parametrize("tool", ["list", "status", "dismiss", "recover", "close", "cancel"])
+@pytest.mark.parametrize("selection", ["owned_registry", "window_title", "pid"])
+def test_public_tools_preserve_initial_selection_evidence(retained_registry, tool, selection):
+    if selection == "owned_registry":
+        retained_registry(1000)
+    title = "Northwind : Database" if selection == "window_title" else "Custom business title"
+    backend = _registry_backend(tool, title=title)
+    kwargs = {"pid": 10, "create_time": 1000} if selection == "pid" else {}
+    result = _registry_call(backend, tool, **kwargs)
+    assert result["success"] is True
+    assert result["matched_by"] == selection
+
+
+def test_listing_pins_identity_from_initial_automatic_selection(retained_registry):
+    retained_registry(1000)
+    backend = _registry_backend("list")
+    backend.script_identity(10, ACCESS, ProcessIdentity("MSACCESS.EXE", 2000, True))
+    result = _registry_call(backend, "list")
+    assert result["success"] is False
+    assert result["error_pattern"] == "process_identity_mismatch"
+    assert result["matched_by"] == "owned_registry"
+
+
 def test_unreadable_creation_time_refuses_click():
     backend = ScriptedBackend([_main(), _msgbox()], {10: ProcessIdentity("MSACCESS.EXE", None, True)})
     result = _dismiss(backend, pid=10)

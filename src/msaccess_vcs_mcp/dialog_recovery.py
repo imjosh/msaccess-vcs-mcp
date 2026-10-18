@@ -633,14 +633,19 @@ def resolve_target(
         and record.create_time == _ident(record.pid).create_time
     }
 
-    # Prefer the intersection when both sources agree on a live window.
     both = title_pids & owned_pids
-    if len(both) == 1:
-        candidates = both
-    elif title_pids:
-        candidates = title_pids
-    else:
-        candidates = owned_pids
+    if title_pids and owned_pids and not both:
+        return {
+            "success": False,
+            "error_pattern": "target_identity_conflict",
+            "error": (
+                "Window titles and the confirmed owned database instance disagree. "
+                "Pass the intended pid and create_time explicitly. Nothing was touched."
+            ),
+            "owned_candidates": [_describe(item) for item in sorted(owned_pids)],
+            "title_candidates": [_describe(item) for item in sorted(title_pids)],
+        }
+    candidates = owned_pids or title_pids
 
     if len(candidates) == 0:
         if dead_owned and not unconfirmed_pids:
@@ -673,7 +678,7 @@ def resolve_target(
             "error": "More than one Access window matches this database. Pass pid to choose one.",
             "candidates": [_describe(item) for item in sorted(candidates)],
         }
-    return _accept(next(iter(candidates)), "database")
+    return _accept(next(iter(candidates)), "owned_registry" if owned_pids else "window_title")
 
 
 def _identity_refusal(report: dict[str, Any]) -> dict[str, Any] | None:
@@ -1529,6 +1534,7 @@ def _settle_and_reinspect(
         create_time=preview.get("create_time"),
         responsive=_responsive_for(windows, pid, live, timeout),
     )
+    follow["matched_by"] = preview["matched_by"]
     return _with_readiness(follow, _dialog_records(windows, pid)), pending
 
 
@@ -1544,12 +1550,15 @@ def list_dialogs(
     live = backend or _default_backend()
     windows = live.list_windows()
     target_pid = pid
+    matched_by = "pid"
     if target_pid is None:
         preview = resolve_target(windows, database_path, live, pid=None, create_time=create_time)
         if not preview.get("success"):
             preview["timeout_seconds"] = timeout
             return preview
         target_pid = int(preview["pid"])
+        create_time = preview.get("create_time")
+        matched_by = preview["matched_by"]
     responsive = _responsive_for(windows, int(target_pid), live, timeout)
     report = inspect_windows(
         windows,
@@ -1559,6 +1568,7 @@ def list_dialogs(
         create_time=create_time,
         responsive=responsive,
     )
+    report["matched_by"] = matched_by
     report["timeout_seconds"] = timeout
     return report
 
@@ -1594,6 +1604,7 @@ def dismiss_dialog(
         backend=live,
         click_timeout_sec=timeout,
     )
+    result["matched_by"] = preview["matched_by"]
     if not result.get("success"):
         result["timeout_seconds"] = timeout
         return result
@@ -1644,6 +1655,7 @@ def recover_dialogs(
         backend=live,
         click_timeout_sec=timeout,
     )
+    result["matched_by"] = preview["matched_by"]
     if policy.strip().lower() == "report" or not result.get("success"):
         result["timeout_seconds"] = timeout
         return result
