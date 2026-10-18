@@ -39,7 +39,6 @@ operate on users' Access databases; contributor work here changes the bridge.
 
 ## Active cross-repo work
 
-`feat/noninteractive-dialogs` uses the parent-folder tracker shared with
-`msaccess-vcs-addin`: `../issues/INDEX.md` and
-`../specs/dialog-handling-hardening.md`. For work in that tracker, pick a `todo`
-issue with completed blockers and update both its file and index.
+For cross-repo task selection, read `../issues/INDEX.md` and follow its current work order,
+then the selected issue and `../specs/ordinary-use-readiness.md`. Update issue and index
+status together. Historical shutdown handoffs do not override accepted scheduling.
