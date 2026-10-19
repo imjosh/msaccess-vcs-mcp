@@ -925,15 +925,16 @@ def _gate_snapshot(database_path: str | None) -> dict[str, Any]:
     current = get_access_gate().current_in_flight()
     if current is None:
         return {"gate_busy": False, "operation": None}
-    return {
-        "gate_busy": True,
-        "operation": {
-            "tool": current.tool,
-            "database": current.database,
-            "elapsed_ms": round((time.perf_counter() - current.started_at) * 1000, 2),
-            "same_database": _same_path(database_path, current.database),
-        },
+    operation = {
+        "tool": current.tool,
+        "database": current.database,
+        "elapsed_ms": round((time.perf_counter() - current.started_at) * 1000, 2),
+        "same_database": _same_path(database_path, current.database),
     }
+    if current.attempt is not None:
+        view = current.attempt.snapshot()
+        operation.update({key: view[key] for key in ("call_id", "phase", "caller", "dispatch", "overdue_ms") if key in view})
+    return {"gate_busy": True, "operation": operation}
 
 
 def inspect_windows(

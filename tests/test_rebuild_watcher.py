@@ -318,7 +318,7 @@ def test_rebuild_addin_returns_refusal_without_watch(tmp_path, monkeypatch):
 
     gate = MagicMock()
 
-    async def _exclusive(_tool, _db, fn, is_async, /, *args, **kwargs):
+    async def _exclusive(_tool, _db, fn, is_async, /, *args, deadline_seconds=None, **kwargs):
         return await fn(*args, **kwargs) if is_async else fn(*args, **kwargs)
 
     gate.run_exclusive = _exclusive
@@ -362,7 +362,7 @@ def test_rebuild_addin_emits_starting_access_before_launch(tmp_path, monkeypatch
 
     gate = MagicMock()
 
-    async def _exclusive(_tool, _db, fn, is_async, /, *args, **kwargs):
+    async def _exclusive(_tool, _db, fn, is_async, /, *args, deadline_seconds=None, **kwargs):
         return await fn(*args, **kwargs) if is_async else fn(*args, **kwargs)
 
     gate.run_exclusive = _exclusive
@@ -412,7 +412,7 @@ def test_rebuild_addin_watches_after_launch(tmp_path, monkeypatch):
     gate = MagicMock()
     released = {"held": True}
 
-    async def _exclusive(_tool, _db, fn, is_async, /, *args, **kwargs):
+    async def _exclusive(_tool, _db, fn, is_async, /, *args, deadline_seconds=None, **kwargs):
         result = await fn(*args, **kwargs) if is_async else fn(*args, **kwargs)
         released["held"] = False
         return result
@@ -478,7 +478,7 @@ def test_rebuild_addin_passes_callback_identity_to_worker(tmp_path, monkeypatch)
     monkeypatch.setattr(tools_module, "_get_operation_manager", FakeManager)
     monkeypatch.setattr(tools_module, "_is_installed_addin_path", lambda _p: False)
 
-    def _execute(_database, _function, args, _timeout=None, *, on_admitted=None):
+    def _execute(_database, _function, args, *, on_admitted=None):
         if on_admitted:
             args = on_admitted(args)
         captured["call_args"] = args
@@ -488,7 +488,7 @@ def test_rebuild_addin_passes_callback_identity_to_worker(tmp_path, monkeypatch)
 
     gate = MagicMock()
 
-    async def _exclusive(_tool, _db, fn, is_async, /, *args, **kwargs):
+    async def _exclusive(_tool, _db, fn, is_async, /, *args, deadline_seconds=None, **kwargs):
         return await fn(*args, **kwargs) if is_async else fn(*args, **kwargs)
 
     gate.run_exclusive = _exclusive

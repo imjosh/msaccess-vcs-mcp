@@ -399,7 +399,7 @@ def test_rebuild_addin_closes_owned_holders(tmp_path, monkeypatch):
 
     gate = MagicMock()
 
-    async def _exclusive(_tool, _db, fn, is_async, /, *args, **kwargs):
+    async def _exclusive(_tool, _db, fn, is_async, /, *args, deadline_seconds=None, **kwargs):
         order.append("gate")
         return await fn(*args, **kwargs) if is_async else fn(*args, **kwargs)
 

@@ -33,7 +33,7 @@ def boundary(monkeypatch):
     monkeypatch.setattr(tools, "ensure_session", lambda *args: "accepted-session")
     monkeypatch.setattr(tools, "log_code_execution", lambda *args, **kwargs: None)
     dispatch = MagicMock()
-    monkeypatch.setattr(tools, "_run_application_call_with_timeout", dispatch)
+    monkeypatch.setattr(tools, "_run_target", lambda _permit, app, procedure, args: dispatch(app, procedure, args))
 
     def call(raw, args=None, function="ExampleFunction", transport=None):
         dispatch.return_value = transport if transport is not None else {"success": True, "result": raw}
@@ -150,19 +150,12 @@ def test_session_refusal_never_dispatches(boundary, monkeypatch):
     dispatch.assert_not_called()
 
 
-@pytest.mark.parametrize("transport", [
-    {"success": False, "error": RuntimeError("worker failure")},
-    {"success": False, "timed_out": True, "error": "timeout", "duration_ms": 100},
-])
-def test_worker_failure_and_timeout_never_retry(boundary, transport):
+def test_target_failure_is_reported_dispatched_and_never_retried(boundary):
     call, dispatch = boundary
-    result = call(None, transport=transport)
+    result = call(None, transport={"success": False, "error": RuntimeError("target failure")})
     assert result["success"] is False
-    if transport.get("timed_out"):
-        assert result["timed_out"] is True
-        assert result["error_pattern"] == "timeout"
-    else:
-        assert "worker failure" in result["error"]
+    assert "target failure" in result["error"]
+    assert result["dispatch"] == "dispatched"
     dispatch.assert_called_once()
 
 

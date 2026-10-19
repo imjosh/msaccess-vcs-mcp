@@ -1,4 +1,6 @@
-"""Tests for vcs_call_vba's timeout and rebuild-status correlation.
+"""Tests for vcs_call_vba's dispatcher and rebuild-status correlation.
+
+Deadline behaviour runs through the real gate in ``test_call_vba_deadline.py``.
 
 Refusing the installed add-in as a target is the ``vcs_tool`` wrapper's job now and
 lives in ``test_installed_addin_guard.py``.
@@ -10,8 +12,6 @@ repository to the code under test; nothing is read from disk.
 from __future__ import annotations
 
 import json
-import threading
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -34,13 +34,10 @@ def _call_vba(*args, **kwargs):
 
 
 def _fake_access(monkeypatch, run_result=None, run_side_effect=None):
-    """Wire both the connection and the worker's ROT lookup to one fake Application.
+    """Wire the connection to one fake Application and return it.
 
-    The dispatch runs on a worker thread that re-acquires Access from the Running
-    Object Table rather than reusing the connection's proxy, because a COM pointer
-    belongs to the apartment that made it. A test that stubs only AccessConnection
-    therefore never reaches its own mock. Returns the fake so callers can assert on
-    what it received.
+    The target is reached through the connection's own proxy, on the thread that
+    validated the session, so callers can assert on what it received.
     """
     monkeypatch.setattr(tools_module.VCSAddinIntegration, "load_addin", lambda *args, **kwargs: True)
     app = MagicMock()
@@ -63,11 +60,6 @@ def _fake_access(monkeypatch, run_result=None, run_side_effect=None):
             return app, MagicMock()
 
     monkeypatch.setattr(tools_module, "AccessConnection", _Conn)
-    monkeypatch.setattr(
-        tools_module.VCSAddinIntegration,
-        "_find_access_in_rot",
-        staticmethod(lambda _db_path: app),
-    )
     return app
 
 
@@ -115,35 +107,6 @@ def test_development_copy_dispatches(_config_installed_addin, monkeypatch):
     assert result["success"] is True
 
 
-def test_call_vba_timeout_returns_structured_json(_config_installed_addin, monkeypatch, tmp_path):
-    db = tmp_path / "host.accdb"
-    db.write_bytes(b"x")
-    monkeypatch.setattr(
-        tools_module,
-        "validate_database_path",
-        lambda p: Path(p),
-    )
-    monkeypatch.setattr(tools_module, "get_call_vba_timeout", lambda _t=None: 0.05)
-
-    def slow_run(*_a, **_k):
-        time.sleep(0.2)
-        return "never"
-
-    _fake_access(monkeypatch, run_side_effect=slow_run)
-
-    result = _call_vba(
-        str(db),
-        "VCS.API",
-        ["GetVCSVersion"],
-        timeout_seconds=0.05,
-    )
-
-    assert result["success"] is False
-    assert result["timed_out"] is True
-    assert result["error_pattern"] == "timeout"
-    assert result["recoverable"] is True
-
-
 def test_rebuild_snapshot_captured_before_dispatch(
     _config_installed_addin, monkeypatch, tmp_path
 ):
@@ -181,38 +144,6 @@ def test_rebuild_snapshot_captured_before_dispatch(
     assert result["rebuild_status_before"]["status"] == "complete"
     assert result["rebuild_status_before"]["updated"] == "2026-08-17 16:46:20"
     assert "mtime" in result["rebuild_status_before"]
-
-
-def test_rebuild_snapshot_included_on_timeout(
-    _config_installed_addin, monkeypatch, tmp_path
-):
-    source = tmp_path / "src"
-    logs = source / "logs"
-    logs.mkdir(parents=True)
-    (logs / "rebuild-status.json").write_text(
-        json.dumps({"status": "complete", "updated": "old"}),
-        encoding="utf-8",
-    )
-
-    host = tmp_path / "host.accdb"
-    host.write_bytes(b"x")
-    monkeypatch.setattr(
-        tools_module,
-        "validate_database_path",
-        lambda p: Path(p),
-    )
-    monkeypatch.setattr(tools_module, "get_call_vba_timeout", lambda _t=None: 0.05)
-    _fake_access(monkeypatch, run_side_effect=lambda *_a, **_k: time.sleep(0.2))
-
-    result = _call_vba(
-        str(host),
-        "VCS.API",
-        ["RebuildAddIn", str(source)],
-        timeout_seconds=0.05,
-    )
-
-    assert result["timed_out"] is True
-    assert result["rebuild_status_before"]["status"] == "complete"
 
 
 def test_is_addin_api_resolved_name():
@@ -315,10 +246,10 @@ def test_raw_target_call_uses_accepted_dispatcher(_config_installed_addin, monke
     monkeypatch.setattr(tools_module, "validate_database_path", lambda p: Path(p))
     app = _fake_access(monkeypatch, run_result="echo")
     captured = {}
-    def bounded(_app, procedure, args, *_rest):
+    def bounded(_permit, _app, procedure, args):
         captured.update(procedure=procedure, args=args)
         return {"success": True, "result": ["msaccess-vcs.call-vba-result/1", "returned", "echo"]}
-    monkeypatch.setattr(tools_module, "_run_application_call_with_timeout", bounded)
+    monkeypatch.setattr(tools_module, "_run_target", bounded)
     result = _call_vba(REPO_ADDIN, "TargetEcho", ["hello"])
     assert result["success"]
     assert captured["procedure"].endswith(".APIExecute")

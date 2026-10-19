@@ -37,7 +37,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from mcp.server.fastmcp import FastMCP, Context
@@ -51,7 +51,15 @@ from .access_com.connection import (
 )
 from .access_com.dao_helpers import list_query_defs, list_table_defs
 from .access_com.process_qos import list_access_pids, prefer_full_power_if_created
-from .access_gate import EXEMPT_TOOLS, ServerLoopContext, get_access_gate
+from .access_gate import (
+    EXEMPT_TOOLS,
+    Attempt,
+    DispatchPermit,
+    ServerLoopContext,
+    attempt_timeout_reply,
+    current_attempt,
+    get_access_gate,
+)
 from .compatibility_session import AdmissionError, connection_scope, ensure_session, target_admission
 from .compatibility import (
     ADDIN_DEPENDENT_TOOLS, compatibility_result, inspect_installed_addin,
@@ -1070,7 +1078,7 @@ def _then(func, finish):
     return run
 
 
-def vcs_tool(name: str):
+def vcs_tool(name: str, deadline: Callable[[dict[str, Any]], float] | None = None):
     """Register an MCP tool with lazy .env discovery, config reload, and logging.
 
     Composes these concerns in the correct order so that every tool call:
@@ -1095,6 +1103,10 @@ def vcs_tool(name: str):
     loop of its own and reports progress through ``ServerLoopContext``. One
     Access operation runs at a time across all Cursor windows sharing this
     server process.
+
+    ``deadline`` maps the call's bound arguments to its total budget in
+    seconds, counted from when the request arrived. The caller then gets the
+    gate's timeout reply when the budget runs out, wherever the call is.
     """
     def decorator(func):
         is_async_body = inspect.iscoroutinefunction(func)
@@ -1159,6 +1171,7 @@ def vcs_tool(name: str):
                     return exc.result
 
         async def with_connection(*args, **kwargs):
+            received_at = time.monotonic()
             # ``mcp.get_context()`` returns a Context bound to the active
             # request even when the tool itself doesn't declare a ctx
             # parameter -- the lowlevel server sets the contextvar before
@@ -1223,15 +1236,28 @@ def vcs_tool(name: str):
                 _claim_call()
                 return finished(*a, **kw)
 
-            return await gate.run_exclusive(
+            deadline_seconds = None
+            if deadline is not None:
+                deadline_seconds = deadline(inspect.signature(func).bind_partial(*args, **kwargs).arguments)
+
+            result = await gate.run_exclusive(
                 name,
                 str(database) if database is not None else None,
                 body,
                 is_async_body,
                 *args,
                 on_worker_finished=cleanup,
+                deadline_seconds=deadline_seconds,
+                received_at=received_at,
                 **kwargs,
             )
+            if deadline_seconds is not None and isinstance(result, dict) and "gate_retained" in result:
+                log_diagnostic_event(
+                    "caller_deadline_expired", tool=name,
+                    database=str(database) if database is not None else None,
+                    **{key: result.get(key) for key in ("call_id", "phase", "dispatch", "gate_retained")},
+                )
+            return result
 
         return mcp.tool()(with_refresh)
     return decorator
@@ -2098,15 +2124,28 @@ async def vcs_rebuild_addin(
             # regardless of which database that instance has open, so the
             # installed path is matched against loaded libraries too.
             installed = get_config().get("ACCESS_VCS_ADDIN_PATH")
-            close_owned_instances_holding(
+            closed = close_owned_instances_holding(
                 [str(host_path)],
                 [str(installed)] if installed else [],
             )
+            attempt = current_attempt()
+            if closed and attempt is not None:
+                # A launch timeout must not read as "nothing happened".
+                attempt.annotate(owned_instances_closed=len(closed))
 
-            return _execute_call_vba(
-                str(host_path), "VCS.API", ["RebuildAddIn", str(src_path)],
-                on_admitted=_admitted_args,
-            )
+            try:
+                return _execute_call_vba(
+                    str(host_path), "VCS.API", ["RebuildAddIn", str(src_path)],
+                    on_admitted=_admitted_args,
+                )
+            finally:
+                # The tool's own cleanup ran when its caller stopped waiting; an
+                # operation registered after that has no reader, so release it here.
+                if (
+                    attempt is not None and op_manager is not None and operation_id is not None
+                    and attempt.snapshot()["caller"] == "expired"
+                ):
+                    op_manager.unregister_operation(operation_id)
 
         # The COM launch reports nothing until RebuildAddIn returns, so emit
         # once beforehand rather than fake steps we cannot observe.
@@ -2120,6 +2159,7 @@ async def vcs_rebuild_addin(
             str(host_path),
             _launch,
             False,
+            deadline_seconds=get_call_vba_timeout(None),
         )
         if isinstance(launch, dict) and launch.get("error_pattern") == "server_busy":
             return launch
@@ -2854,7 +2894,7 @@ def vcs_execute_sql(
         return {"success": False, "error": str(e)}
 
 
-@vcs_tool("vcs_call_vba")
+@vcs_tool("vcs_call_vba", deadline=lambda arguments: get_call_vba_timeout(arguments.get("timeout_seconds")))
 def vcs_call_vba(
     database_path: str,
     function_name: str,
@@ -2892,15 +2932,24 @@ def vcs_call_vba(
         function_name: Fully qualified function name (e.g., "ModuleName.FunctionName"),
             or a VCS add-in alias such as "VCS.API"
         args: Optional list of string arguments to pass to the function
-        timeout_seconds: Optional server-side timeout. Defaults to
+        timeout_seconds: Total time the server spends on this request: waiting
+            for the Access slot, connecting, loading the add-in, validating the
+            session and running the function. Defaults to
             ACCESS_VCS_CALL_VBA_TIMEOUT_SEC (45 seconds). Keep below the MCP
             client's request timeout or the client may return -32001 with no JSON.
+            On expiry the reply has ``error_pattern: "timeout"`` and ``dispatch``:
+            ``not_dispatched`` means the function will never run for this
+            request (``retry_safe``); ``possibly_dispatched`` means it may still
+            be running, so do not retry blindly. While ``gate_retained`` is true
+            other Access tools answer ``server_busy`` naming its ``call_id``.
+            A failure raised by the function itself reports ``dispatched``: the
+            server invoked it, whether or not Access completed any of its work.
 
     Returns:
         Dictionary with the function's return value or error. RebuildAddIn calls
         also include ``rebuild_status_file`` and ``rebuild_status_before``.
     """
-    return _execute_call_vba(database_path, function_name, args, timeout_seconds)
+    return _execute_call_vba(database_path, function_name, args)
 
 
 _CALL_VBA_RESULT_TAG = "msaccess-vcs.call-vba-result/1"
@@ -2949,12 +2998,18 @@ def _execute_call_vba(
     database_path: str,
     function_name: str,
     args: list[str] | None = None,
-    timeout_seconds: float | None = None,
     *, on_admitted=None,
 ) -> dict[str, Any]:
     """Invoke Application.Run and normalize the result. Used by vcs_call_vba
     and by vcs_rebuild_addin for the launch phase only.
+
+    The gated call's deadline is enforced at one point: after the session is
+    validated, the target is reached only with a dispatch permit, which is
+    refused once the caller has stopped waiting. ``on_admitted`` runs only
+    after that permit, just before the target.
     """
+    # Outside the gate (direct calls in tests) there is no caller deadline.
+    attempt = current_attempt() or Attempt(0, "vcs_call_vba", str(database_path))
     rebuild_status_file: str | None = None
     rebuild_status_before: dict[str, Any] | None = None
 
@@ -2987,43 +3042,47 @@ def _execute_call_vba(
         )
         if is_rebuild:
             rebuild_status_file, rebuild_status_before = _snapshot_rebuild_status(str(call_args[1]))
+        attempt.annotate(function=resolved_name)
+        if rebuild_status_file:
+            attempt.annotate(rebuild_status_file=rebuild_status_file)
+        if rebuild_status_before is not None:
+            attempt.annotate(rebuild_status_before=rebuild_status_before)
 
-        timeout = get_call_vba_timeout(timeout_seconds)
-
+        attempt.begin_validation()
         with AccessConnection(str(db_path)) as conn:
             app, db = conn.connect()
+            if not attempt.checkpoint():
+                return attempt_timeout_reply(attempt, gate_retained=False)
 
             addin = VCSAddinIntegration(get_config().get("ACCESS_VCS_ADDIN_PATH"))
             addin.load_addin(app, db_path=str(db_path))
-            if _is_addin_api_resolved_name(resolved_name):
+            # The session check runs add-in procedures; an expired call stops here.
+            if not attempt.checkpoint():
+                return attempt_timeout_reply(attempt, gate_retained=False)
+            api_call = _is_addin_api_resolved_name(resolved_name)
+            if api_call:
                 if not resolved_name.lower().endswith(".api") or not call_args:
                     from .compatibility_session import session_failure
                     return session_failure("legacy_automation_entry_point")
                 envelope = ensure_session(app, addin.addin_path)
-                if on_admitted is not None:
-                    call_args = on_admitted(call_args)
-                run_result = _run_application_call_with_timeout(
-                    app, resolved_name[:-3] + "APIExecute", [envelope, *call_args], timeout, str(db_path)
-                )
+                procedure = resolved_name[:-3] + "APIExecute"
             else:
                 # Relay raw target calls through the same enforcing add-in boundary.
                 envelope = ensure_session(app, addin.addin_path)
                 library = os.path.splitext(os.path.abspath(addin.addin_path))[0]
-                run_result = _run_application_call_with_timeout(
-                    app, library + ".APIExecute",
-                    [envelope, "CallVBAResult", resolved_name, json.dumps(call_args)], timeout, str(db_path)
-                )
+                procedure = library + ".APIExecute"
 
-            if run_result.get("timed_out"):
-                return _with_rebuild_context({
-                    "success": False,
-                    "error": run_result["error"],
-                    "error_pattern": "timeout",
-                    "recoverable": True,
-                    "timed_out": True,
-                    "function": resolved_name,
-                    "duration_ms": run_result.get("duration_ms"),
-                })
+            permit = attempt.permit_dispatch()
+            if permit is None:
+                # The caller's deadline passed during validation; the target is never reached.
+                return attempt_timeout_reply(attempt, gate_retained=False)
+            if api_call:
+                if on_admitted is not None:
+                    call_args = on_admitted(call_args)
+                run_args = [envelope, *call_args]
+            else:
+                run_args = [envelope, "CallVBAResult", resolved_name, json.dumps(call_args)]
+            run_result = _run_target(permit, app, procedure, run_args)
 
             if not run_result.get("success"):
                 exc = run_result.get("error")
@@ -3031,6 +3090,7 @@ def _execute_call_vba(
                     "success": False,
                     "error": _describe_run_failure(exc, resolved_name, function_name),
                     "function": resolved_name,
+                    "dispatch": "dispatched",
                 })
 
             result = run_result["result"]
@@ -3298,70 +3358,17 @@ def _log_rebuild_call_result(result: Any) -> None:
     )
 
 
-def _run_application_call_with_timeout(
-    app: Any,
-    resolved_name: str,
-    call_args: list[str],
-    timeout_seconds: float,
-    db_path: str | None = None,
-) -> dict[str, Any]:
-    """Run ``Application.Run`` in a daemon thread with a hard join timeout.
+def _run_target(permit: DispatchPermit, app: Any, procedure: str, call_args: list[Any]) -> dict[str, Any]:
+    """Reach the target once, on the apartment that validated the session.
 
-    The thread needs its own COM apartment and its own proxy. Handing it the caller's
-    STA proxy fails before it ever reaches Access -- "CoInitialize has not been called"
-    while the thread has no apartment, RPC_E_WRONG_THREAD once it does -- which is what
-    made RebuildAddIn unreachable through this tool. Re-acquiring the instance from the
-    Running Object Table yields an apartment-local proxy, the approach
-    ``VCSAddinIntegration`` already uses for its probe. Marshalling the caller's pointer
-    across instead would serialize the call back onto the calling thread and defeat the
-    timeout this function exists to impose.
-
-    Without ``db_path`` there is nothing to look up, so the caller's proxy is used as
-    before: no worse than it was, and the timeout may simply not fire.
+    ``Application.Run`` uses the proxy that ``connect`` made on this thread, so it
+    binds the same Access instance the session check did. The gate holds its
+    slot until this returns, however long the caller waits.
     """
-    result_box: dict[str, Any] = {}
-    start = time.perf_counter()
-
-    def worker() -> None:
-        import pythoncom
-
-        try:
-            pythoncom.CoInitialize()
-            try:
-                worker_app = (
-                    VCSAddinIntegration._find_access_in_rot(db_path) if db_path else app
-                )
-                if worker_app is None:
-                    raise RuntimeError(
-                        f"Cannot find Access instance for {db_path} from the worker "
-                        "thread. The Access application may have been closed."
-                    )
-                result_box["result"] = worker_app.Run(resolved_name, *call_args)
-                result_box["success"] = True
-            finally:
-                try:
-                    pythoncom.CoUninitialize()
-                except Exception:
-                    pass
-        except Exception as exc:
-            result_box["success"] = False
-            result_box["error"] = exc
-
-    thread = threading.Thread(target=worker, daemon=True, name="vcs-call-vba")
-    thread.start()
-    thread.join(timeout=timeout_seconds)
-    duration_ms = round((time.perf_counter() - start) * 1000, 2)
-
-    if thread.is_alive():
-        return {
-            "success": False,
-            "timed_out": True,
-            "error": f"VBA function call timed out after {timeout_seconds} seconds",
-            "duration_ms": duration_ms,
-        }
-
-    result_box["duration_ms"] = duration_ms
-    return result_box
+    try:
+        return {"success": True, "result": permit.run(app, procedure, *call_args)}
+    except Exception as exc:
+        return {"success": False, "error": exc}
 
 
 @vcs_tool("vcs_run_vba")

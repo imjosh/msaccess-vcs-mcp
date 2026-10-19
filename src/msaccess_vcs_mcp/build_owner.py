@@ -41,10 +41,10 @@ def _interpreter_exit():
     stop_observers()
 
 
-# Interpreter exit joins the apartment executor's worker before atexit
-# handlers run, and a pending build's retire() waits on that worker. These
-# hooks run before the join, newest first, and concurrent.futures registered
-# its join when access_gate imported it above.
+# Interpreter exit waits for the gate's call in flight before atexit
+# handlers run, and a pending build's retire() runs inside that call. These
+# hooks run newest first, so this one runs before the gate's wait, which
+# access_gate registered when it was imported above.
 threading._register_atexit(_interpreter_exit)
 
 
