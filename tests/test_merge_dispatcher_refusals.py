@@ -46,13 +46,17 @@ def public_merge(tmp_path, monkeypatch):
                 log.write_text("Unrelated earlier operation", encoding="utf-8")
                 os.utime(log, (1, 1))
             result = asyncio.run(tools.vcs_import_objects(str(db), str(src)))
-        assert manager.pending_count() == 0
+        uncertain = route in {"unknown", "exception"}
+        assert manager.pending_count() == int(uncertain)
         manager.wait_for_completion.assert_not_awaited()
-        if callback:
+        if uncertain:
+            manager.unregister_operation.assert_not_called()
+            assert manager.route_callback(result["operation_id"], {"type": "complete"})
+        elif callback:
             manager.unregister_operation.assert_called_once()
         assert fake.dispatched == (
             ([] if not callback else [("APIAsync", "MergeBuild")])
-            + ([] if route == "inline" else [("API", "MergeBuild")])
+            + ([] if callback else [("API", "MergeBuild")])
         )
         assert fake.arguments[-1] == ("block",)
         return result
@@ -65,6 +69,13 @@ def public_merge(tmp_path, monkeypatch):
 @pytest.mark.parametrize("tuple_return", [False, True])
 def test_public_merge_preserves_refusal(public_merge, addin_start_refusal, route, tuple_return):
     result = public_merge(addin_start_refusal["raw"], route, tuple_return)
+    if route in {"unknown", "exception"}:
+        assert result["success"] is False
+        assert result["completion_unconfirmed"] is True
+        assert result["error_pattern"] == "completion_unconfirmed"
+        assert "started" not in result
+        assert result["log_path"] is None
+        return
     for key, value in addin_start_refusal["expected"].items():
         if key != "api_refused":  # The public import shape exposes the pattern and text.
             assert result[key] == value
@@ -84,6 +95,13 @@ def test_public_merge_start_and_decision_precedence(public_merge, route, tuple_r
     if decision:
         payload.update(decision_required=True, decisions=journal, error_pattern="other")
     result = public_merge(json.dumps(payload), route, tuple_return)
+    if route in {"unknown", "exception"}:
+        assert result["success"] is False
+        assert result["completion_unconfirmed"] is True
+        assert result["error_pattern"] == "completion_unconfirmed"
+        assert "started" not in result
+        assert result["log_path"] is None
+        return
     assert result["success"] is False
     assert result["log_path"] is None
     assert "log_excerpt" not in result
@@ -106,6 +124,13 @@ def test_public_merge_preserves_explicit_refusal_log(public_merge, tmp_path, rou
         log_key: str(own_log),
     })
     result = public_merge(raw, route, True)
+    if route in {"unknown", "exception"}:
+        assert result["success"] is False
+        assert result["completion_unconfirmed"] is True
+        assert result["error_pattern"] == "completion_unconfirmed"
+        assert "started" not in result
+        assert result["log_path"] is None
+        return
     assert result["error"] == "Another API command is still running."
     assert result["error_pattern"] == "operation_already_running"
     assert result["log_path"] == str(own_log)

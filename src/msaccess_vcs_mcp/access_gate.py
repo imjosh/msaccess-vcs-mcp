@@ -26,7 +26,7 @@ import itertools
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -40,6 +40,16 @@ except ImportError:
 DEFAULT_BUSY_WAIT_SEC = 15.0
 SLOT_POLL_SEC = 0.02
 _call_ids = itertools.count(1)
+_retention = contextvars.ContextVar("build_retention", default=None)
+
+
+def _retain_build_host(finish: Callable[[], None]) -> None:
+    lifetime = _retention.get()
+    if lifetime is None:
+        raise RuntimeError("Build host requires the Access apartment gate")
+    if lifetime:
+        raise RuntimeError("The current call already owns a build host")
+    lifetime.append(finish)
 
 # Tools that can run independently of the Access gate. Dialog/status/cancel
 # tools must stay responsive during a long operation. The version probe uses
@@ -233,15 +243,34 @@ class AccessGate:
         body_task: dict[str, Any] = {}
         task_lock = threading.Lock()
 
+        retention: list[Callable[[], None]] = []
+        context.run(_retention.set, retention)
+        reply = Future()
+
         def run() -> Any:
+            result = None
+            failure = None
             try:
                 self._note_apartment_used()
                 if is_async:
-                    return self._run_on_apartment_loop(fn, args, kwargs, context, body_task, task_lock)
-                return context.run(fn, *args, **kwargs)
+                    result = self._run_on_apartment_loop(fn, args, kwargs, context, body_task, task_lock)
+                else:
+                    result = context.run(fn, *args, **kwargs)
+                return result
+            except BaseException as error:
+                failure = error
+                raise
             finally:
-                if on_worker_finished is not None:
-                    on_worker_finished()
+                try:
+                    if retention:
+                        if failure is None:
+                            reply.set_result(result)
+                        else:
+                            reply.set_exception(failure)
+                        retention.pop()()
+                finally:
+                    if on_worker_finished is not None:
+                        on_worker_finished()
 
         try:
             worker = self._executor.submit(run)
@@ -252,7 +281,17 @@ class AccessGate:
         # Its callback needs no caller loop, which may already have closed. It
         # also releases a submitted future cancelled before it starts.
         worker.add_done_callback(lambda _worker: self._release_slot())
-        pending = asyncio.wrap_future(worker)
+        def finish_reply(done):
+            if not reply.done():
+                try:
+                    reply.set_result(done.result())
+                except BaseException as error:
+                    reply.set_exception(error)
+            else:
+                done.exception()
+
+        worker.add_done_callback(finish_reply)
+        pending = asyncio.wrap_future(reply)
         # A detached worker can fail after the caller leaves. Retrieve its
         # exception even then so the loop never reports an unobserved future.
         pending.add_done_callback(lambda done: None if done.cancelled() else done.exception())

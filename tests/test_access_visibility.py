@@ -117,6 +117,7 @@ class TestAccessConnectionVisibility:
         with (
             patch.object(conn_mod, "win32com") as mock_win32com,
             patch.object(conn_mod, "gencache") as mock_gencache,
+            patch.object(conn_mod, "access_instance_is_live", return_value=False),
             patch(
                 "msaccess_vcs_mcp.access_com.process_qos.list_access_pids_or_none",
                 return_value=set(),

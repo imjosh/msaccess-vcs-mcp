@@ -391,7 +391,9 @@ def test_cancelled_public_async_worker_cleans_up_its_original_operation(
             assert dismissed["last_interruption"]["busy_with"]["tool"] == "vcs_run_tests"
             work.release.set()
             await _entered(cleanup)
-            assert manager.pending_count() == 0  # Cancellation reached the apartment's await.
+            # A cancel request is not confirmed cancellation: the started run
+            # stays tracked for its terminal callback.
+            assert manager.pending_count() == 1
             assert gate.current_in_flight() is owner
             assert slot.releases == 0
             busy = await asyncio.wait_for(tools.vcs_get_option(db, "ShowDebug"), DEADLINE)
@@ -422,6 +424,8 @@ def test_cancelled_public_async_worker_cleans_up_its_original_operation(
             report = await tools.vcs_automation_status(db, **identity)
             assert report["ready"] is True
             assert report["last_interruption"] is None
+            assert manager.route_callback(operation_id, {"type": "cancelled"})
+            assert manager.pending_count() == 0
             assert (await tools.vcs_cancel_operation(operation_id))["success"] is False
         finally:
             work.release.set()

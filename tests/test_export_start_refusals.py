@@ -12,7 +12,7 @@ from msaccess_vcs_mcp.access_gate import AccessGate
 from msaccess_vcs_mcp.operation_manager import OperationManager
 
 from .test_export_build_fallbacks import (
-    EXPORT_METHODS, FakeAccess, _addin, _assert_unconfirmed, _export_env,
+    EXPORT_METHODS, FakeAccess, _addin, _assert_unconfirmed, _assert_uncertain_dispatch, _export_env,
 )
 
 
@@ -48,7 +48,7 @@ def public_export(tmp_path, monkeypatch):
             result = asyncio.run(tools.vcs_export_database(
                 str(db), str(out), full_export=full_export,
             ))
-        assert manager.pending_count() == 0
+        assert manager.pending_count() == int(result.get("error_pattern") == "completion_unconfirmed")
         return result, manager, operation_ids, out
 
     yield run
@@ -98,10 +98,16 @@ def test_public_export_preserves_unknown_exception_and_inline_paths(
 ):
     fake = FakeAccess(async_start=start)
     result, manager, _, _ = public_export(fake, full_export)
-    _assert_unconfirmed(result)
     inline = isinstance(start, str) and '"sync"' in start
-    assert fake.dispatched == [("APIAsync", method)] + ([] if inline else [("API", method)])
-    manager.unregister_operation.assert_called_once()
+    assert fake.dispatched == [("APIAsync", method)]
+    if inline:
+        _assert_unconfirmed(result)
+        manager.unregister_operation.assert_called_once()
+    else:
+        _assert_uncertain_dispatch(result)
+        manager.unregister_operation.assert_not_called()
+        assert manager.route_callback(result["operation_id"], {"type": "complete"})
+        assert manager.pending_count() == 0
     manager.wait_for_completion.assert_not_awaited()
 
 

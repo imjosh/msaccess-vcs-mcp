@@ -306,9 +306,11 @@ def normalize_terminal_result(payload: dict[str, Any], default_error: str) -> di
     if payload.get("cancelled"):
         result["cancelled"] = True
     if unconfirmed:
-        result["started"] = True
+        for key in ("started", "operation_id", "completion_error"):
+            if key in payload:
+                result[key] = payload[key]
         result["completion_unconfirmed"] = True
-        result["error"] = _MERGE_COMPLETION_UNCONFIRMED_ERROR
+        result["error"] = payload.get("error") or _MERGE_COMPLETION_UNCONFIRMED_ERROR
     elif not success:
         result["error"] = payload.get("error") or payload.get("message") or default_error
     if payload.get("error_pattern"):
@@ -334,7 +336,7 @@ async def run_import_merge(
 
     The handler registers the callback operation. Here we follow async starts,
     parse inline completions, and return refusals without retrying. Missing
-    markers or an async exception fall back to sync, whose start is unconfirmed.
+    markers or an async exception retain the original operation without replay.
     """
     def merge_sync() -> dict[str, Any]:
         merged = addin.merge_build(database_path, source_dir, policy)
@@ -344,30 +346,20 @@ async def run_import_merge(
 
     if op_manager is None:
         return merge_sync()
-    try:
-        started = addin.call_async(callback_info, "MergeBuild", *policy_args(policy))
-        if started.get("async"):
-            return await op_manager.wait_for_completion(
-                operation_id, ctx=ctx,
-                timeout_seconds=started.get("timeout_ms", 300000) / 1000,
-            )
-        op_manager.unregister_operation(operation_id)
-        if started.get("sync"):
-            # Already completed inline: never merge twice.
-            # Import locally: integration also uses this module's normalizers.
-            from .addin_integration import api_refusal_payload
+    from .operation_manager import dispatch_once
 
-            raw = started.get("result")
-            refusal = api_refusal_payload(raw)
-            if refusal:
-                return refusal
-            payload = parse_addin_payload(raw)
-            wrapped = api_refusal_payload(payload.get("error"))
-            return {**payload, **wrapped} if wrapped else payload
-        if is_start_refusal(started):
-            # Drop the duplicate refusal delivered by callback.
-            return started
-        return merge_sync()
-    except Exception:
-        op_manager.unregister_operation(operation_id)
-        return merge_sync()
+    outcome = await dispatch_once(
+        addin, op_manager, operation_id, callback_info,
+        "MergeBuild", *policy_args(policy), ctx=ctx,
+    )
+    if outcome.kind != "inline":
+        return outcome.payload
+    from .addin_integration import api_refusal_payload
+
+    raw = outcome.payload.get("result")
+    refusal = api_refusal_payload(raw)
+    if refusal:
+        return refusal
+    payload = parse_addin_payload(raw)
+    wrapped = api_refusal_payload(payload.get("error"))
+    return {**payload, **wrapped} if wrapped else payload

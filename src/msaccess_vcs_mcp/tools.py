@@ -32,9 +32,7 @@ import inspect
 import json
 import logging
 import os
-import shutil
 import sys
-import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -113,6 +111,7 @@ from .operation_manager import (
     ERROR_DIAGNOSTIC_FIELDS,
     INLINE_TEST_RESULT_FIELDS,
     MonotonicProgressReporter,
+    dispatch_once,
 )
 from .vba_worker_manager import get_call_vba_timeout, run_vba_resilient
 
@@ -600,43 +599,6 @@ def _build_start_outcome(
         result, src_path, "Build", start,
         call_started_at=call_started_at, executed=start.get("started") is True,
     )
-
-
-def _open_build_host(app) -> tuple[str, str]:
-    """Open a blank database in a new temp folder to host a database build.
-
-    Returns ``(folder, database path)``. The caller removes the folder.
-    """
-    host_dir = tempfile.mkdtemp(prefix="vcs-build-host-")
-    host_path = os.path.join(host_dir, "BuildHost.accdb")
-    try:
-        app.NewCurrentDatabase(host_path)
-    except Exception:
-        shutil.rmtree(host_dir, ignore_errors=True)
-        raise
-    return host_dir, host_path
-
-
-def _close_build_host(app, host_dir: str | None, *, attempts: int = 10, delay: float = 0.2) -> None:
-    """Close the database a build left open, quit Access, and remove the host folder.
-
-    Access can hold the host database for a moment after ``Quit``, so the
-    folder removal is retried briefly. A folder that still will not go is
-    left in the temp directory rather than failing the call.
-    """
-    for close in (app.CloseCurrentDatabase, app.Quit):
-        try:
-            close()
-        except Exception:
-            pass
-    if not host_dir:
-        return
-    for attempt in range(attempts):
-        shutil.rmtree(host_dir, ignore_errors=True)
-        if not os.path.exists(host_dir):
-            return
-        if attempt < attempts - 1:
-            time.sleep(delay)
 
 
 def _scoped_types_arg(object_types: list[str]) -> str | list[str]:
@@ -1137,6 +1099,17 @@ def vcs_tool(name: str):
     def decorator(func):
         is_async_body = inspect.iscoroutinefunction(func)
 
+        def reservation_refusal(args, kwargs):
+            if name in EXEMPT_TOOLS or name not in ADDIN_DEPENDENT_TOOLS:
+                return None
+            values = inspect.signature(func).bind_partial(*args, **kwargs).arguments
+            if name == "vcs_run_tests" and values.get("noninteractive") is False:
+                return None
+            target = values.get("database_path")
+            if name == "vcs_rebuild_database":
+                target = values.get("output_path") or values.get("source_dir")
+            return _check_database_busy(str(target)) if target else None
+
         if is_async_body:
             @functools.wraps(func)
             async def admitted(*args, **kwargs):
@@ -1151,6 +1124,9 @@ def vcs_tool(name: str):
                         if "component" not in admission:
                             return compatibility_result(None, detail=admission.get("error"))
                         return admission
+                    busy = reservation_refusal(args, kwargs)
+                    if busy:
+                        return busy
                     with target_admission(admission.get("addin_path") or configured_addin_path()):
                         return await func(*args, **kwargs)
                 return await func(*args, **kwargs)
@@ -1161,6 +1137,9 @@ def vcs_tool(name: str):
                     admission = inspect_installed_addin()
                     if not admission["success"]:
                         return admission
+                    busy = reservation_refusal(args, kwargs)
+                    if busy:
+                        return busy
                     with target_admission(admission.get("addin_path") or configured_addin_path()):
                         return func(*args, **kwargs)
                 return func(*args, **kwargs)
@@ -1321,10 +1300,10 @@ async def vcs_export_database(
         - log_excerpt: Tail of the log, included only on failure
 
     A whole-project export reports ``success: true`` only from the add-in's
-    completion callback. Without one (no callback server, an async start that
-    failed, or an inline start result) the result is ``success: false`` with
-    ``started: true`` and ``completion_unconfirmed: true``: the export may have
-    finished either way, so do not retry it blindly. Read ``log_path``, or call
+    completion callback. Without one the result is ``success: false`` with
+    ``completion_unconfirmed: true``. ``started: true`` requires a start
+    acknowledgment. A lost reply retains the operation ID and database
+    reservation until terminal evidence arrives. Read ``log_path``, or call
     ``vcs_get_recent_calls()`` and ``vcs_get_log(log_type="Export")``.
     ``full_export=True`` runs ``FullExport`` on every one of those paths.
     An explicit async start refusal returns its error, pattern and decision
@@ -1416,77 +1395,26 @@ async def vcs_export_database(
                     operation_id, callback_url, "cursor"
                 )
                 
-                try:
-                    # Call async API (Export/FullExport use VCS options)
-                    async_result = addin.call_async(callback_info, command)
-
-                    completion = None
-                    if async_result.get("sync"):
-                        # The add-in answered inline, so no callback will follow.
-                        # Export and FullExport return Empty: parse the nested
-                        # value rather than assume success.
-                        op_manager.unregister_operation(operation_id)
-                        return _export_start_outcome(
-                            start_only_result(async_result.get("result"), "export", "Export"),
-                            export_path,
-                            call_started_at=call_started_at,
-                        )
-                    elif async_result.get("async"):
-                        # Wait for completion with progress reporting
-                        timeout_ms = async_result.get("timeout_ms", 300000)
-                        logger.info(
-                            "Starting async operation %s with ctx=%s, ctx_type=%s",
-                            operation_id,
-                            ctx is not None,
-                            type(ctx).__name__ if ctx is not None else "None",
-                        )
-                        completion = await op_manager.wait_for_completion(
-                            operation_id,
-                            ctx=ctx,  # Pass context for progress reporting
-                            timeout_seconds=timeout_ms / 1000
-                        )
-                        
-                        if not completion.get("success") or is_decision_required(completion):
-                            return _attach_log_context({
-                                **normalize_terminal_result(
-                                    {**completion, "success": False}, "Export failed"
-                                ),
-                                "exported_count": 0,
-                                "export_path": str(export_path),
-                                "objects_by_type": {},
-                            }, export_path, "Export", completion, call_started_at=call_started_at, executed=True)
-                    elif is_start_refusal(async_result):
-                        # An explicit refusal is terminal. Drop its duplicate
-                        # callback and keep the original metadata without retry.
-                        op_manager.unregister_operation(operation_id)
-                        return _export_start_outcome(
-                            async_result,
-                            export_path,
-                            call_started_at=call_started_at,
-                        )
-                    else:
-                        # Unknown start: preserve the documented sync fallback.
-                        op_manager.unregister_operation(operation_id)
-                        return _export_start_outcome(
-                            addin.export_source(
-                                str(db_path), str(export_path), full_export=full_export
-                            ),
-                            export_path,
-                            call_started_at=call_started_at,
-                        )
-                except Exception as e:
-                    if isinstance(e, AdmissionError):
-                        raise
-                    # Async call failed - fall back to sync, which is a start
-                    # with no callback: its outcome is unconfirmed.
-                    op_manager.unregister_operation(operation_id)
+                outcome = await dispatch_once(
+                    addin, op_manager, operation_id, callback_info, command, ctx=ctx,
+                )
+                completion = outcome.payload
+                if outcome.kind == "inline":
                     return _export_start_outcome(
-                        addin.export_source(
-                            str(db_path), str(export_path), full_export=full_export
-                        ),
-                        export_path,
-                        call_started_at=call_started_at,
+                        start_only_result(completion.get("result"), "export", "Export"),
+                        export_path, call_started_at=call_started_at,
                     )
+                if outcome.kind in {"refused", "uncertain"}:
+                    return _export_start_outcome(
+                        completion, export_path, call_started_at=call_started_at,
+                    )
+                if not completion.get("success") or is_decision_required(completion):
+                    return _attach_log_context({
+                        **normalize_terminal_result({**completion, "success": False}, "Export failed"),
+                        "exported_count": 0,
+                        "export_path": str(export_path),
+                        "objects_by_type": {},
+                    }, export_path, "Export", completion, call_started_at=call_started_at, executed=True)
             else:
                 # Use sync path (no callbacks available): a start whose outcome
                 # nothing reports, so it is unconfirmed, never a success.
@@ -1872,7 +1800,10 @@ async def vcs_import_objects(
                 "source_dir": str(src_path),
                 **normalized,
             }
-            return _attach_log_context(result, src_path, "Merge", final, call_started_at=call_started_at, executed=True)
+            return _attach_log_context(
+                result, src_path, "Merge", final, call_started_at=call_started_at,
+                executed=not final.get("completion_unconfirmed") or final.get("started") is True,
+            )
 
     except InvalidDecisionPolicy as e:
         return invalid_policy_result(e, imported_count=0)
@@ -1953,6 +1884,7 @@ async def vcs_rebuild_database(
     config = get_config()
     callback_url = get_callback_url()
     op_manager = _get_operation_manager()
+    owner = None
     
     try:
         # Check if writes are disabled
@@ -1969,17 +1901,23 @@ async def vcs_rebuild_database(
                 "output_path": None,
             }
 
-        # Check if target database is already busy (if it exists)
-        if output_path:
-            busy_error = _check_database_busy(output_path)
-            if busy_error:
-                return busy_error
+        busy_error = _check_database_busy(output_path or str(src_path))
+        if busy_error:
+            return busy_error
         
         # This host belongs to this call. EnsureDispatch can attach to a
         # user's window, so use the same isolated path as AccessConnection.
-        app = create_isolated_access_app()
-        host_dir = None
+        from .build_owner import _BuildOwner
+        from .operation_manager import OperationManager, DispatchOutcome, uncertain_completion
+        op_manager = op_manager or OperationManager.get_instance()
+        command = "BuildAs" if output_path else "Build"
+        operation_id, queue = op_manager.register_operation(
+            database_path=output_path or str(src_path), command=command,
+        )
+        owner = _BuildOwner(op_manager, operation_id)
         try:
+            app = create_isolated_access_app()
+            owner.capture(app, output_path or str(src_path))
             prefer_full_power_if_created(app)
             # Build prompts must be visible and the window interactive.
             ensure_access_visible(app)
@@ -1987,7 +1925,7 @@ async def vcs_rebuild_database(
             # The add-in cannot run with no database open (Access exits), so
             # host the call in a throwaway blank database. The full build
             # closes it before it creates the output.
-            host_dir, host_path = _open_build_host(app)
+            owner.open_host()
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
             # A fresh NewCurrentDatabase host has no ROT file moniker yet.
             # Probe the exact application proxy rather than looking it up.
@@ -2004,91 +1942,73 @@ async def vcs_rebuild_database(
             # Check if async build is available
             if callback_url and op_manager:
                 # Use async path with progress callbacks
-                operation_id, queue = op_manager.register_operation(
-                    database_path=output_path or str(src_path),
-                    command=command
-                )
                 callback_info = op_manager.create_callback_info(
                     operation_id, callback_url, "cursor"
                 )
                 
+                owner.dispatched = True
                 try:
-                    completion = None
-                    async_result = addin.call_async(callback_info, command, *build_args)
-                    
-                    if async_result.get("async"):
-                        timeout_ms = async_result.get("timeout_ms", 600000)  # 10 min for builds
-                        completion = await op_manager.wait_for_completion(
-                            operation_id,
-                            ctx=ctx,
-                            timeout_seconds=timeout_ms / 1000
-                        )
-                        
-                        if not completion.get("success") or is_decision_required(completion):
-                            return _attach_log_context({
-                                **normalize_terminal_result(
-                                    {**completion, "success": False}, "Build failed"
-                                ),
-                                "output_path": None,
-                            }, src_path, "Build", completion, call_started_at=call_started_at, executed=True)
-                    elif async_result.get("sync"):
-                        # The add-in answered inline and no callback will follow;
-                        # re-running the build here would build twice. Build
-                        # returns Empty, so parse the nested value rather than
-                        # assume success.
-                        op_manager.unregister_operation(operation_id)
-                        return _build_start_outcome(
-                            start_only_result(async_result.get("result"), "build", "Build"),
-                            src_path, output_path,
-                            call_started_at=call_started_at,
-                        )
-                    elif async_result.get("success") is False:
-                        # The async start itself was refused: nothing ran, and
-                        # a second dispatch would only be refused again.
-                        op_manager.unregister_operation(operation_id)
-                        return _build_start_outcome(
-                            async_result, src_path, output_path,
-                            call_started_at=call_started_at,
-                        )
-                    else:
-                        # Neither marker: the add-in never started the operation,
-                        # so run it synchronously rather than reporting success
-                        # for work that never happened.
-                        op_manager.unregister_operation(operation_id)
-                        return _build_start_outcome(
-                            addin.build_from_source(str(src_path), output_path),
-                            src_path, output_path,
-                            call_started_at=call_started_at,
-                        )
-                except Exception as e:
-                    if isinstance(e, AdmissionError):
-                        raise
-                    # Async call failed - fall back to sync, which is a start
-                    # with no callback: its outcome is unconfirmed.
-                    op_manager.unregister_operation(operation_id)
-                    return _build_start_outcome(
-                        addin.build_from_source(str(src_path), output_path),
-                        src_path, output_path,
-                        call_started_at=call_started_at,
+                    outcome = await dispatch_once(
+                        addin, op_manager, operation_id, callback_info, command, *build_args,
+                        ctx=ctx, default_timeout_ms=600000,
                     )
+                except AdmissionError:
+                    owner.outcome = DispatchOutcome("refused", {})
+                    raise
+                owner.outcome = outcome
+                completion = outcome.payload
+                if outcome.kind == "inline":
+                    start = start_only_result(completion.get("result"), "build", "Build")
+                    owner.outcome = DispatchOutcome(
+                        "uncertain" if start.get("completion_unconfirmed") else "refused", start,
+                    )
+                    return owner.describe(_build_start_outcome(
+                        {**start, "operation_id": operation_id},
+                        src_path, output_path, call_started_at=call_started_at,
+                    ))
+                if outcome.kind in {"refused", "uncertain"}:
+                    return owner.describe(_build_start_outcome(
+                        completion, src_path, output_path, call_started_at=call_started_at,
+                    ))
+                if not completion.get("success") or is_decision_required(completion):
+                    return owner.describe(_attach_log_context({
+                        **normalize_terminal_result({**completion, "success": False}, "Build failed"),
+                        "output_path": None,
+                    }, src_path, "Build", completion, call_started_at=call_started_at, executed=True))
             else:
                 # Use sync path (no callbacks available): a start whose outcome
                 # nothing reports, so it is unconfirmed, never a success.
-                return _build_start_outcome(
-                    addin.build_from_source(str(src_path), output_path),
-                    src_path, output_path,
-                    call_started_at=call_started_at,
+                owner.dispatched = True
+                try:
+                    start = start_only_result(addin.call_sync(command, *build_args), "build", "Build")
+                except AdmissionError:
+                    owner.outcome = DispatchOutcome("refused", {})
+                    raise
+                except Exception as error:
+                    from .addin_integration import _DispatchNotStarted
+                    if isinstance(error, _DispatchNotStarted):
+                        start = {"success": False, "started": False, "error_pattern": "sync_not_started", "error": str(error)}
+                    else:
+                        start = uncertain_completion(operation_id, error=str(error))
+                owner.outcome = DispatchOutcome(
+                    "uncertain" if start.get("completion_unconfirmed") else "refused", start,
                 )
+                return owner.describe(_build_start_outcome(
+                    {**start, "operation_id": operation_id}, src_path, output_path,
+                    call_started_at=call_started_at,
+                ))
             
             # The path comes from the add-in's report of what it built, never
             # from the request.
-            return _attach_log_context({
+            return owner.describe(_attach_log_context({
                 "success": True,
                 "output_path": completion.get("output_path") or None,
                 "source_dir": str(src_path),
-            }, src_path, "Build", completion, call_started_at=call_started_at, executed=True)
+            }, src_path, "Build", completion, call_started_at=call_started_at, executed=True))
         finally:
-            _close_build_host(app, host_dir)
+            addin = None
+            app = None
+            owner.finish()
     
     except PermissionError as e:
         return {
@@ -2099,11 +2019,8 @@ async def vcs_rebuild_database(
     except Exception as e:
         if isinstance(e, AdmissionError):
             raise
-        return {
-            "success": False,
-            "error": str(e),
-            "output_path": None,
-        }
+        result = {"success": False, "error": str(e), "output_path": None}
+        return owner.describe(result) if owner is not None else result
 
 
 @vcs_tool("vcs_rebuild_addin")
@@ -3877,36 +3794,20 @@ async def vcs_run_tests(
                 callback_info = op_manager.create_callback_info(
                     operation_id, callback_url, "cursor"
                 )
-                try:
-                    async_result = addin.call_async(
-                        callback_info, "RunFilteredTests", *policy_args(policy)
-                    )
-                    if async_result.get("sync"):
-                        op_manager.unregister_operation(operation_id)
-                        return _parse_test_runner_json(async_result.get("result"))
-                    if async_result.get("async"):
-                        timeout_ms = async_result.get("timeout_ms", 600000)
-                        wait_timeout = (
-                            timeout_seconds
-                            if timeout_seconds is not None
-                            else timeout_ms / 1000
-                        )
-                        completion = await op_manager.wait_for_completion(
-                            operation_id,
-                            ctx=ctx,
-                            timeout_seconds=wait_timeout,
-                        )
-                        return _carry_cancel_outcome(
-                            _test_results_from_completion(completion), completion
-                        )
-                    if is_start_refusal(async_result):
-                        # Refusals are also posted to the callback. Unregistering
-                        # makes the first arrival win; the duplicate is dropped.
-                        op_manager.unregister_operation(operation_id)
-                        return _parse_test_runner_json(async_result)
-                    op_manager.unregister_operation(operation_id)
-                except Exception:
-                    op_manager.unregister_operation(operation_id)
+                outcome = await dispatch_once(
+                    addin, op_manager, operation_id, callback_info,
+                    "RunFilteredTests", *policy_args(policy), ctx=ctx,
+                    timeout_seconds=timeout_seconds, default_timeout_ms=600000,
+                )
+                if outcome.kind == "inline":
+                    return _parse_test_runner_json(outcome.payload.get("result"))
+                if outcome.kind == "refused":
+                    return _parse_test_runner_json(outcome.payload)
+                if outcome.kind == "uncertain":
+                    return outcome.payload
+                return _carry_cancel_outcome(
+                    _test_results_from_completion(outcome.payload), outcome.payload
+                )
 
             return _parse_test_runner_json(
                 addin.call_sync("RunFilteredTests", *policy_args(policy))

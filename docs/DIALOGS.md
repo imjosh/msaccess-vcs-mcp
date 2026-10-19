@@ -177,7 +177,24 @@ an `APICapabilities` probe. Per-call acknowledgments remain mandatory.
 reports, never the request. It is None on every other result; an unconfirmed
 start keeps the request as `requested_output_path`. The call is hosted in a
 blank temporary database (Access exits if the add-in runs with no database
-open), which is closed and removed when the call returns.
+open). An uncertain result retains the original host and operation ID after the
+caller returns. The Access gate stays occupied. Terminal settlement or observed
+exit of the pinned process permits cleanup on the original apartment. The
+response reports cleanup separately from the build outcome. Missing callbacks
+and cancellation requests do not authorize closing a live build.
+
+The host is recorded in the owned-instance registry before any build is
+dispatched; if that record cannot be written, the build is refused. Registry
+writers serialize through a lock file beside the registry, so concurrent
+servers do not drop each other's records. When the exact process identity
+cannot be pinned, nothing has been dispatched: the server requests `Quit`,
+releases the target, and reports `recovery_required` because exit is
+unconfirmed. A server that exits while a build is still pending leaves the
+host running and its registry record in place. The next server does not
+reconcile such records, so that host is never recycled automatically; close
+it manually. If the registry cannot be read, a newly created window is left
+unrecorded instead of rewriting the file; the server then treats that window as
+the user's and never closes it.
 
 `RunFilteredTests` is different: it runs the tests before it returns, and its
 return is the final results JSON (or a refusal). `vcs_run_tests` returns a

@@ -15,6 +15,8 @@ import json
 import os
 import sys
 import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +28,73 @@ from .process_qos import list_access_pids_or_none
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 _lock = threading.Lock()
+LOCK_WAIT_SEC = 5.0
+
+if sys.platform == "win32":
+    import msvcrt
+
+    def _try_lock(handle) -> bool:
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+
+    def _unlock(handle) -> None:
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    def _try_lock(handle) -> bool:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+
+    def _unlock(handle) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+class RegistryStateUnknown(RuntimeError):
+    """The registry exists but its contents could not be read or trusted."""
+
+
+@contextmanager
+def _locked(path: Path, *, strict: bool = True):
+    """Serialize registry read-modify-write across threads and processes.
+
+    Every server window and CLI child shares one registry file, so the
+    thread lock alone lets another process's write land between a read and
+    a save. Strict callers raise when the file lock is unavailable; the
+    permissive callers keep their previous best-effort behavior.
+    """
+    with _lock:
+        handle = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(path.with_name(path.name + ".lock"), "a+b")
+            deadline = time.monotonic() + LOCK_WAIT_SEC
+            while not _try_lock(handle):
+                if time.monotonic() >= deadline:
+                    raise RegistryStateUnknown("Owned-instance registry lock is unavailable")
+                time.sleep(0.02)
+        except (OSError, RegistryStateUnknown):
+            if handle is not None:
+                handle.close()
+                handle = None
+            if strict:
+                raise
+        if handle is None:
+            yield
+            return
+        try:
+            yield
+        finally:
+            try:
+                _unlock(handle)
+            finally:
+                handle.close()
 
 
 class FILETIME(ctypes.Structure):
@@ -43,6 +112,8 @@ class OwnedInstance:
     created_at: str | None = None
     session_id: str | None = None
     loaded_addin: str | None = None
+    build_operation_id: str | None = None
+    build_host_directory: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -57,6 +128,10 @@ class OwnedInstance:
             payload["session_id"] = self.session_id
         if self.loaded_addin:
             payload["loaded_addin"] = self.loaded_addin
+        if self.build_operation_id:
+            payload["build_operation_id"] = self.build_operation_id
+        if self.build_host_directory:
+            payload["build_host_directory"] = self.build_host_directory
         return payload
 
     @classmethod
@@ -90,6 +165,8 @@ class OwnedInstance:
             created_at=created_at,
             session_id=session_id,
             loaded_addin=loaded_addin,
+            build_operation_id=data.get("build_operation_id"),
+            build_host_directory=data.get("build_host_directory"),
         )
 
 
@@ -239,28 +316,29 @@ def paths_match_ignoring_extension(a: str, b: str) -> bool:
         return False
 
 
-def _parse(raw: list[dict[str, Any]]) -> list[OwnedInstance]:
+def _parse(raw: list[dict[str, Any]] | None) -> list[OwnedInstance]:
     records: list[OwnedInstance] = []
-    for item in raw:
+    for item in raw or []:
         parsed = OwnedInstance.from_dict(item)
         if parsed is not None:
             records.append(parsed)
     return records
 
 
-def _load_raw() -> list[dict[str, Any]]:
+def _load_raw() -> list[dict[str, Any]] | None:
+    """Return the stored records, or None when the file exists but cannot be read."""
     path = get_registry_path()
     if not path.is_file():
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
+        return None
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
     if isinstance(data, dict) and isinstance(data.get("instances"), list):
         return [item for item in data["instances"] if isinstance(item, dict)]
-    return []
+    return None
 
 
 def _save(records: list[OwnedInstance]) -> None:
@@ -304,6 +382,9 @@ def _prune(records: list[OwnedInstance]) -> list[OwnedInstance]:
         return list(records)
     kept: list[OwnedInstance] = []
     for record in records:
+        if record.build_operation_id:
+            kept.append(record)
+            continue
         if record.pid not in live:
             continue
         live_create = process_create_time(record.pid)
@@ -335,7 +416,7 @@ def _identity_confirmed(record: OwnedInstance, create_time: int | None) -> bool:
 
 def list_owned() -> list[OwnedInstance]:
     """Return live owned-instance records, pruning dead or reused PIDs."""
-    with _lock:
+    with _locked(get_registry_path(), strict=False):
         original = _parse(_load_raw())
         records = _prune(original)
         _save_if_changed(records, original)
@@ -347,6 +428,7 @@ def register_owned(
     database_path: str,
     create_time: int | None = None,
     session_id: str | None = None,
+    build_operation_id: str | None = None,
 ) -> OwnedInstance | None:
     """Record that this server created ``pid`` for ``database_path``."""
     if not pid or pid <= 0:
@@ -366,9 +448,15 @@ def register_owned(
         create_time=create_time,
         created_at=datetime.now(timezone.utc).isoformat(),
         session_id=session_id,
+        build_operation_id=build_operation_id,
     )
-    with _lock:
-        records = [item for item in _load_pruned() if item.pid != record.pid]
+    with _locked(get_registry_path(), strict=False):
+        raw = _load_raw()
+        if raw is None:
+            # Other servers' claims, including retained build hosts, may be in
+            # the file. Leaving this window unrecorded fails toward "not ours".
+            return None
+        records = [item for item in _prune(_parse(raw)) if item.pid != record.pid]
         records.append(record)
         _save(records)
 
@@ -386,6 +474,128 @@ def register_owned(
     return record
 
 
+def _load_strict(path: Path) -> list[OwnedInstance]:
+    """Read every record at ``path``; a missing file is an empty registry.
+
+    The permissive reader turns unreadable or malformed state into an empty
+    list. Build-owner read-modify-write cannot: rewriting from that list
+    would drop other claims, and an absence check against it proves nothing.
+    """
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise RegistryStateUnknown(f"Owned-instance registry is unreadable: {error}") from error
+    raw = data.get("instances") if isinstance(data, dict) else data
+    if not isinstance(raw, list):
+        raise RegistryStateUnknown("Owned-instance registry has an invalid shape")
+    records = []
+    for item in raw:
+        parsed = OwnedInstance.from_dict(item) if isinstance(item, dict) else None
+        if parsed is None:
+            raise RegistryStateUnknown("Owned-instance registry contains an invalid record")
+        records.append(parsed)
+    return records
+
+
+def _save_strict(records: list[OwnedInstance], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"instances": [record.to_dict() for record in records]}
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def register_build_owned(
+    pid: int,
+    database_path: str,
+    create_time: int | None,
+    build_operation_id: str,
+    path: Path | None = None,
+) -> OwnedInstance:
+    """Persist one build claim through the strict layer and confirm it.
+
+    Unlike ``register_owned``, an unreadable registry refuses the build
+    instead of being rewritten, and other claims are never dropped. An
+    ordinary claim on the same PID is a reused PID and is replaced.
+    """
+    path = path or get_registry_path()
+    try:
+        from ..config import get_session_id
+
+        session_id = get_session_id()
+    except Exception:
+        session_id = None
+    record = OwnedInstance(
+        pid=int(pid),
+        database_path=database_path,
+        create_time=create_time,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        session_id=session_id,
+        build_operation_id=build_operation_id,
+    )
+    with _locked(path):
+        records = _load_strict(path)
+        kept = [item for item in records if item.pid != record.pid or item.build_operation_id]
+        _save_strict([*kept, record], path)
+        if record not in _load_strict(path):
+            raise RuntimeError("Build host ownership could not be persisted")
+    return record
+
+
+def _record_build_directory(
+    record: OwnedInstance, folder: str, path: Path | None = None
+) -> OwnedInstance:
+    path = path or get_registry_path()
+    updated = replace(record, build_host_directory=folder)
+    with _locked(path):
+        records = _load_strict(path)
+        if record not in records:
+            raise RuntimeError("Build host ownership is no longer persisted")
+        _save_strict([updated if item == record else item for item in records], path)
+        if updated not in _load_strict(path):
+            raise RuntimeError("Build host directory ownership could not be persisted")
+    return updated
+
+
+def remove_build_owned(
+    pid: int,
+    create_time: int | None,
+    path: Path | None = None,
+    build_operation_id: str | None = None,
+) -> None:
+    """Remove one exact build claim and confirm the removal is persisted.
+
+    Raises on unreadable or malformed state, a failed write, or a claim
+    still present afterwards. The caller keeps its ownership until this
+    returns. ``build_operation_id`` limits removal to that build's claim.
+    """
+    path = path or get_registry_path()
+
+    def exact(item: OwnedInstance) -> bool:
+        return (
+            item.pid == pid
+            and item.create_time == create_time
+            and (build_operation_id is None or item.build_operation_id == build_operation_id)
+        )
+
+    with _locked(path):
+        records = _load_strict(path)
+        kept = [item for item in records if not exact(item)]
+        if len(kept) != len(records):
+            _save_strict(kept, path)
+        if any(exact(item) for item in _load_strict(path)):
+            raise RuntimeError("Build ownership removal could not be persisted")
+
+
 def unregister_owned(pid: int, create_time: int | None = None) -> bool:
     """Drop a registry claim. Returns True when a record was removed.
 
@@ -393,7 +603,7 @@ def unregister_owned(pid: int, create_time: int | None = None) -> bool:
     been reused, so the record belongs to a different process and stays.
     """
     removed = False
-    with _lock:
+    with _locked(get_registry_path(), strict=False):
         records = _load_pruned()
         kept: list[OwnedInstance] = []
         for record in records:
@@ -429,7 +639,7 @@ def is_owned(pid: int, create_time: int | None = None) -> bool:
     """
     if not pid or pid <= 0:
         return False
-    with _lock:
+    with _locked(get_registry_path(), strict=False):
         original = _parse(_load_raw())
         records = _prune(original)
         _save_if_changed(records, original)
@@ -449,7 +659,7 @@ def note_loaded_addin(pid: int, addin_path: str) -> bool:
     if not pid or pid <= 0 or not addin_path:
         return False
     updated = False
-    with _lock:
+    with _locked(get_registry_path(), strict=False):
         original = _parse(_load_raw())
         records = _prune(original)
         changed: list[OwnedInstance] = []

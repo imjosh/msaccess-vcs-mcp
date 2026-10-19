@@ -3,7 +3,8 @@
 import asyncio
 import json
 import os
-from unittest.mock import AsyncMock, Mock, patch
+import time
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -63,9 +64,16 @@ def public_operation(tmp_path, monkeypatch):
 
         if operation.startswith("Build"):
             output = str(tmp_path / "out.accdb") if operation == "BuildAs" else None
-            with _build_env(tmp_path, addin, manager, callback) as src:
+            from tests.build_fakes import owned_build
+            app = MagicMock()
+            with owned_build(app) as (build_gate, gone), _build_env(tmp_path, addin, manager, callback, app) as src:
+                monkeypatch.setattr(tools, "get_access_gate", lambda: build_gate)
                 setup(src)
                 result = asyncio.run(tools.vcs_rebuild_database(str(src), output))
+                if result.get("completion_unconfirmed"):
+                    assert manager.pending_count() == 1
+                    assert manager.route_callback(result["operation_id"], {"type": "complete"})
+            monkeypatch.setattr(tools, "get_access_gate", lambda: gate)
         else:
             with _export_env(tmp_path, addin, manager, callback) as (db, src):
                 setup(src)
@@ -77,13 +85,19 @@ def public_operation(tmp_path, monkeypatch):
                         str(db), str(src), full_export=operation == "FullExport",
                     ))
 
-        assert manager.pending_count() == 0
+        uncertain = route in {"unknown", "exception"}
+        assert manager.pending_count() == (0 if operation.startswith("Build") else int(uncertain))
         manager.wait_for_completion.assert_not_awaited()
-        if callback:
+        if operation.startswith("Build"):
+            pass
+        elif uncertain:
+            manager.unregister_operation.assert_not_called()
+            assert manager.route_callback(result["operation_id"], {"type": "complete"})
+        elif callback:
             manager.unregister_operation.assert_called_once()
         assert fake.dispatched == (
             ([("APIAsync", operation)] if callback else [])
-            + ([] if route in ("inline", "refused") else [("API", operation)])
+            + ([] if callback else [("API", operation)])
         )
         return result, src
 
@@ -103,6 +117,12 @@ def test_refusals_never_borrow_legacy_or_current_logs(
     if addin_start_refusal["expected"].get("decision_required"):
         raw = json.dumps({**json.loads(raw), "started": False})
     result, _ = public_operation(operation, raw, route, prepare)
+    if route in {"unknown", "exception"}:
+        assert result["completion_unconfirmed"] is True
+        assert result["error_pattern"] == "completion_unconfirmed"
+        assert result["log_path"] is None
+        assert "log_excerpt" not in result
+        return
     for key, value in addin_start_refusal["expected"].items():
         if key != "api_refused":  # Full import exposes refusal text/pattern.
             assert result[key] == value
@@ -132,6 +152,13 @@ def test_explicit_operation_logs_and_aliases_win(
             # start-only export/build methods. Explicit uncertainty stays so.
             payload["completion_unconfirmed"] = True
     result, _ = public_operation(operation, json.dumps(payload), route)
+    if route in {"unknown", "exception"}:
+        assert result["completion_unconfirmed"] is True
+        assert result["error_pattern"] == "completion_unconfirmed"
+        assert result["log_path"] is None
+        assert "log_excerpt" not in result
+        assert "decisions" not in result
+        return
     assert result["success"] is False
     assert result["log_path"] == str(own_log)
     assert result["log_excerpt"] == "Explicit operation diagnostic"

@@ -428,6 +428,8 @@ def _close_owned_record(record, *, target=None, app=None) -> dict[str, Any] | No
     from .instance_registry import unregister_owned
     from .process_qos import open_exact_process
 
+    if getattr(record, "build_operation_id", None):
+        return None
     target = target or record.database_path
     key = (os.path.normcase(os.path.abspath(target)), record.pid, record.create_time)
     pending = _pending_closes.get(key)

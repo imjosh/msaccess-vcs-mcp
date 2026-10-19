@@ -149,14 +149,14 @@ def test_inline_sync_marker_without_result_is_not_success(tmp_path):
 def test_sync_fallback_decision_required(tmp_path):
     with _patch_import_tool(tmp_path, async_result={"unexpected": True}) as (db, src, addin, ops):
         addin.merge_build.return_value = dict(BLOCKED)
-        _assert_decision(_run((db, src)))
+        _assert_uncertain_merge(_run((db, src)), addin, ops)
 
 
 def test_async_exception_fallback_decision_required(tmp_path):
     with _patch_import_tool(tmp_path) as (db, src, addin, ops):
         addin.call_async.side_effect = RuntimeError("boom")
         addin.merge_build.return_value = dict(BLOCKED)
-        _assert_decision(_run((db, src)))
+        _assert_uncertain_merge(_run((db, src)), addin, ops)
 
 
 def test_no_callback_decision_required(tmp_path):
@@ -370,6 +370,15 @@ def test_refused_interactive_mode_is_the_result_and_nothing_starts(tmp_path, sco
     addin.merge_build.assert_not_called()
 
 
+def _assert_uncertain_merge(result, addin, ops):
+    assert result["success"] is False
+    assert result["completion_unconfirmed"] is True
+    assert result["operation_id"] == "op-1"
+    assert "started" not in result
+    addin.merge_build.assert_not_called()
+    ops.unregister_operation.assert_not_called()
+
+
 STARTED = {"success": True, "started": True, "operation_id": "op-9"}
 
 
@@ -383,14 +392,14 @@ def _assert_unconfirmed(result):
 def test_started_marker_on_sync_fallback_is_not_success(tmp_path):
     with _patch_import_tool(tmp_path, async_result={"unexpected": True}) as (db, src, addin, ops):
         addin.merge_build.return_value = dict(STARTED)
-        _assert_unconfirmed(_run((db, src)))
+        _assert_uncertain_merge(_run((db, src)), addin, ops)
 
 
 def test_started_marker_on_async_exception_fallback_is_not_success(tmp_path):
     with _patch_import_tool(tmp_path) as (db, src, addin, ops):
         addin.call_async.side_effect = RuntimeError("boom")
         addin.merge_build.return_value = dict(STARTED)
-        _assert_unconfirmed(_run((db, src)))
+        _assert_uncertain_merge(_run((db, src)), addin, ops)
 
 
 def test_started_marker_without_callback_is_not_success(tmp_path):
@@ -665,7 +674,10 @@ def test_public_import_result_contract(tmp_path, monkeypatch, path, outcome):
             elif path == "no_callback":
                 monkeypatch.setattr(tools, "get_callback_url", lambda: None)
             result = asyncio.run(tools.vcs_import_objects(db, str(src)))
-            unconfirmed = outcome == "started" and path in {"fallback", "exception", "no_callback"}
+            if path in {"fallback", "exception"}:
+                _assert_uncertain_merge(result, addin, ops)
+                return
+            unconfirmed = outcome == "started" and path == "no_callback"
             expected = {
                 "success": outcome not in {"decision", "refusal"} and not unconfirmed,
                 "imported_count": 0 if outcome == "refusal" else "See log for details",
@@ -686,7 +698,7 @@ def test_public_import_result_contract(tmp_path, monkeypatch, path, outcome):
             elif unconfirmed:
                 _assert_unconfirmed(result)
                 expected.update(
-                    started=True, completion_unconfirmed=True,
+                    started=True, completion_unconfirmed=True, operation_id="op-9",
                     error=result["error"], log_excerpt="merge details",
                 )
             assert result == expected

@@ -46,6 +46,7 @@ class TestAccdaOpensAsCurrentDatabase:
         with (
             patch.object(conn_mod, "win32com") as mock_win32com,
             patch.object(conn_mod, "gencache") as mock_gencache,
+            patch.object(conn_mod, "access_instance_is_live", return_value=False),
             patch.object(process_qos, "prefer_full_power_app") as promote,
             # A PID that was not running before the dispatch is what makes
             # the instance ours.

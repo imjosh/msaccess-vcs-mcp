@@ -9,10 +9,11 @@ utilities for waiting on operation completion with progress reporting.
 import asyncio
 import json
 import logging
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,67 @@ INLINE_TEST_RESULT_FIELDS = (
     "runAt", "databasePath", "addinVersion", "durationMs", "cancelled",
     "allPassed", "summary", "tests",
 )
+
+
+@dataclass(frozen=True)
+class DispatchOutcome:
+    kind: Literal["terminal", "inline", "refused", "uncertain"]
+    payload: dict[str, Any]
+
+
+def uncertain_completion(operation_id: str, *, started: bool = False, error: str = "") -> dict[str, Any]:
+    result = {
+        "success": False,
+        "completion_unconfirmed": True,
+        "error_pattern": "completion_unconfirmed",
+        "operation_id": operation_id,
+        "error": "Operation completion is unknown. Do not replay it. Wait for its terminal callback or recover the original operation.",
+    }
+    if started:
+        result["started"] = True
+    if error:
+        result["completion_error"] = error
+    return result
+
+
+async def dispatch_once(
+    addin: Any, manager: Any, operation_id: str, callback_info: str,
+    command: str, *args: Any, ctx: Any = None,
+    timeout_seconds: float | None = None, default_timeout_ms: int = 300000,
+) -> DispatchOutcome:
+    """A lost reply or failed wait never authorizes another mutation."""
+    from .compatibility_session import AdmissionError
+
+    acknowledged = False
+    try:
+        start = addin.call_async(callback_info, command, *args)
+        if isinstance(start, dict):
+            if start.get("async") is True:
+                acknowledged = True
+                payload = await manager.wait_for_completion(
+                    operation_id, ctx=ctx,
+                    timeout_seconds=(timeout_seconds if timeout_seconds is not None else start.get("timeout_ms", default_timeout_ms) / 1000),
+                )
+                if payload.get("completion_unconfirmed"):
+                    return DispatchOutcome("uncertain", {**payload, "operation_id": operation_id, "started": True})
+                return DispatchOutcome("terminal", payload)
+            if start.get("sync") is True:
+                manager.unregister_operation(operation_id)
+                return DispatchOutcome("inline", start)
+            if start.get("success") is False:
+                manager.unregister_operation(operation_id)
+                return DispatchOutcome("refused", start)
+    except AdmissionError:
+        manager.unregister_operation(operation_id)
+        raise
+    except Exception as exc:
+        error = str(exc)
+    else:
+        error = "The asynchronous start reply had no recognized outcome."
+    detach = getattr(manager, "detach_waiter", None)
+    if detach:
+        detach(operation_id)
+    return DispatchOutcome("uncertain", uncertain_completion(operation_id, started=acknowledged, error=error))
 
 
 def _cancel_not_honored_field(operation: "PendingOperation") -> dict[str, Any]:
@@ -125,7 +187,7 @@ class MonotonicProgressReporter:
 @dataclass
 class PendingOperation:
     """Represents a pending async operation."""
-    
+
     operation_id: str
     queue: asyncio.Queue
     database_path: Optional[str] = None  # Target database (for concurrency control)
@@ -136,12 +198,16 @@ class PendingOperation:
     finished: bool = False  # A terminal callback (complete, error, cancelled) has arrived
     cancel_not_honored: bool = False  # A request was outstanding when a non-cancelled terminal callback arrived
     loop: Optional[asyncio.AbstractEventLoop] = None  # The loop that waits on the queue; None means the manager's
-    
+    detached: bool = False
+    terminal_callback: Optional[dict[str, Any]] = None
+    build_cleanup: Optional[dict[str, Any]] = None
+    settlement: threading.Event = field(default_factory=threading.Event)
+
     @property
     def timeout_seconds(self) -> float:
         """Get timeout in seconds."""
         return self.timeout_ms / 1000.0
-    
+
     @property
     def elapsed_seconds(self) -> float:
         """Get elapsed time since operation started."""
@@ -151,47 +217,48 @@ class PendingOperation:
 class OperationManager:
     """
     Manages pending async operations and routes callbacks.
-    
+
     This is a singleton class that tracks all pending operations across
     the MCP server process. It provides:
     - Operation registration and cleanup
     - Callback routing by operation_id
     - Async wait loop for operation completion
-    
+
     Usage:
         manager = OperationManager.get_instance()
-        
+
         # Register operation
         operation_id, queue = manager.register_operation()
-        
+
         # ... start VBA operation with operation_id ...
-        
+
         # Wait for completion
         result = await manager.wait_for_completion(operation_id, ctx)
-        
+
         # Cleanup happens automatically on completion or error
     """
-    
+
     _instance: Optional["OperationManager"] = None
     _lock = asyncio.Lock() if hasattr(asyncio, 'Lock') else None
-    
+
     def __init__(self):
         """Initialize the operation manager."""
+        self._state_lock = threading.RLock()
         self._operations: dict[str, PendingOperation] = {}
         self._database_operations: dict[str, str] = {}  # database_path -> operation_id
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-    
+
     @classmethod
     def get_instance(cls) -> "OperationManager":
         """Get or create the singleton instance."""
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
-    
+
     def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Set the asyncio event loop for cross-thread queue operations."""
         self._loop = loop
-    
+
     def register_operation(
         self,
         timeout_ms: int = 300000,
@@ -200,123 +267,162 @@ class OperationManager:
     ) -> tuple[str, asyncio.Queue]:
         """
         Register a new pending operation.
-        
+
         Args:
             timeout_ms: Timeout for the operation in milliseconds
             database_path: Target database path (for concurrency control)
             command: Command being executed (Export, Build, etc.)
-            
+
         Returns:
             Tuple of (operation_id, queue) for receiving callbacks
         """
-        operation_id = str(uuid.uuid4())
-        queue: asyncio.Queue = asyncio.Queue()
-        try:
-            # Gated tools wait on the Access apartment's loop, not the server's,
-            # so each operation's callbacks go to the loop that registered it.
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        
-        operation = PendingOperation(
-            operation_id=operation_id,
-            queue=queue,
-            database_path=database_path,
-            command=command,
-            timeout_ms=timeout_ms,
-            loop=loop,
-        )
-        
-        self._operations[operation_id] = operation
-        
-        # Track by database path for concurrency control
-        if database_path:
-            normalized_path = database_path.lower().replace("/", "\\")
-            self._database_operations[normalized_path] = operation_id
-        
-        logger.debug(f"Registered operation {operation_id} for {database_path or 'unknown'}")
-        
-        return operation_id, queue
-    
+        with self._state_lock:
+            if database_path and self.is_database_busy(database_path):
+                raise RuntimeError("Database already has an unresolved operation")
+            operation_id = str(uuid.uuid4())
+            queue: asyncio.Queue = asyncio.Queue()
+            try:
+                # Gated tools wait on the Access apartment's loop, not the server's,
+                # so each operation's callbacks go to the loop that registered it.
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            operation = PendingOperation(
+                operation_id=operation_id,
+                queue=queue,
+                database_path=database_path,
+                command=command,
+                timeout_ms=timeout_ms,
+                loop=loop,
+            )
+
+            self._operations[operation_id] = operation
+
+            # Track by database path for concurrency control
+            if database_path:
+                normalized_path = database_path.lower().replace("/", "\\")
+                self._database_operations[normalized_path] = operation_id
+
+            logger.debug(f"Registered operation {operation_id} for {database_path or 'unknown'}")
+
+            return operation_id, queue
+
     def unregister_operation(self, operation_id: str) -> None:
         """
         Unregister an operation (cleanup after completion).
-        
+
         Args:
             operation_id: The operation to unregister
         """
-        operation = self._operations.get(operation_id)
-        if operation:
-            # Clean up database tracking
-            if operation.database_path:
-                normalized_path = operation.database_path.lower().replace("/", "\\")
-                if self._database_operations.get(normalized_path) == operation_id:
-                    del self._database_operations[normalized_path]
-            
-            del self._operations[operation_id]
-            logger.debug(f"Unregistered operation {operation_id}")
-    
+        with self._state_lock:
+            operation = self._operations.get(operation_id)
+            if operation and operation.build_cleanup is None:
+                # Clean up database tracking
+                if operation.database_path:
+                    normalized_path = operation.database_path.lower().replace("/", "\\")
+                    if self._database_operations.get(normalized_path) == operation_id:
+                        del self._database_operations[normalized_path]
+
+                del self._operations[operation_id]
+                logger.debug(f"Unregistered operation {operation_id}")
+
     def route_callback(self, operation_id: str, data: dict) -> bool:
         """
         Route a callback to the appropriate operation queue.
-        
+
         This is called from the HTTP callback handler thread.
         Uses call_soon_threadsafe to safely put items on the async queue.
-        
+
         Args:
             operation_id: The operation ID from the callback
             data: The callback data (type, progress, message, etc.)
-            
+
         Returns:
             True if callback was routed, False if operation not found
         """
-        operation = self._operations.get(operation_id)
-        if not operation:
-            logger.warning(f"Callback for unknown operation: {operation_id}")
-            return False
-        
-        if data.get("type") in TERMINAL_CALLBACK_TYPES and not operation.finished:
-            # The operation is over. Stop serving the request to the poller now,
-            # and remember whether it was outstanding when a run ended without
-            # confirming a cancel, so the original caller can be told.
-            operation.finished = True
-            operation.cancel_not_honored = operation.cancelled and data.get("type") != "cancelled"
-            operation.cancelled = False
-        
-        # Put callback on queue - need thread-safe approach
-        loop = operation.loop or self._loop
-        if loop:
-            # Called from HTTP thread - use threadsafe method
-            try:
-                loop.call_soon_threadsafe(
-                    operation.queue.put_nowait,
-                    data
-                )
-            except RuntimeError:
-                logger.warning(f"Callback for operation {operation_id} arrived after its loop closed")
+        with self._state_lock:
+            operation = self._operations.get(operation_id)
+            if not operation:
+                logger.warning(f"Callback for unknown operation: {operation_id}")
                 return False
-        else:
-            # Called from async context - put directly
-            try:
-                operation.queue.put_nowait(data)
-            except Exception as e:
-                logger.error(f"Failed to queue callback: {e}")
-                return False
-        
-        logger.debug(f"Routed callback to operation {operation_id}: {data.get('type')}")
-        return True
-    
+
+            if data.get("type") in TERMINAL_CALLBACK_TYPES and not operation.finished:
+                # The operation is over. Stop serving the request to the poller now,
+                # and remember whether it was outstanding when a run ended without
+                # confirming a cancel, so the original caller can be told.
+                operation.finished = True
+                operation.cancel_not_honored = operation.cancelled and data.get("type") != "cancelled"
+                operation.cancelled = False
+                operation.terminal_callback = dict(data)
+                operation.settlement.set()
+
+            if operation.detached:
+                if operation.finished:
+                    self.unregister_operation(operation_id)
+                return True
+
+            # Put callback on queue - need thread-safe approach
+            loop = operation.loop or self._loop
+            if loop:
+                if operation.finished and not loop.is_running():
+                    self.unregister_operation(operation_id)
+                    return True
+                # Called from HTTP thread - use threadsafe method
+                try:
+                    loop.call_soon_threadsafe(
+                        operation.queue.put_nowait,
+                        data
+                    )
+                except RuntimeError:
+                    logger.warning(f"Callback for operation {operation_id} arrived after its loop closed")
+                    return operation.finished
+            else:
+                # Called from async context - put directly
+                try:
+                    operation.queue.put_nowait(data)
+                except Exception as e:
+                    logger.error(f"Failed to queue callback: {e}")
+                    return False
+
+            logger.debug(f"Routed callback to operation {operation_id}: {data.get('type')}")
+            return True
+
+    def attach_build_owner(self, operation_id: str, cleanup: dict[str, Any]) -> PendingOperation:
+        with self._state_lock:
+            operation = self._operations[operation_id]
+            operation.build_cleanup = dict(cleanup)
+            return operation
+
+    def update_build_cleanup(self, operation_id: str, cleanup: dict[str, Any], *, release: bool = False) -> None:
+        with self._state_lock:
+            operation = self._operations.get(operation_id)
+            if operation is not None:
+                operation.build_cleanup = dict(cleanup)
+                if release:
+                    operation.build_cleanup = None
+                    self.unregister_operation(operation_id)
+
     def get_operation(self, operation_id: str) -> Optional[PendingOperation]:
         """Get a pending operation by ID."""
         return self._operations.get(operation_id)
-    
+
+    def detach_waiter(self, operation_id: str) -> None:
+        """Keep callback/cancel admission alive after the caller stops waiting."""
+        with self._state_lock:
+            operation = self._operations.get(operation_id)
+            if operation:
+                operation.detached = True
+                if operation.finished:
+                    self.unregister_operation(operation_id)
+
     def get_active_operation_for_database(self, database_path: str) -> Optional[PendingOperation]:
         """
         Get the active operation for a database, if any.
-        
+
         Args:
             database_path: Path to the database
-            
+
         Returns:
             The active PendingOperation, or None if no operation is running
         """
@@ -325,41 +431,43 @@ class OperationManager:
         if operation_id:
             return self._operations.get(operation_id)
         return None
-    
+
     def is_database_busy(self, database_path: str) -> bool:
         """
         Check if a database has an operation in progress.
-        
+
         Args:
             database_path: Path to the database
-            
+
         Returns:
             True if an operation is currently running for this database
         """
         return self.get_active_operation_for_database(database_path) is not None
-    
+
     def get_busy_status(self, database_path: str) -> Optional[dict[str, Any]]:
         """
         Get busy status information for a database.
-        
+
         Args:
             database_path: Path to the database
-            
+
         Returns:
             Dict with busy status info, or None if not busy
         """
-        operation = self.get_active_operation_for_database(database_path)
-        if operation:
-            return {
-                "busy": True,
-                "operation_id": operation.operation_id,
-                "command": operation.command,
-                "started_at": operation.started_at.isoformat(),
-                "elapsed_seconds": operation.elapsed_seconds,
-                "message": f"Database is busy: {operation.command or 'operation'} in progress"
-            }
-        return None
-    
+        with self._state_lock:
+            operation = self.get_active_operation_for_database(database_path)
+            if operation:
+                return {
+                    "busy": True,
+                    "cleanup": dict(operation.build_cleanup) if operation.build_cleanup else None,
+                    "operation_id": operation.operation_id,
+                    "command": operation.command,
+                    "started_at": operation.started_at.isoformat(),
+                    "elapsed_seconds": operation.elapsed_seconds,
+                    "message": f"Database is busy: {operation.command or 'operation'} in progress"
+                }
+            return None
+
     def is_cancelled(self, operation_id: str) -> bool:
         """
         Check if a cancel is outstanding for this operation.
@@ -374,12 +482,13 @@ class OperationManager:
         Returns:
             True if cancellation was requested and the operation has not finished
         """
-        operation = self._operations.get(operation_id)
-        if operation:
-            return operation.cancelled
-        # Unknown operations are not considered cancelled
-        return False
-    
+        with self._state_lock:
+            operation = self._operations.get(operation_id)
+            if operation:
+                return operation.cancelled and not operation.finished
+            # Unknown operations are not considered cancelled
+            return False
+
     def request_cancel(self, operation_id: str) -> bool:
         """
         Record a cancel request for an operation.
@@ -393,15 +502,16 @@ class OperationManager:
         Returns:
             True if the operation is running and the request was recorded
         """
-        operation = self._operations.get(operation_id)
-        if operation and not operation.finished:
-            operation.cancelled = True
-            logger.info(f"Cancellation requested for operation {operation_id}")
-            return True
-        
-        logger.warning(f"Cannot cancel unknown operation: {operation_id}")
-        return False
-    
+        with self._state_lock:
+            operation = self._operations.get(operation_id)
+            if operation and not operation.finished:
+                operation.cancelled = True
+                logger.info(f"Cancellation requested for operation {operation_id}")
+                return True
+
+            logger.warning(f"Cannot cancel unknown operation: {operation_id}")
+            return False
+
     def create_callback_info(
         self,
         operation_id: str,
@@ -410,12 +520,12 @@ class OperationManager:
     ) -> str:
         """
         Create the callback info JSON string for VBA.
-        
+
         Args:
             operation_id: The operation ID
             callback_url: The callback server URL
             client: Client identifier
-            
+
         Returns:
             JSON string for VBA APIAsync first parameter
         """
@@ -425,7 +535,7 @@ class OperationManager:
             "client": client
         }
         return json.dumps(info)
-    
+
     async def wait_for_completion(
         self,
         operation_id: str,
@@ -434,25 +544,25 @@ class OperationManager:
     ) -> dict[str, Any]:
         """
         Wait for an async operation to complete.
-        
+
         Processes callbacks from the queue, forwarding progress to the MCP
         context if provided. Returns when a 'complete' or 'error' callback
         is received, or when timeout occurs.
-        
+
         Args:
             operation_id: The operation to wait for
             ctx: Optional MCP context for progress reporting
             timeout_seconds: Override timeout (uses operation's timeout if None)
-            
+
         Returns:
             Dict with success status and any result/error message
         """
         operation = self._operations.get(operation_id)
         if not operation:
             return {"success": False, "error": f"Unknown operation: {operation_id}"}
-        
+
         timeout = timeout_seconds or operation.timeout_seconds
-        
+
         # Log context availability for debugging
         if ctx is None:
             logger.info("Operation %s: No context provided - progress reporting disabled", operation_id)
@@ -464,17 +574,17 @@ class OperationManager:
         # Collect log messages to include in result
         log_messages: list[str] = []
         reporter = MonotonicProgressReporter()
-        
+
         try:
             async with asyncio.timeout(timeout):
                 while True:
                     callback = await operation.queue.get()
-                    
+
                     msg_type = callback.get("type", "")
                     progress = callback.get("progress")
                     total = callback.get("total")
                     message = callback.get("message", "")
-                    
+
                     if msg_type == "progress":
                         await reporter.emit(
                             ctx,
@@ -483,7 +593,7 @@ class OperationManager:
                             vba_total=total,
                         )
                         logger.debug(f"Progress callback: {progress}/{total} - {message}")
-                        
+
                     elif msg_type == "log":
                         # Log message from VBA - collect for the result and
                         # surface via monotonic progress (MCP logging notifications
@@ -492,7 +602,7 @@ class OperationManager:
                             log_messages.append(message)
                             await reporter.emit(ctx, message=message)
                         logger.info(f"VBA log: {message}")
-                        
+
                     elif msg_type == "complete":
                         # Operation completed successfully
                         logger.info(f"Operation {operation_id} completed: {message}")
@@ -551,17 +661,16 @@ class OperationManager:
 
                     else:
                         logger.warning(f"Unknown callback type: {msg_type}")
-                        
+
         except asyncio.TimeoutError:
             logger.error(f"Operation {operation_id} timed out after {timeout}s")
-            return {
-                "success": False,
-                "error": f"Operation timed out after {timeout} seconds"
-            }
+            return uncertain_completion(operation_id, started=True, error=f"Operation timed out after {timeout} seconds")
         finally:
-            # Always cleanup
-            self.unregister_operation(operation_id)
-    
+            if operation.finished:
+                self.unregister_operation(operation_id)
+            else:
+                self.detach_waiter(operation_id)
+
     def pending_count(self) -> int:
         """Get the number of pending operations."""
         return len(self._operations)

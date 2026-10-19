@@ -426,15 +426,19 @@ def _patch_merge_tool(tmp_path, async_result):
 class TestImportObjectsAsyncPaths:
     """The async dispatch must never report success for work that never ran."""
 
-    def test_missing_async_flag_falls_back_to_sync_merge(self, tmp_path):
+    def test_unrecognized_async_start_is_not_replayed(self, tmp_path):
+        """An unrecognized start reply may still have started the merge."""
         from msaccess_vcs_mcp.tools import vcs_import_objects
 
         with _patch_merge_tool(tmp_path, {}) as (db_path, src_path, mock_addin):
             _write_log(src_path, "Merge_20260807_120000_000.log")
             result = asyncio.run(_unwrap_sync(vcs_import_objects)(db_path, str(src_path)))
 
-        mock_addin.merge_build.assert_called_once()
-        assert result["success"] is True
+        mock_addin.merge_build.assert_not_called()
+        assert mock_addin.call_async.call_count == 1
+        assert result["success"] is False
+        assert result["completion_unconfirmed"] is True
+        assert result["operation_id"] == "op-1"
 
     def test_sync_marker_does_not_merge_twice(self, tmp_path):
         """{"sync": true} means the add-in already ran it inline."""
@@ -451,22 +455,12 @@ class TestImportObjectsAsyncPaths:
         mock_addin.merge_build.assert_not_called()
         assert result["success"] is True
 
-    def test_sync_fallback_still_resolves_log_path(self, tmp_path):
+    def test_unrecognized_start_does_not_claim_an_earlier_log(self, tmp_path):
         from msaccess_vcs_mcp.tools import vcs_import_objects
 
         with _patch_merge_tool(tmp_path, {}) as (db_path, src_path, _):
-            log = _write_log(src_path, "Merge_20260807_120000_000.log")
-            result = asyncio.run(_unwrap_sync(vcs_import_objects)(db_path, str(src_path)))
-
-        assert result["log_path"] == str(log)
-
-    def test_failed_sync_fallback_returns_excerpt(self, tmp_path):
-        from msaccess_vcs_mcp.tools import vcs_import_objects
-
-        with _patch_merge_tool(tmp_path, {}) as (db_path, src_path, mock_addin):
-            mock_addin.merge_build.return_value = {"success": False, "message": "merge failed"}
             _write_log(src_path, "Merge_20260807_120000_000.log", "Error: bad source file\n")
             result = asyncio.run(_unwrap_sync(vcs_import_objects)(db_path, str(src_path)))
 
-        assert result["success"] is False
-        assert "bad source file" in result["log_excerpt"]
+        assert result["log_path"] is None
+        assert "log_excerpt" not in result

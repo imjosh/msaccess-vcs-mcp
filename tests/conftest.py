@@ -72,6 +72,31 @@ def addin_start_refusal(request):
 
 
 @pytest.fixture(autouse=True)
+def _private_owned_instance_registry(request, monkeypatch, tmp_path_factory):
+    """Unit tests never read or rewrite the user's owned-instance registry.
+
+    Live servers on the machine depend on that file. Tests that need a
+    specific location still set ``ACCESS_VCS_OWNED_INSTANCES_PATH`` themselves.
+    """
+    if request.node.get_closest_marker("integration"):
+        return
+    location = tmp_path_factory.mktemp("owned-registry") / "owned-instances.json"
+    monkeypatch.setenv("ACCESS_VCS_OWNED_INSTANCES_PATH", str(location))
+
+
+@pytest.fixture(autouse=True)
+def _settle_build_observers(monkeypatch):
+    """Stop build reconciliation observers before a test's patches are undone.
+
+    An observer outlives its call by design. Left running, it would keep
+    consulting patched helpers after teardown restores the real ones.
+    """
+    yield
+    from msaccess_vcs_mcp import build_owner
+    assert build_owner.stop_observers(5.0) == []
+
+
+@pytest.fixture(autouse=True)
 def _drain_exempt_workers(monkeypatch):
     """Let released gate-exempt workers return before a test's patches are undone.
 

@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.build_fakes import owned_build
 from msaccess_vcs_mcp.operation_manager import OperationManager
 from tests.test_run_tests import _run_through_callback
 
@@ -186,20 +187,23 @@ def _build_through_callback(tmp_path, payload):
     src = tmp_path / "src"
     src.mkdir()
     output = str(tmp_path / "out.accdb")
+    app = MagicMock()
     with (
         patch("msaccess_vcs_mcp.tools.check_write_permission", return_value=None),
         patch("msaccess_vcs_mcp.tools.validate_source_directory", return_value=src),
         patch("msaccess_vcs_mcp.tools.close_owned_instances_holding", return_value=[]),
         patch("msaccess_vcs_mcp.tools._check_database_busy", return_value=None),
-        patch("msaccess_vcs_mcp.tools.create_isolated_access_app", return_value=MagicMock()),
+        patch("msaccess_vcs_mcp.tools.create_isolated_access_app", return_value=app),
         patch("msaccess_vcs_mcp.tools.prefer_full_power_if_created"),
         patch("msaccess_vcs_mcp.tools.ensure_access_visible"),
         patch("msaccess_vcs_mcp.tools.VCSAddinIntegration", return_value=addin),
         patch("msaccess_vcs_mcp.tools.get_callback_url", return_value="http://localhost:1/cb"),
         patch("msaccess_vcs_mcp.tools._get_operation_manager", return_value=manager),
         patch("msaccess_vcs_mcp.tools.get_config", return_value=_config(tmp_path)),
+        # The build host lives on the Access apartment with a pinned identity.
+        owned_build(app) as (gate, _),
     ):
-        result = asyncio.run(_unwrap(vcs_rebuild_database)(str(src), output))
+        result = asyncio.run(gate.run_exclusive("build", output, _unwrap(vcs_rebuild_database), True, str(src), output))
     addin.build_from_source.assert_not_called()
     assert manager.pending_count() == 0
     return result
@@ -287,7 +291,10 @@ def test_export_plain_failure_is_unchanged(tmp_path):
 
 
 def test_build_plain_failure_is_unchanged(tmp_path):
-    assert _build_through_callback(tmp_path, PLAIN_FAILURE) == {
+    result = _build_through_callback(tmp_path, PLAIN_FAILURE)
+    assert result.pop("operation_id")
+    assert result.pop("cleanup")["state"] == "complete"
+    assert result == {
         "success": False,
         "error": "busy",
         "output_path": None,

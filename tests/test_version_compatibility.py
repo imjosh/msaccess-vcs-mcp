@@ -186,7 +186,7 @@ def test_every_public_addin_path_refuses_before_any_dependent_work(public, monke
     monkeypatch.setattr(tools, "VCSAddinIntegration", addin)
     monkeypatch.setattr(tools, "noninteractive_policy", policy)
     monkeypatch.setattr(tools, "_get_operation_manager", manager)
-    monkeypatch.setattr(tools, "_open_build_host", mutation)
+    monkeypatch.setattr(tools, "create_isolated_access_app", mutation)
     result = asyncio.run(getattr(tools, name)(**CALLS[name]))
     assert not result["success"]
     assert result["component"] == "addin"

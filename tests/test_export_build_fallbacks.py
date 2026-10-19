@@ -159,7 +159,7 @@ def _export(tmp_path, fake, *, full_export=False, callback=True, complete=False)
         result = asyncio.run(
             _unwrap(vcs_export_database)(str(db), str(out), full_export=full_export)
         )
-    assert manager.pending_count() == 0
+    _settle_unknown(manager, result)
     return result, out
 
 
@@ -197,10 +197,31 @@ def _build(tmp_path, fake, *, callback=True, complete=False, completion=None, ou
         fake.on_async = _complete(manager, **(completion or {}))
     addin = _addin(tmp_path, fake)
     output = str(tmp_path / "out.accdb") if output is None else output
-    with _build_env(tmp_path, addin, manager if callback else None, callback, app) as src:
-        result = asyncio.run(_unwrap(vcs_rebuild_database)(str(src), output))
+    from tests.build_fakes import owned_build
+    app = app or MagicMock()
+    with owned_build(app) as (gate, gone), _build_env(tmp_path, addin, manager, callback, app) as src:
+        result = asyncio.run(gate.run_exclusive("build", output, _unwrap(vcs_rebuild_database), True, str(src), output))
+        if result.get("completion_unconfirmed"):
+            assert manager.get_operation(result["operation_id"]) is not None
+            assert manager.route_callback(result["operation_id"], {"type": "complete"})
     assert manager.pending_count() == 0
     return result, src, output
+
+
+def _settle_unknown(manager, result):
+    if result.get("error_pattern") == "completion_unconfirmed":
+        operation_id = result["operation_id"]
+        assert manager.get_operation(operation_id) is not None
+        assert manager.route_callback(operation_id, {"type": "complete"})
+    assert manager.pending_count() == 0
+
+
+def _assert_uncertain_dispatch(result):
+    assert result["success"] is False
+    assert result["completion_unconfirmed"] is True
+    assert result["error_pattern"] == "completion_unconfirmed"
+    assert result["operation_id"]
+    assert "started" not in result
 
 
 def _assert_unconfirmed(result):
@@ -427,12 +448,12 @@ def test_export_inline_failure_object_keeps_decision_fields(tmp_path):
     '{"unexpected": true}',
     RuntimeError("async start failed"),
 ], ids=["neither-marker", "async-raises"])
-def test_export_sync_fallback_keeps_the_requested_method(tmp_path, full_export, method, start):
+def test_export_unknown_dispatch_never_replays(tmp_path, full_export, method, start):
     fake = FakeAccess(async_start=start)
     result, out = _export(tmp_path, fake, full_export=full_export)
-    _assert_unconfirmed(result)
+    _assert_uncertain_dispatch(result)
     assert result["export_path"] == str(out)
-    assert fake.dispatched == [("APIAsync", method), ("API", method)]
+    assert fake.dispatched == [("APIAsync", method)]
 
 
 @pytest.mark.parametrize("full_export, method", EXPORT_METHODS)
@@ -511,22 +532,21 @@ def test_build_host_database_is_closed_and_removed(tmp_path):
 
 
 def test_build_host_folder_removal_is_retried(tmp_path, monkeypatch):
-    from msaccess_vcs_mcp import tools
+    from msaccess_vcs_mcp import build_owner
 
-    host = tmp_path / "host"
-    host.mkdir()
     calls = []
-    real_rmtree = tools.shutil.rmtree
+    real_rmtree = build_owner.shutil.rmtree
 
-    def held_once(path, ignore_errors=False):
+    def held_once(path):
         calls.append(path)
-        if len(calls) > 1:
-            real_rmtree(path, ignore_errors=ignore_errors)
+        if len(calls) == 1:
+            raise PermissionError("host file still held")
+        real_rmtree(path)
 
-    monkeypatch.setattr(tools.shutil, "rmtree", held_once)
-    tools._close_build_host(MagicMock(), str(host), delay=0)
+    monkeypatch.setattr(build_owner.shutil, "rmtree", held_once)
+    _build(tmp_path, FakeAccess(), complete=True)
     assert len(calls) == 2
-    assert not host.exists()
+    assert not calls[0].exists()
 
 
 def test_build_inline_empty_result_is_unconfirmed_and_not_run_twice(tmp_path):
@@ -563,14 +583,14 @@ def test_build_refused_async_start_is_not_dispatched_again(tmp_path):
     '{"unexpected": true}',
     RuntimeError("async start failed"),
 ], ids=["neither-marker", "async-raises"])
-def test_build_sync_fallback_uses_build_as_and_is_unconfirmed(tmp_path, start):
+def test_build_unknown_dispatch_never_replays(tmp_path, start):
     fake = FakeAccess(async_start=start)
     result, src, output = _build(tmp_path, fake)
-    _assert_unconfirmed(result)
+    _assert_uncertain_dispatch(result)
     assert result["output_path"] is None
     assert result["requested_output_path"] == output
-    assert fake.dispatched == [("APIAsync", "BuildAs"), ("API", "BuildAs")]
-    assert fake.arguments == [(str(src), output), (str(src), output)]
+    assert fake.dispatched == [("APIAsync", "BuildAs")]
+    assert fake.arguments == [(str(src), output)]
 
 
 def test_build_without_a_callback_server_is_unconfirmed(tmp_path):
@@ -589,8 +609,8 @@ def test_build_sync_fallback_refusal_and_exception_fail(tmp_path):
 
     raised, _, _ = _build(tmp_path, FakeAccess(api=RuntimeError("boom")), callback=False)
     assert raised["success"] is False
-    assert "boom" in raised["error"]
-    assert "completion_unconfirmed" not in raised
+    assert "boom" in raised["completion_error"]
+    assert raised["completion_unconfirmed"] is True
 
 
 # --- X10: the export destination is the add-in's configured folder ---------------

@@ -25,6 +25,10 @@ from .compatibility_session import AdmissionError, ensure_session
 from .decision_policy import is_decision_required, normalize_terminal_result
 from .usage_logging import log_addin_probe
 
+class _DispatchNotStarted(RuntimeError):
+    pass
+
+
 # Prefix the add-in puts on a refused (re-entrant) call. Keep in sync with
 # modAPI.API_REFUSED_PREFIX.
 API_REFUSED_PREFIX = "VCS_API_REFUSED: "
@@ -528,10 +532,11 @@ class VCSAddinIntegration:
         Raises:
             RuntimeError: If call fails
         """
+        dispatched = False
         # Gate on add-in load state so callers get a clear lifecycle error
         # instead of a downstream COM message.
         if not self._addin_loaded or not self._app:
-            raise RuntimeError("VCS add-in not loaded. Call load_addin() first.")
+            raise _DispatchNotStarted("VCS add-in not loaded. Call load_addin() first.")
 
         try:
             # Named session dispatcher: envelope, command, then arguments.
@@ -552,6 +557,7 @@ class VCSAddinIntegration:
 
             # A COM exception can arrive after execution began. Never replay it.
             envelope = ensure_session(self._app, self.addin_path)
+            dispatched = True
             result = self._app.Run(api_function_name, envelope, function_name, *args)
             if isinstance(result, tuple) and result:
                 result = result[0]
@@ -564,9 +570,13 @@ class VCSAddinIntegration:
                     raise AdmissionError(parsed)
             return result
 
-        except RuntimeError:
+        except AdmissionError:
             raise
         except Exception as e:
+            if not dispatched:
+                raise _DispatchNotStarted(str(e)) from e
+            if isinstance(e, RuntimeError):
+                raise
             raise RuntimeError(
                 f"Failed to call add-in function '{function_name}': {e}\n"
                 f"Ensure a database is open and the add-in path is correct."
@@ -899,6 +909,7 @@ class VCSAddinIntegration:
         """
         import json
         
+        dispatched = False
         try:
             # Call APIAsync entry point
             # Format: APIAsync(strCallbackInfo, strCommand, [args...])
@@ -912,6 +923,7 @@ class VCSAddinIntegration:
             
             envelope = ensure_session(self._app, self.addin_path)
             # Bind every asynchronous dispatch to its accepted session.
+            dispatched = True
             if args:
                 result = self._app.Run(api_async_name, envelope, callback_info, command, *args)
             else:
@@ -943,9 +955,14 @@ class VCSAddinIntegration:
                 
         except AdmissionError:
             raise
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"Invalid JSON response from APIAsync: {e}")
         except Exception as e:
+            if not dispatched:
+                return {
+                    "success": False, "started": False,
+                    "error_pattern": "async_not_started", "error": str(e),
+                }
+            if isinstance(e, json.JSONDecodeError):
+                raise RuntimeError(f"Invalid JSON response from APIAsync: {e}") from e
             raise RuntimeError(f"Failed to call APIAsync '{command}': {e}")
     
     def get_version_info(self, app) -> dict[str, Any]:
