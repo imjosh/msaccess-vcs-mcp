@@ -107,12 +107,9 @@ def test_public_single_tools_preserve_mcp_id_and_source(tmp_path, monkeypatch, n
     if hasattr(addin_integration, "request_policy_contract_confirmed"):
         monkeypatch.setattr(addin_integration, "request_policy_contract_confirmed", lambda _: True)
     def dispatch(endpoint, *arguments):
-        production = endpoint.endswith(".APIExecuteMCP")
-        assert production or endpoint.endswith(".APIMCP")
-        index = 1 if production else 0
-        if production:
-            assert arguments[0] == "{}"
-        operation_id, method, *forwarded = arguments[index:]
+        assert endpoint.endswith(".APIExecuteMCP")
+        assert arguments[0] == "{}"
+        operation_id, method, *forwarded = arguments[1:]
         uuid.UUID(operation_id)
         assert method == command
         assert forwarded == ["query", "q", *(["block"] if noninteractive else [])]

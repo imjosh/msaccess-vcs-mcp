@@ -50,8 +50,6 @@ class FakeApp:
         return MagicMock()
 
     def Run(self, name, *args):
-        if name.endswith(".APIMCP"):
-            name, args = name[:-6] + "API", args[1:]
         if name.endswith(".APIExecuteAsync"):
             name, args = name[:-15] + "APIAsync", args[1:]
         elif name.endswith(".APIExecute"):
@@ -265,8 +263,6 @@ def test_call_async_normal_results_unchanged():
 def test_non_json_from_a_json_contract_method_is_a_failure(tmp_path, tool_name, method):
     class Garbled(FakeApp):
         def Run(self, name, *args):
-            if name.endswith(".APIMCP"):
-                name, args = name[:-6] + "API", args[1:]
             if name.endswith(".APIExecuteAsync"):
                 name, args = name[:-15] + "APIAsync", args[1:]
             elif name.endswith(".APIExecute"):
@@ -284,8 +280,6 @@ def test_non_json_from_a_json_contract_method_is_a_failure(tmp_path, tool_name, 
 def test_raw_contract_methods_keep_wrapping(tmp_path):
     class Raw(FakeApp):
         def Run(self, name, *args):
-            if name.endswith(".APIMCP"):
-                name, args = name[:-6] + "API", args[1:]
             if name.endswith(".APIExecuteAsync"):
                 name, args = name[:-15] + "APIAsync", args[1:]
             elif name.endswith(".APIExecute"):

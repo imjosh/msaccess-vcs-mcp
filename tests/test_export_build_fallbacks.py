@@ -64,16 +64,12 @@ class FakeAccess:
         self.probe_names: list[str] = []
         self.export_folder: object = ""
         self.folder_queries = 0
-        self.operation_ids = []
 
     def run(self, name, *args):
         if name.endswith(".APIExecuteAsync"):
             name, args = name[:-15] + "APIAsync", args[1:]
         elif name.endswith(".APIExecute"):
             name, args = name[:-10] + "API", args[1:]
-        if name.endswith(".APIMCP"):
-            self.operation_ids.append(args[0])
-            name, args = name[:-6] + "API", args[1:]
         entry = name.rsplit(".", 1)[1]
         if entry == "APICapabilities":
             self.probes += 1
