@@ -548,8 +548,7 @@ admission. Removing policy to bypass a refused conflict remains unsupported reco
 The current unmodified production dev.18 add-in lacks this marker and revised
 argument contract. It is explicitly refused for request-policy calls. It is not
 qualified with the intermediate UP-004 add-in, which lacks mutual sessions.
-UP-009 must integrate the request-policy methods before advertising the marker.
-Its exact dispatch signatures must be:
+The request-policy add-in advertises the marker with these dispatch signatures:
 
 ```text
 APIExecute(envelope, method, arg1, arg2, arg3)
@@ -564,18 +563,16 @@ version checks, and identity validation remain separate admission requirements.
 
 ## Synchronous MCP identities
 
-The repaired historical consumer calls
-`APIMCP(operation_id, method, arg1, arg2, arg3)` for synchronous operation methods.
-It generates a fresh UUID per request, independently of callback registration.
+Against an add-in that advertises the request-policy marker, the MCP calls
+`APIExecuteMCP(envelope, operation_id, method, arg1, arg2, arg3)` for synchronous
+operation methods, after the compatibility session is validated. It generates a fresh UUID per request, independently of callback registration.
 The add-in captures MCP as the initiating source and retains that public ID through
 completion. External callers can continue to use `API` with add-in-generated IDs.
 Metadata and inspection calls do not start an operation and retain their existing API.
 The MCP never replays a synchronous operation after a COM exception. That failure
 retains its ID and `operation_outcome_unconfirmed` for reconciliation.
 
-The production counterpart requires its admitted request-policy marker before
-using `APIExecuteMCP(envelope, operation_id, method, arg1, arg2, arg3)`. UP-009 must
-implement that session-enforcing wrapper along with `APIMCP` before advertising
-the marker. Old admitted production libraries retain their existing envelope-first
+Without the admitted marker, the MCP keeps `APIExecute` and refuses an explicit
+policy with `request_policy_unsupported`. Old admitted production libraries retain their existing envelope-first
 legacy calls when no new argument or result contract is needed. They do not establish
 the repaired pair's MCP-origin guarantee and remain outside its qualification.

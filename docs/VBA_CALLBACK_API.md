@@ -547,8 +547,7 @@ The JSON callback parameter allows adding fields without breaking existing integ
 
 VBA code should ignore unknown fields for forward compatibility.
 
-Synchronous MCP operation requests use `APIMCP(operation_id, method, arg1, arg2,
-arg3)`. The production wrapper is `APIExecuteMCP(envelope, operation_id, method,
+Synchronous MCP operation requests use `APIExecuteMCP(envelope, operation_id, method,
 arg1, arg2, arg3)` after contract admission. See
 [synchronous identities](DIALOGS.md#synchronous-mcp-identities). These identities
 are independent of callback registration and internal continuation tokens.

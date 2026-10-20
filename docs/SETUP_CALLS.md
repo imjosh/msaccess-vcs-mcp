@@ -20,10 +20,10 @@ This guard preserves existing version and session checks. It does not claim
 that the current production add-in implements the revised API.
 
 Synchronous MCP operation methods use an independent public operation ID through
-`APIMCP`, or the production-gated `APIExecuteMCP` wrapper. Raw `vcs_call_vba` calls
+`APIExecuteMCP` once the admitted add-in advertises the request-policy marker. Raw `vcs_call_vba` calls
 to the configured add-in's `API` use that operation entry point too. Add-in API
 dispatch accepts the method plus three arguments. Arbitrary user-function calls
-retain their existing three-argument limit. A pre-APIMCP installed library requires
+retain their existing three-argument limit. A pre-request-policy installed library requires
 the original baseline client or an explicitly owned external harness to bootstrap
 the supported rebuild. Metadata and inspection remain available through their
 existing entry points. No synchronous operation is replayed after a COM exception.

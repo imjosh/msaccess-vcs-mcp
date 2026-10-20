@@ -104,7 +104,7 @@ def request_policy_refusal(envelope, command, arguments):
     """Require the request contract advertised by the admitted loaded identity.
 
     Omitted policies keep legacy calls usable. No extra native probe is issued.
-    UP-009 must advertise this marker only after integrating its request arguments.
+    The add-in advertises this marker only with request-owned policy arguments.
     """
     position = _POLICY_ARGUMENTS.get(str(command).casefold())
     if position is None or len(arguments) <= position:
