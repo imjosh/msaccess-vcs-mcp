@@ -169,3 +169,42 @@ def test_raw_api_keeps_its_arguments_and_legacy_projection(boundary, raw, expect
     assert result["result"] == expected
     dispatch.assert_called_once()
     assert dispatch.call_args.args[2] == ["accepted-session", "GetVCSVersion"]
+
+
+@pytest.fixture
+def mcp_route(boundary, monkeypatch):
+    monkeypatch.setattr(tools, "request_policy_contract_confirmed", lambda envelope: True)
+    return boundary
+
+
+@pytest.mark.parametrize("raw", [
+    '{"success":false,"error_pattern":"api_busy","error":"Another API command is still running."}',
+    '{"success":false,"error_pattern":"invalid_operation_id","error":"bad id"}',
+])
+def test_execute_mcp_refusal_is_a_failure_with_its_operation_id(mcp_route, raw):
+    call, dispatch = mcp_route
+    result = call(raw, ["Export", "block"], "VCS.API")
+    assert result["success"] is False
+    assert result["error_pattern"] == json.loads(raw)["error_pattern"]
+    wire = dispatch.call_args.args
+    assert wire[1].endswith("APIExecuteMCP")
+    assert result["operation_id"] == wire[2][1]
+    dispatch.assert_called_once()
+
+
+def test_execute_mcp_success_reports_its_operation_id(mcp_route):
+    call, dispatch = mcp_route
+    result = call('{"success":true}', ["Export", "block"], "VCS.API")
+    assert result["success"] is True
+    assert result["operation_id"] == dispatch.call_args.args[2][1]
+
+
+def test_execute_mcp_com_failure_keeps_the_id_and_is_unconfirmed(mcp_route):
+    call, dispatch = mcp_route
+    result = call(None, ["Export", "block"], "VCS.API",
+                  transport={"success": False, "error": RuntimeError("RPC server unavailable")})
+    assert result["success"] is False
+    assert result["error_pattern"] == "operation_outcome_unconfirmed"
+    assert result["dispatch_uncertain"] is True
+    assert result["operation_id"] == dispatch.call_args.args[2][1]
+    dispatch.assert_called_once()

@@ -3119,6 +3119,7 @@ def _execute_call_vba(
             if permit is None:
                 # The caller's deadline passed during validation; the target is never reached.
                 return attempt_timeout_reply(attempt, gate_retained=False)
+            operation_id = None
             if api_call:
                 if on_admitted is not None:
                     call_args = on_admitted(call_args)
@@ -3126,7 +3127,8 @@ def _execute_call_vba(
                 # advertises request-policy/1; older add-ins keep APIExecute.
                 if is_operation_method(call_args[0]) and request_policy_contract_confirmed(envelope):
                     procedure = resolved_name[:-3] + "APIExecuteMCP"
-                    run_args = [envelope, str(uuid.uuid4()), *call_args]
+                    operation_id = str(uuid.uuid4())
+                    run_args = [envelope, operation_id, *call_args]
                 else:
                     run_args = [envelope, *call_args]
             else:
@@ -3135,6 +3137,16 @@ def _execute_call_vba(
 
             if not run_result.get("success"):
                 exc = run_result.get("error")
+                if operation_id:
+                    # The request may have started; keep its ID for reconciliation, as call_sync does.
+                    return _with_rebuild_context({
+                        "success": False, "operation_id": operation_id,
+                        "initiating_source": "mcp", "dispatch_uncertain": True,
+                        "error_pattern": "operation_outcome_unconfirmed",
+                        "error": f"Synchronous MCP request failed: {exc}. Reconcile this operation before retrying.",
+                        "function": resolved_name,
+                        "dispatch": "dispatched",
+                    })
                 return _with_rebuild_context({
                     "success": False,
                     "error": _describe_run_failure(exc, resolved_name, function_name),
@@ -3177,12 +3189,18 @@ def _execute_call_vba(
                     "compatibility_session_invalid", "version_incompatible", "version_unconfirmed",
                 }:
                     return _with_rebuild_context(admission_reply)
+                # APIExecuteMCP replies are JSON; a refusal or failed operation is not success.
+                if operation_id and admission_reply.get("success") is False:
+                    return _with_rebuild_context({**admission_reply, "function": resolved_name,
+                                                  "operation_id": operation_id})
 
             response: dict[str, Any] = {
                 "success": True,
                 "result": str(result) if result is not None else None,
                 "function": resolved_name,
             }
+            if operation_id:
+                response["operation_id"] = operation_id
 
             if is_rebuild:
                 _log_rebuild_call_result(result)
