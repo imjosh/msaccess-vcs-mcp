@@ -27,6 +27,10 @@ def _mock_existing_unit_installation(request, monkeypatch):
     fake_session = MagicMock(return_value="{}")
     monkeypatch.setattr(addin_integration, "ensure_session", fake_session)
     monkeypatch.setattr(tools, "ensure_session", fake_session)
+    # Fake existing unit installations implement the request contract too.
+    # Dedicated compatibility_session tests exercise absent/present real metadata.
+    monkeypatch.setattr(addin_integration, "request_policy_refusal", lambda *_: None)
+    monkeypatch.setattr(tools, "request_policy_refusal", lambda *_: None)
 
 
 @pytest.fixture(params=[

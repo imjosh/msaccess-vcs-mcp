@@ -67,18 +67,13 @@ Preserve the original failure/decisions even when readiness becomes true, and
 check partial writes before a retry. An uncertain dismissal can have acted;
 reinspect the window instead of repeating the click blindly.
 
-`policy_cleanup_error` is attached beside the original result. A successful
-operation can coexist with failed cleanup; do not rerun the operation to fix
-cleanup or claim the interaction mode is restored. Determine the scope owner
-and whether an active root remains. The owner can clear its own session policy
-through supported `ClearOperationPolicy` API dispatch and must verify the nested
-`{success: true}` acknowledgment, not just `vcs_call_vba` transport success.
-If ownership or release is uncertain, obtain the owner's help; never clear another
-caller's scope or force interactive mode. `vcs_end_session` clears option overrides,
-not an operation policy. Other cleanup errors must also be reported alongside
-the operation outcome and resolved without bypassing ownership protections.
+Request-owned policies end with their operation. MCP sends no persistent
+setter or cleanup call. An old pair may report `policy_cleanup_error`; preserve
+that historical diagnostic and reconcile ownership before more mutations.
+`ClearOperationPolicy` is now harmless and cannot resolve a blocked conflict.
+Do not force global mode or remove request policy to bypass deletion protection.
+Other cleanup errors remain secondary to the original operation result.
 
-`policy_unconfirmed`, `interaction_mode_unconfirmed`, and unsupported capabilities
-need a compatible add-in. `api_self_dispatch` is an add-in defect; changing the
+An incompatible request API requires the matching repaired add-in. `api_self_dispatch` is an add-in defect; changing the
 host database or retrying cannot repair it. Respect installed-add-in and write
 refusals; do not move to raw VBA/COM or alter server protections as a shortcut.

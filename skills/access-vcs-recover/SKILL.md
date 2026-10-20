@@ -21,7 +21,9 @@ changes. Keep permitted inspection and recovery available after a refusal.
 4. Recheck readiness and reconcile the original outcome with current database and
    source state. Readiness proves responsiveness, not successful completion.
    Retry only after accounting for prior effects and addressing the cause; retain
-   the original scope and authorization. If evidence stays inconclusive, report
+   the original scope and authorization. For a blocked conflict, reuse existing
+   user instructions only when they cover that action. Never automatically retry
+   with a preference policy or omit the policy to bypass deletion protection. If evidence stays inconclusive, report
    the uncertainty and the specific user action or diagnostic needed.
 
 Preserve user-owned Access windows. Use server-supported recovery rather than

@@ -18,6 +18,14 @@ _connection = contextvars.ContextVar("compatibility_connection", default=_local_
 _target_library = contextvars.ContextVar("compatibility_target_library", default=None)
 _connections = OrderedDict()
 _sessions = OrderedDict()
+_request_policy_contracts = OrderedDict()
+REQUEST_POLICY_CONTRACT = "msaccess-vcs.request-policy/1"
+_POLICY_ARGUMENTS = {name.casefold(): position for name, position in {
+    "Export": 0, "FullExport": 0, "ExportVBA": 0, "Build": 1,
+    "MergeBuild": 0, "ImportObject": 2, "ExportObject": 2,
+    "ImportByType": 2, "ExportByType": 2, "RunFilteredTests": 0,
+    "BuildHeadless": 1, "MergeHeadless": 1, "RebuildAddIn": 2,
+}.items()}
 _lock = threading.RLock()
 MAX_SESSIONS = 128
 
@@ -87,6 +95,30 @@ def _reply(app, library, procedure, *args):
     return value
 
 
+def request_policy_contract_confirmed(envelope):
+    with _lock:
+        return _request_policy_contracts.get(envelope) == REQUEST_POLICY_CONTRACT
+
+
+def request_policy_refusal(envelope, command, arguments):
+    """Require the request contract advertised by the admitted loaded identity.
+
+    Omitted policies keep legacy calls usable. No extra native probe is issued.
+    UP-009 must advertise this marker only after integrating its request arguments.
+    """
+    position = _POLICY_ARGUMENTS.get(str(command).casefold())
+    if position is None or len(arguments) <= position:
+        return None
+    if request_policy_contract_confirmed(envelope):
+        return None
+    return {
+        "success": False, "started": False,
+        "error_pattern": "request_policy_unsupported",
+        "required_request_policy_contract": REQUEST_POLICY_CONTRACT,
+        "error": "The admitted add-in does not advertise request-owned policy arguments. No operation started. Use the matching request-policy add-in; do not remove the policy to bypass this refusal.",
+    }
+
+
 def ensure_session(app, path):
     """Cheap validation first; handshake only after certain non-execution.
 
@@ -138,6 +170,10 @@ def ensure_session(app, path):
                                ("session_id", "server_instance", "connection_id", "addin_instance")})
         with _lock:
             _sessions[key] = envelope
+            _request_policy_contracts[envelope] = identity.get("request_policy_contract")
+            _request_policy_contracts.move_to_end(envelope)
+            while len(_request_policy_contracts) > MAX_SESSIONS:
+                _request_policy_contracts.popitem(last=False)
             _sessions.move_to_end(key)
             while len(_sessions) > MAX_SESSIONS:
                 _sessions.popitem(last=False)

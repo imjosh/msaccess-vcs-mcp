@@ -25,7 +25,7 @@ or switching to raw VBA is not a workaround for a refusal.
 | Requested outcome | Tool and scope | Decision that matters |
 | --- | --- | --- |
 | Capture changes made in Access | `vcs_export_object` for one name; `vcs_export_database` for categories or the project | Export writes source, so protect pending source edits. |
-| Replace one named object from edited source | `vcs_import_object` | Direct replacement bypasses index-based conflict detection; establish source-replacement intent first. |
+| Replace one named object from edited source | `vcs_import_object` | Explicit request policy protects independent destination edits; inspect skipped or blocked results. |
 | Apply changed source in complete categories | `vcs_import_objects` with `object_types`, normally `full_import=False` | Category scope reconciles orphans and takes no database backup. |
 | Integrate project-wide source changes into the existing database | `vcs_import_objects` without `object_types` | Full merge checks conflicts and takes a database backup. |
 | Create a fresh database from source | `vcs_rebuild_database` with source and an explicit absolute output | Verify the resulting file and its contents; a full build replaces an entire database. |
@@ -38,20 +38,16 @@ discovery is `export_folder_unavailable`. Use the reported `export_path`.
 Category export is synchronous; whole-project export follows completion callbacks.
 `full_export` controls changed-only versus all objects in scope, not destination.
 
-Whole-project export has no `decision_policy`/`noninteractive` parameters in the
-current schema. Do not assume it suppresses dialogs like single-object export.
-Resolve conflicts according to the request; use recovery inspection if blocked.
+Whole-project and category exports accept explicit request policies and default
+to `block`, as single-object export does. Preserve source edits before exporting.
 
 ### Single-object import
 
-MCP/API import disables the index for the call and replaces the object from source.
-`decision_policy="block"` does not add a conflict check to that path. If preserving
-independent database edits matters or the winning version is unknown, use a
-conflict-aware merge instead. A known conflict or `decision_required` must not be
-sidestepped with single-object import. Back up as needed; there is no full-merge
-backup here. Single-file component types can replace an entire category despite
-the tool name, and the importer may update dependent objects. Check the live
-description and the affected files before treating it as a one-object change.
+Single-object import enforces the explicit request policy. Default `block`
+protects independent database edits. Naming an object identifies scope rather than
+overwrite authorization. Read transferred, skipped, and blocked outcomes. Own a
+backup as needed because there is no full-merge backup on this path. Some component
+types can affect dependent objects or an entire category, so inspect their scope.
 
 ### Category import and full merge
 
@@ -60,9 +56,9 @@ source. Ensure the category source is complete and the deletions are intended;
 use a named import for a deliberate single replacement instead of a partial tree.
 Own a backup before a destructive category merge.
 
-`full_import=True` reloads all source in the named categories and skips conflict
-detection: source wins regardless of `decision_policy`. Use it only when that
-replacement is intended, for example after verifying an index missed changes.
+`full_import=True` reloads all source in the named categories while retaining
+explicit policy protection. Use it when the full source scope is intended.
+Conflicting edited deletions require interactive review or preservation.
 It is ignored without `object_types`; selecting every category with it is not
 a substitute for a backed-up full merge or a fresh build. Leave the binary index
 to the add-in rather than resetting it to force a result.

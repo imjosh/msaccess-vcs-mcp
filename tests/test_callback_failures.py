@@ -267,39 +267,37 @@ def test_run_tests_callback_refusal_matches_the_inline_refusal(tmp_path):
         "error": payload["message"],
     })
     by_callback = _run_through_callback(tmp_path, payload)
-    assert by_callback == inline
+    assert all(by_callback.get(key) == value for key, value in inline.items())
+    assert by_callback["operation_id"]
 
 
-def test_run_tests_plain_failure_is_unchanged(tmp_path):
-    assert _run_through_callback(tmp_path, PLAIN_FAILURE) == {
-        "success": False,
-        "error": "busy",
-        "log_path": RUN_LOG,
-    }
+def test_run_tests_plain_failure_keeps_diagnostics_and_identity(tmp_path):
+    result = _run_through_callback(tmp_path, PLAIN_FAILURE)
+    assert result["success"] is False
+    assert result["error"] == "busy"
+    assert result["log_path"] == RUN_LOG
+    assert result["operation_id"]
 
 
-def test_export_plain_failure_is_unchanged(tmp_path):
+def test_export_plain_failure_keeps_diagnostics_and_identity(tmp_path):
     result, out = _export_through_callback(tmp_path, PLAIN_FAILURE)
-    assert result == {
-        "success": False,
-        "error": "busy",
-        "exported_count": 0,
-        "export_path": str(out),
-        "objects_by_type": {},
-        "log_path": RUN_LOG,
-    }
+    assert result["success"] is False
+    assert result["error"] == "busy"
+    assert result["exported_count"] == 0
+    assert result["export_path"] == str(out)
+    assert result["objects_by_type"] == {}
+    assert result["log_path"] == RUN_LOG
+    assert result["operation_id"]
 
 
-def test_build_plain_failure_is_unchanged(tmp_path):
+def test_build_plain_failure_keeps_diagnostics_and_identity(tmp_path):
     result = _build_through_callback(tmp_path, PLAIN_FAILURE)
-    assert result.pop("operation_id")
-    assert result.pop("cleanup")["state"] == "complete"
-    assert result == {
-        "success": False,
-        "error": "busy",
-        "output_path": None,
-        "log_path": RUN_LOG,
-    }
+    assert result["success"] is False
+    assert result["error"] == "busy"
+    assert result["output_path"] is None
+    assert result["log_path"] == RUN_LOG
+    assert result["operation_id"]
+    assert result["cleanup"]["state"] == "complete"
 
 
 @pytest.mark.parametrize("path", ["export", "build"])

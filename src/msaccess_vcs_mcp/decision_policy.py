@@ -1,13 +1,7 @@
-"""Decision policy and add-in decision results for the tools that run a noninteractive operation.
+"""Request policy arguments and extensible operation outcomes.
 
-``vcs_import_objects``, ``vcs_import_object``, ``vcs_export_object`` and
-``vcs_run_tests`` pick a ``decision_policy``, hand it to the add-in, and turn an
-uncovered prompt into ``error_pattern: decision_required``.
-Everything about that lives here: validating the policy, the interactive-mode and
-policy-clear calls, normalising the ``decisions`` an add-in result carries, and
-reading the start result of an async call. ``tools.py`` keeps the tool handlers and
-calls in. ``call_under_policy`` owns session-policy setup, execution and cleanup;
-handlers supply their result parser and keep tool-specific response formatting.
+Each noninteractive operation receives its own explicit policy. The add-in owns
+that policy through completion and releases it without caller cleanup.
 """
 
 from __future__ import annotations
@@ -18,7 +12,6 @@ from typing import TYPE_CHECKING, Any, Callable
 if TYPE_CHECKING:
     from .addin_integration import VCSAddinIntegration
 
-from .usage_logging import log_diagnostic_event, log_policy_cleanup_failed
 
 DECISION_POLICIES = frozenset({
     "block",
@@ -27,6 +20,20 @@ DECISION_POLICIES = frozenset({
     "skip",
     "decline",
 })
+
+
+SYNCHRONOUS_OPERATION_METHODS = frozenset(name.casefold() for name in (
+    "Export", "FullExport", "ExportVBA", "Build", "MergeBuild", "ImportObject",
+    "ExportObject", "ImportByType", "ExportByType", "RunFilteredTests", "RunTests",
+    "RunTestsHeadless", "RunRoundtripTests", "BuildHeadless", "MergeHeadless",
+    "BuildAs", "RebuildAddIn", "LoadSelected", "MergeAllSource", "ExportSelected",
+    "ShowOptions", "RepairColors", "SplitFiles", "LocalizeLibraryReferences",
+    "ActivateHook", "StandardizeLetterCasing", "OpenTestRunner",
+))
+
+
+def is_operation_method(command: str) -> bool:
+    return str(command).casefold() in SYNCHRONOUS_OPERATION_METHODS
 
 
 class InvalidDecisionPolicy(ValueError):
@@ -62,7 +69,7 @@ def interactive_tests_unsupported_result() -> dict[str, Any]:
 
 
 def noninteractive_policy(noninteractive: bool, decision_policy: str | None) -> str | None:
-    """Return the add-in policy name, or None to keep interactive behavior.
+    """Return the request policy name, or None to retain legacy behavior.
 
     Raises InvalidDecisionPolicy for an unknown policy. The tool wrappers turn
     that into ``success: false`` with ``error_pattern: invalid_decision_policy``
@@ -78,154 +85,35 @@ def noninteractive_policy(noninteractive: bool, decision_policy: str | None) -> 
     return policy
 
 
-_INTERACTION_MODE_NORMAL = 0  # add-in eInteractionMode.eimNormal
-
-
-def select_interactive_mode(addin: Any, policy: str | None) -> dict[str, Any] | None:
-    """Send an explicit interactive mode, so the run never inherits a stale one.
-
-    Does nothing when ``policy`` is set: a noninteractive run is scoped by the
-    add-in itself. Call before the operation starts. Returns the add-in's
-    refusal (for example from an enclosing noninteractive scope) as the tool
-    result, or None on confirmed acceptance. A24 or later must report success
-    and effective mode 0; older Empty returns cannot confirm interactive mode.
-    Never clear a caller-owned policy to make this selection succeed.
-    """
-    if policy:
-        return None
-    selected = _as_dict(addin.call_sync("SetInteractionMode", _INTERACTION_MODE_NORMAL))
-    if (
-        selected.get("success") is True
-        and type(selected.get("effective_mode")) is int
-        and selected["effective_mode"] == _INTERACTION_MODE_NORMAL
-    ):
-        return None
-    if selected.get("success") is not False:
-        return {
-            "success": False,
-            "error_pattern": "interaction_mode_unconfirmed",
-            "error": (
-                "SetInteractionMode did not confirm interactive mode; no operation started. "
-                "An A24 or later add-in build is required. Upgrade the add-in if its response "
-                "is empty or unsupported; an enclosing policy must be cleared by its owner."
-            ),
-        }
-    return {
-        **selected,
-        "error": str(selected.get("error") or selected.get("message") or "SetInteractionMode refused"),
-    }
+def select_interactive_mode(addin: Any, policy: str | None) -> None:
+    """Compatibility helper. An omitted request policy requires no mode mutation."""
+    return None
 
 
 def policy_args(policy: str | None) -> tuple[str, ...]:
-    """The trailing add-in argument for a call that takes an optional policy."""
+    """The trailing argument for an operation that accepts a request policy."""
     return (policy,) if policy else ()
 
 
-def _as_dict(raw: Any) -> dict[str, Any]:
-    """An add-in return as a dict; anything that is not a JSON object becomes empty."""
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except json.JSONDecodeError:
-            return {}
-    return raw if isinstance(raw, dict) else {}
-
-
-def _policy_unconfirmed(policy: str) -> dict[str, Any]:
-    return {
-        "success": False,
-        "error_pattern": "policy_unconfirmed",
-        "error": (
-            f"SetOperationPolicy did not confirm the {policy} policy; no operation started. "
-            "An add-in build whose SetOperationPolicy returns the policy it set is required. "
-            "Upgrade the add-in if its response is empty or unsupported."
-        ),
-    }
-
-
-def _policy_confirmed(raw: Any, policy: str) -> bool:
-    """True only for ``{success: true, policy: <requested policy, normalised>}``."""
-    reply = _as_dict(raw)
-    echoed = reply.get("policy")
-    return (
-        reply.get("success") is True
-        and isinstance(echoed, str)
-        and echoed.strip().lower() == policy
-    )
-
-
-def clear_operation_policy(addin: Any) -> str | None:
-    """Clear the add-in session policy. Never raises; returns a failure message or None.
-
-    A session policy set through ``SetOperationPolicy`` is caller-owned: the
-    add-in's ``Finish`` does not close it, so this call is what restores the
-    interaction mode after the operation. ``ClearOperationPolicy`` is
-    idempotent (a second clear, or a clear when none is set, is a no-op), so a
-    caller can always call it from ``finally``. A failure is written to the
-    usage log (``policy_cleanup_failed``) and the diagnostic log, and the
-    caller attaches it to the tool result as ``policy_cleanup_error``; it is
-    never allowed to replace the operation's own result. Only
-    ``{success: true}`` counts as cleared; Empty or malformed returns do not.
-    """
-    try:
-        cleared = _as_dict(addin.call_sync("ClearOperationPolicy"))
-        if cleared.get("success") is True:
-            return None
-        message = str(
-            cleared.get("error") or cleared.get("message")
-            or "ClearOperationPolicy did not confirm the policy was cleared"
-        )
-    except Exception as e:
-        message = str(e) or type(e).__name__
-    log_diagnostic_event("policy_cleanup_failed", error=message)
-    log_policy_cleanup_failed(message)
-    return message
+def clear_operation_policy(addin: Any) -> None:
+    """Compatibility helper. Request ownership releases policy inside the add-in."""
+    return None
 
 
 def call_under_policy(
     addin: VCSAddinIntegration, policy: str | None, command: str, *args: Any,
     parse_result: Callable[[Any], dict[str, Any]],
 ) -> tuple[dict[str, Any], str]:
-    """
-    Run one sync add-in call under ``policy``, or in explicit interactive mode.
+    """Dispatch one request with its trailing policy and preserve its result.
 
-    ``parse_result`` keeps tool-specific result formatting with the caller.
-    Sets the policy through ``SetOperationPolicy`` first, proceeding only on a
-    confirmed ``{success: true, policy}`` reply (else ``policy_unconfirmed``), and clears it in
-    ``finally``, so the call is covered whether or not the add-in keeps a
-    session policy past ``Finish``. A cleanup failure is attached as
-    ``policy_cleanup_error`` and never replaces the call's result.
-
-    Returns the result and how the call went: ``"refused"`` when the policy
-    set or the interactive-mode request was refused (the refusal is the
-    result and the call never started), ``"raised"`` when the call raised
-    (the result is a plain failure with the exception text), otherwise
-    ``"completed"`` with the add-in's parsed result.
+    No setup or cleanup call can mutate another request's mode or journal.
+    An omitted policy retains the add-in's documented legacy behavior.
     """
-    if policy:
-        # A refusal here (for example operation_already_running) is a normal
-        # result. Anything but a confirmed set fails closed with no dispatch
-        # and no cleanup call: nothing was set, so there is nothing to clear.
-        raw = addin.call_sync("SetOperationPolicy", policy)
-        if not _policy_confirmed(raw, policy):
-            if _as_dict(raw).get("success") is False:
-                return parse_result(raw), "refused"
-            return _policy_unconfirmed(policy), "refused"
-    mode_refusal = select_interactive_mode(addin, policy)
-    if mode_refusal:
-        return mode_refusal, "refused"
-    state = "completed"
     try:
-        result = parse_result(addin.call_sync(command, *args))
-    except Exception as e:
-        state = "raised"
-        result = {"success": False, "error": str(e)}
-    finally:
-        cleanup_error = clear_operation_policy(addin) if policy else None
-    if cleanup_error:
-        # Secondary information: never replaces the operation's result.
-        result["policy_cleanup_error"] = cleanup_error
-    return result, state
+        result = parse_result(addin.call_sync(command, *args, *policy_args(policy)))
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}, "raised"
+    return result, "refused" if is_start_refusal(result) else "completed"
 
 
 def coerce_decisions(value: Any) -> Any:
@@ -302,7 +190,11 @@ def normalize_terminal_result(payload: dict[str, Any], default_error: str) -> di
     """
     unconfirmed = bool(payload.get("completion_unconfirmed"))
     success = payload.get("success") is True and not unconfirmed
-    result: dict[str, Any] = {"success": success}
+    # Keep extensible journals, transfer outcomes, identity, and future fields.
+    result: dict[str, Any] = {**payload, "success": success}
+    for key in ("decisions", "error_pattern", "decision_required"):
+        if result.get(key) is None:
+            result.pop(key, None)
     if payload.get("cancelled"):
         result["cancelled"] = True
     if unconfirmed:

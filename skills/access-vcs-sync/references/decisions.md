@@ -10,17 +10,15 @@ For tools that expose these parameters, retain noninteractive execution unless
 the user intends to handle prompts in Access. Read the live schema rather than
 adding these parameters to tools that do not support them.
 
-| Policy | Use when | Effect |
-| --- | --- | --- |
-| `block` | A winner or confirmation is not yet authorized | Uncovered choices return `decision_required`; OK-only add-in notices can be acknowledged. |
-| `prefer_source` | The user authorized source to win conflicts throughout the selected scope | Takes each conflict's requested action, including deletion when requested; overwrites from source when no action is specified. |
-| `prefer_database` / `skip` | Keep live database versions on conflicts | Keeps the database object and skips that source change. |
-| `decline` | The user wants confirmations declined | Answers No, Cancel, or Abort; conflicts keep the database object. |
+Read [the direction-aware policy table](../../../docs/DIALOGS.md#conflict-outcomes).
+`prefer_source` imports source on conflicting import and preserves source on
+conflicting export. `prefer_database` preserves the database on import and exports
+database content on export. `skip` preserves the conflicting destination in either
+direction. `decline` preserves conflicts and answers No, Cancel, or Abort.
 
-Conflict policies do not approve generic confirmations such as overwrite prompts.
-`prefer_source` is not blanket approval. Policies also do not restore checks that
-single-object import or category `full_import=True` bypass; select the operation
-as well as the policy.
+No policy authorizes conflicting edited deletions in this stage. A preference
+policy can still return `decision_required`. Single-object calls enforce their
+request policy. `full_import=True` retains explicit policy protection.
 
 ## When `decision_required` returns
 
@@ -39,9 +37,9 @@ Source-file Git conflict markers require a source edit before importing again.
 use it when the user will handle the choices in Access, not to evade a policy.
 Automation test runs are always headless and reject that setting.
 
-`policy_unconfirmed` or `interaction_mode_unconfirmed` means setup was not
-confirmed and nothing started. Obtain a compatible add-in rather than assuming
-the version string proves capability. `interaction_mode_refused` can mean another
-caller's scope is active; let its owner release it. `policy_cleanup_error` is
-secondary to the operation result and requires recovery before relying on restored
-interaction state. Clearing another caller's scope is not conflict resolution.
+Each operation owns its policy through completion and releases it itself.
+MCP sends no persistent setup or cleanup. A refused request cannot change another
+operation's policy, mode, or journal. Preserve unfamiliar journal fields and
+resolution values, and inspect `skipped` and `transferred` before proceeding.
+Never automatically retry with an overwrite policy or remove the policy to bypass
+a blocked deletion. An incompatible API requires a matching repaired pair.

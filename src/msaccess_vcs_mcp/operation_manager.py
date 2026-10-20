@@ -607,7 +607,8 @@ class OperationManager:
                         # Operation completed successfully
                         logger.info(f"Operation {operation_id} completed: {message}")
                         return {
-                            "success": True,
+                            **callback,
+                            "success": callback.get("success", True) is True,
                             "message": message,
                             "result": callback.get("result"),
                             "log_path": callback.get("log_path"),
@@ -628,6 +629,7 @@ class OperationManager:
                         # here: failed assertions complete as eorFailed.
                         logger.error(f"Operation {operation_id} failed: {message}")
                         return {
+                            **callback,
                             "success": False,
                             "error": message,
                             "code": callback.get("code"),
@@ -646,6 +648,7 @@ class OperationManager:
                         # Operation was cancelled
                         logger.info(f"Operation {operation_id} cancelled: {message}")
                         return {
+                            **callback,
                             "success": False,
                             "cancelled": True,
                             "message": message or "Operation cancelled",

@@ -35,6 +35,7 @@ import os
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -60,7 +61,7 @@ from .access_gate import (
     current_attempt,
     get_access_gate,
 )
-from .compatibility_session import AdmissionError, connection_scope, ensure_session, target_admission
+from .compatibility_session import AdmissionError, connection_scope, ensure_session, target_admission, request_policy_refusal, request_policy_contract_confirmed
 from .compatibility import (
     ADDIN_DEPENDENT_TOOLS, compatibility_result, inspect_installed_addin,
     server_metadata, workflow_preflight_instructions, configured_addin_path,
@@ -83,6 +84,7 @@ from .decision_policy import (
     interactive_tests_unsupported_result,
     invalid_policy_result,
     is_decision_required,
+    is_operation_method,
     is_start_refusal,
     noninteractive_policy,
     normalize_import_result,
@@ -564,21 +566,16 @@ def _export_start_outcome(
     start: dict[str, Any], export_path: str | os.PathLike[str],
     *, call_started_at: float | None = None,
 ) -> dict[str, Any]:
-    """The ``vcs_export_database`` result for a start that has no callback to follow.
-
-    ``start`` is what ``export_source`` or ``start_only_result`` returned. It is an
-    unconfirmed start or a failure, never a success. A failure keeps its
-    ``error_pattern`` and the empty counts of any other failed export.
-    """
-    result = {k: v for k, v in start.items() if k not in ("message", "log_path", "export_path")}
-    result["success"] = False
+    """Preserve final export JSON or an explicitly unconfirmed legacy start."""
+    result = normalize_terminal_result(start, "Export failed")
     result["export_path"] = str(export_path)
-    if not result.get("completion_unconfirmed"):
-        result["exported_count"] = 0
-        result["objects_by_type"] = {}
+    if not result["success"] and not result.get("completion_unconfirmed"):
+        result.setdefault("exported_count", 0)
+        result.setdefault("objects_by_type", {})
     return _attach_log_context(
         result, export_path, "Export", start,
-        call_started_at=call_started_at, executed=start.get("started") is True,
+        call_started_at=call_started_at,
+        executed=start.get("started") is True or result["success"],
     )
 
 
@@ -757,7 +754,7 @@ mcp = FastMCP(
         "**Tool quick-reference (required parameters marked with *, optional with ?):**\n"
         "- vcs_get_version_info() — server, add-in, and Access version info\n"
         "- vcs_list_objects(database_path*) — list all objects by type\n"
-        "- vcs_export_database(database_path*, output_dir?, object_types?, full_export?) "
+        "- vcs_export_database(database_path*, output_dir?, object_types?, full_export?, noninteractive?, decision_policy?) "
         "— export to the configured folder; output_dir is deprecated and must match it\n"
         "- vcs_export_object(database_path*, object_type*, object_name?, noninteractive?, "
         "decision_policy?) — export a single object/type to source\n"
@@ -800,13 +797,21 @@ mcp = FastMCP(
         "`end_runtime_error`)\n"
         "- vcs_automation_status(database_path*, pid?, create_time?, timeout_seconds?) "
         "— is Access ready for another call, and if not, why\n\n"
+        "**Request policies and conflicts:**\n"
+        "Import, export, and test tools forward an explicit policy per request, default block. "
+        "Single-object calls protect independent destination edits. Read skipped, transferred, "
+        "and decisions before continuing. prefer_source preserves source during export; "
+        "prefer_database exports the database version; skip preserves conflicting source. "
+        "No policy authorizes conflicting edited deletions. Use existing user authorization "
+        "only when it covers the exact action and scope. Never automatically retry a blocked "
+        "call with an overwrite policy or omit the policy to bypass it. Policies end with "
+        "their owning request; no setter or cleanup call is needed.\n"
         "**Dialogs and noninteractive runs:**\n"
-        "vcs_run_tests, vcs_import_objects, vcs_import_object and vcs_export_object default to "
+        "vcs_run_tests, vcs_import_objects, vcs_import_object, vcs_export_object, and vcs_export_database default to "
         "`noninteractive=True` with `decision_policy=\"block\"`: the add-in shows no message box, "
         "and a prompt the policy does not cover returns `error_pattern: decision_required` with "
-        "`decisions` instead of a dialog. Pass `noninteractive=False` to the three import and "
-        "export tools for the add-in's normal prompts; an A24 or later add-in must confirm "
-        "interactive mode before anything starts. vcs_run_tests is always headless and refuses "
+        "`decisions` instead of a dialog. Pass `noninteractive=False` to supported import and "
+        "export tools to omit the policy and retain legacy behavior. MCP changes no global mode. vcs_run_tests is always headless and refuses "
         "`noninteractive=False` (`interactive_tests_unsupported`). "
         "A dialog the add-in cannot prevent (VBA MsgBox, Access errors, runtime and "
         "compile errors) is handled with the four dialog tools above, which stay callable while "
@@ -1269,7 +1274,9 @@ async def vcs_export_database(
     output_dir: str | None = None,
     object_types: list[str] | None = None,
     full_export: bool = False,
-    ctx: Context = None
+    ctx: Context = None,
+    noninteractive: bool = True,
+    decision_policy: str = "block",
 ) -> dict[str, Any]:
     """
     Export Access database objects to source files.
@@ -1305,6 +1312,15 @@ async def vcs_export_database(
             object_types=["queries", "modules"]
         )
     
+    This tool defaults to an explicit request-owned ``block`` policy. It protects
+    edited source files. ``prefer_source`` preserves conflicting source, while
+    ``prefer_database`` exports the database version and ``skip`` preserves source.
+    Read ``skipped``, ``transferred``, and the decision journal before continuing.
+    Do not automatically retry with a preference policy. No policy authorizes
+    deleting a tracked, changed orphan file. Resolve that conflict interactively.
+    ``noninteractive=False`` omits the policy and restores legacy automatic choices.
+    Final export JSON confirms completion; a start acknowledgment alone does not.
+
     Args:
         database_path: Path to Access database (.accdb, .accda, .mdb)
         output_dir: Deprecated; omit it. The export always goes to the add-in's
@@ -1318,6 +1334,8 @@ async def vcs_export_database(
     
     Returns:
         Dictionary with:
+        - noninteractive: True by default; False omits the request policy
+        - decision_policy: block, prefer_source, prefer_database, skip, or decline
         - exported_count: Number of objects exported
         - export_path: Path where files were written
         - objects_by_type: Breakdown of what was exported
@@ -1346,6 +1364,7 @@ async def vcs_export_database(
         hasattr(ctx, "report_progress"),
     )
     try:
+        policy = noninteractive_policy(noninteractive, decision_policy)
         # Validate paths
         db_path = validate_database_path(database_path)
         export_path = None  # the add-in's configured export folder, read once it is loaded
@@ -1405,7 +1424,7 @@ async def vcs_export_database(
                         "objects_by_type": {},
                     }
                 result = _addin_json_result(
-                    addin.call_sync("ExportByType", types_arg, full_export)
+                    addin.call_sync("ExportByType", types_arg, full_export, *policy_args(policy))
                 )
                 result.setdefault("export_path", str(export_path))
                 return _attach_log_context(result, export_path, "Export", call_started_at=call_started_at, executed=True)
@@ -1422,7 +1441,7 @@ async def vcs_export_database(
                 )
                 
                 outcome = await dispatch_once(
-                    addin, op_manager, operation_id, callback_info, command, ctx=ctx,
+                    addin, op_manager, operation_id, callback_info, command, *policy_args(policy), ctx=ctx,
                 )
                 completion = outcome.payload
                 if outcome.kind == "inline":
@@ -1446,18 +1465,20 @@ async def vcs_export_database(
                 # nothing reports, so it is unconfirmed, never a success.
                 return _export_start_outcome(
                     addin.export_source(
-                        str(db_path), str(export_path), full_export=full_export
+                        str(db_path), str(export_path), full_export=full_export, decision_policy=policy
                     ),
                     export_path,
                     call_started_at=call_started_at,
                 )
             
             return _attach_log_context({
-                "success": True,
+                **normalize_terminal_result(completion or {}, "Export failed"),
                 "export_path": str(export_path),
                 "messages": (completion or {}).get("log_messages"),
             }, export_path, "Export", completion, call_started_at=call_started_at, executed=True)
     
+    except InvalidDecisionPolicy as e:
+        return invalid_policy_result(e)
     except Exception as e:
         if isinstance(e, AdmissionError):
             raise
@@ -1666,8 +1687,8 @@ async def vcs_import_objects(
     - ``full_import=False`` (default) merges only files the VCS index marks
       as changed. A stale or reset index can under-report; pass
       ``full_import=True`` to reload every source file in those categories
-      regardless of the index. That path also skips conflict detection
-      (source wins for the named categories).
+      regardless of the index. Explicit request policies still protect
+      independent destination changes.
     - Passing every category with ``full_import=True`` approximates a full
       build without a backup — prefer ``vcs_rebuild_database`` there.
     - Scoped calls are synchronous (no progress reporting). Prefer a single
@@ -1703,19 +1724,21 @@ async def vcs_import_objects(
             ``["modules", "forms"]``). If None, merges the entire project.
         full_import: When ``object_types`` is set: if False (default), merge
             only changed source files; if True, merge all source files in
-            those categories (ignores the change index, skips conflict
-            prompts). Ignored for a full project merge.
+            those categories while retaining explicit policy protection.
+            Ignored for a full project merge.
         noninteractive: When True (default), suppress add-in message boxes
             and the merge results window. Required confirmations and merge
             conflicts use ``decision_policy`` and otherwise return
             ``error_pattern: decision_required`` instead of a dialog.
-            Pass False to select interactive mode explicitly, with the
-            add-in's normal prompts.
+            Pass False to omit the policy and retain legacy add-in behavior.
+            MCP does not change process-wide interaction mode.
         decision_policy: Used when ``noninteractive`` is True. One of
             ``block`` (default), ``prefer_source``, ``prefer_database``,
-            ``skip``, or ``decline``. ``prefer_source`` takes each conflict's
-            requested action, and overwrites from source when it asks for none.
-            ``prefer_database`` keeps the database object, same as ``skip``.
+            ``skip``, or ``decline``. Preference policies preserve the named side.
+            On export, ``prefer_source`` preserves source and ``prefer_database``
+            exports database content. ``skip`` preserves the destination.
+            No policy authorizes conflicting edited deletions. Do not automatically
+            retry a blocked call with an overwrite policy or omit its policy.
     
     Returns:
         Dictionary with import results and any errors, plus ``log_path`` for
@@ -2701,6 +2724,14 @@ def vcs_export_object(
     Accepts singular or plural type names. For single-file component types
     (like vbe_project or db_property), the object_name is ignored.
     
+    Each call forwards its own policy. Default ``block`` preserves independent
+    destination edits and returns ``decision_required`` for conflicts. Ordinary
+    one-sided edit/test cycles can transfer safely. A preserving result reports
+    ``skipped: true``; inspect ``transferred``, ``skipped``, and ``decisions``.
+    Preference policies require authorization for their actual direction and scope.
+    No policy authorizes conflicting edited deletions. Never automatically retry
+    a blocked call with an overwrite policy or remove the policy to bypass it.
+
     Examples:
         vcs_export_object("C:\\\\db.accdb", "query", "qryCustomers")
         vcs_export_object("C:\\\\db.accdb", "form", "frmMain")
@@ -2723,8 +2754,8 @@ def vcs_export_object(
         noninteractive: When True (default), suppress add-in message boxes
             for this call. A confirmation the policy does not cover returns
             ``error_pattern: decision_required`` instead of a dialog. Pass
-            False to select interactive mode explicitly, with the add-in's
-            normal prompts.
+            False to omit the policy and retain legacy automatic choices.
+            MCP does not change process-wide interaction mode.
         decision_policy: Used when ``noninteractive`` is True. ``block``
             (default), ``prefer_source``, ``prefer_database``, ``skip``, or
             ``decline``, as for ``vcs_import_objects``.
@@ -2783,6 +2814,14 @@ def vcs_import_object(
     Accepts singular or plural type names. For single-file component types
     (like vbe_project or db_property), the object_name is ignored.
     
+    Each call forwards its own policy. Default ``block`` preserves independent
+    destination edits and returns ``decision_required`` for conflicts. Ordinary
+    one-sided edit/test cycles can transfer safely. A preserving result reports
+    ``skipped: true``; inspect ``transferred``, ``skipped``, and ``decisions``.
+    Preference policies require authorization for their actual direction and scope.
+    No policy authorizes conflicting edited deletions. Never automatically retry
+    a blocked call with an overwrite policy or remove the policy to bypass it.
+
     Examples:
         vcs_import_object("C:\\\\db.accdb", "query", "qryCustomers")
         vcs_import_object("C:\\\\db.accdb", "module", "modUtils")
@@ -2804,8 +2843,8 @@ def vcs_import_object(
         noninteractive: When True (default), suppress add-in message boxes
             for this call. A confirmation the policy does not cover returns
             ``error_pattern: decision_required`` instead of a dialog. Pass
-            False to select interactive mode explicitly, with the add-in's
-            normal prompts.
+            False to omit the policy and retain legacy automatic choices.
+            MCP does not change process-wide interaction mode.
         decision_policy: Used when ``noninteractive`` is True. ``block``
             (default), ``prefer_source``, ``prefer_database``, ``skip``, or
             ``decline``, as for ``vcs_import_objects``.
@@ -3029,10 +3068,11 @@ def _execute_call_vba(
             call_description += f"({', '.join(repr(a) for a in call_args)})"
         log_code_execution("vcs_call_vba", str(db_path), call_description, code_type="vba_call")
 
-        if len(call_args) > 3:
+        max_args = 4 if _is_addin_api_resolved_name(resolved_name) and resolved_name.lower().endswith(".api") else 3
+        if len(call_args) > max_args:
             return _with_rebuild_context({
                 "success": False,
-                "error": "Maximum 3 arguments supported for vcs_call_vba",
+                "error": f"Maximum {max_args} arguments supported for this vcs_call_vba target",
             })
 
         is_rebuild = (
@@ -3065,6 +3105,9 @@ def _execute_call_vba(
                     from .compatibility_session import session_failure
                     return session_failure("legacy_automation_entry_point")
                 envelope = ensure_session(app, addin.addin_path)
+                refusal = request_policy_refusal(envelope, call_args[0], call_args[1:])
+                if refusal:
+                    return refusal
                 procedure = resolved_name[:-3] + "APIExecute"
             else:
                 # Relay raw target calls through the same enforcing add-in boundary.
@@ -3079,7 +3122,13 @@ def _execute_call_vba(
             if api_call:
                 if on_admitted is not None:
                     call_args = on_admitted(call_args)
-                run_args = [envelope, *call_args]
+                # Operation methods carry an MCP public operation ID once the add-in
+                # advertises request-policy/1; older add-ins keep APIExecute.
+                if is_operation_method(call_args[0]) and request_policy_contract_confirmed(envelope):
+                    procedure = resolved_name[:-3] + "APIExecuteMCP"
+                    run_args = [envelope, str(uuid.uuid4()), *call_args]
+                else:
+                    run_args = [envelope, *call_args]
             else:
                 run_args = [envelope, "CallVBAResult", resolved_name, json.dumps(call_args)]
             run_result = _run_target(permit, app, procedure, run_args)

@@ -19,7 +19,8 @@ Before database operations, follow [the MCP release policy](../release-policy.md
 3. For a tool with decision policies, read
    [decisions.md](references/decisions.md). Apply the user's stated intent and
    existing authorization; ask only for an unresolved choice. A blocked decision
-   does not authorize another tool that bypasses conflict detection.
+   does not authorize an overwrite retry, a different scope, or omitted policy.
+   Read skipped and transferred results before the next mutation.
 4. Dispatch the selected operation once. A launch acknowledgment is not completion.
    For a timeout, `server_busy`, dialog, or `completion_unconfirmed`, reconcile
    recent calls, operation logs, and readiness before any retry. Use

@@ -2,15 +2,15 @@
 
 ## Confirm completion
 
-Whole-project export, merge, and build report success only from a terminal
-completion callback. `started: true`, a dispatch acknowledgment, `async`/`sync`
+Export reports a final result synchronously or through a terminal callback.
+Merge and build admission require their terminal outcome. `started: true`, a dispatch acknowledgment, `async`/`sync`
 markers, an Empty VBA return, progress messages, or file existence alone are
 insufficient. `completion_unconfirmed` means the operation may have finished
 either way. Inspect recent calls and the matching operation log before retrying.
 
 Category and single-object calls return synchronous outcomes; `RunFilteredTests`
-also returns final results. Still inspect `success`, `decisions`, errors, and
-`policy_cleanup_error`, not just transport success or an imported count. A
+also returns final results. Inspect `success`, `decisions`, `skipped`,
+`transferred`, and errors rather than transport success or an imported count. A
 `cancel_not_honored` result reports the actual outcome despite a cancellation
 request. Interruption or uncertain delivery needs reconciliation before more work.
 

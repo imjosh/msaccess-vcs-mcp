@@ -11,6 +11,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -21,8 +22,8 @@ try:
 except ImportError:
     COM_AVAILABLE = False
 
-from .compatibility_session import AdmissionError, ensure_session
-from .decision_policy import is_decision_required, normalize_terminal_result
+from .compatibility_session import AdmissionError, ensure_session, request_policy_refusal, request_policy_contract_confirmed
+from .decision_policy import is_decision_required, normalize_terminal_result, is_operation_method
 from .usage_logging import log_addin_probe
 
 class _DispatchNotStarted(RuntimeError):
@@ -78,14 +79,11 @@ def unconfirmed_start_result(operation: str, log_type: str) -> dict[str, Any]:
 
 
 def start_only_result(raw: Any, operation: str, log_type: str) -> dict[str, Any]:
-    """Interpret what a start-only API call (Export, FullExport, ExportVBA, Build) returned.
+    """Interpret final export JSON and asynchronous build admission.
 
-    These add-in methods are Subs or form starts, so a normal return is Empty and
-    says nothing about the outcome. Only an explicit failure is reported as one:
-    a dispatcher refusal, or a JSON object with ``success: false`` or an
-    undecided ``decision_required``, which keeps its ``error_pattern``. Anything
-    else, including a ``success: true`` the method has no contract to give, is an
-    unconfirmed start. This never returns ``success: true``.
+    Repaired Export, FullExport, and ExportVBA return final structured outcomes.
+    Build and legacy Empty exports can remain completion-unconfirmed. Explicit
+    refusal and decision_required always take precedence over a success marker.
     """
     refusal = api_refusal_payload(raw)
     if refusal:
@@ -106,8 +104,11 @@ def start_only_result(raw: Any, operation: str, log_type: str) -> dict[str, Any]
             )
             if "started" in value:
                 result["started"] = value["started"]
+        elif value.get("success") is True and not value.get("started") and operation in {"export", "VBA export"}:
+            # Request-policy exports now return a final structured result.
+            result = normalize_terminal_result(value, f"The {operation} failed")
         else:
-            result = unconfirmed_start_result(operation, log_type)
+            result = {**value, **unconfirmed_start_result(operation, log_type)}
         # Log metadata is independent of the verdict. A start-only return can
         # identify its own log even when its completion remains unconfirmed.
         log_path = value.get("log_path") or value.get("logPath")
@@ -557,8 +558,25 @@ class VCSAddinIntegration:
 
             # A COM exception can arrive after execution began. Never replay it.
             envelope = ensure_session(self._app, self.addin_path)
+            refusal = request_policy_refusal(envelope, function_name, args)
+            if refusal:
+                return json.dumps(refusal)
             dispatched = True
-            result = self._app.Run(api_function_name, envelope, function_name, *args)
+            if is_operation_method(function_name) and request_policy_contract_confirmed(envelope):
+                operation_id = str(uuid.uuid4())
+                try:
+                    result = self._app.Run(
+                        f"{addin_lib_name}.APIExecuteMCP", envelope, operation_id, function_name, *args
+                    )
+                except Exception as exc:
+                    return json.dumps({
+                        "success": False, "operation_id": operation_id,
+                        "initiating_source": "mcp", "dispatch_uncertain": True,
+                        "error_pattern": "operation_outcome_unconfirmed",
+                        "error": f"Synchronous MCP request failed: {exc}. Reconcile this operation before retrying.",
+                    })
+            else:
+                result = self._app.Run(api_function_name, envelope, function_name, *args)
             if isinstance(result, tuple) and result:
                 result = result[0]
             if isinstance(result, str) and result.startswith("{"):
@@ -604,7 +622,8 @@ class VCSAddinIntegration:
         self,
         db_path: str,
         source_folder: Optional[str] = None,
-        full_export: bool = False
+        full_export: bool = False,
+        decision_policy: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Export database to source files using VCS add-in.
@@ -619,9 +638,9 @@ class VCSAddinIntegration:
             full_export: If True, force full export; if False, use fast save
             
         Returns:
-            Dictionary with the start result, never ``success: true``: Export and
-            FullExport return Empty, so the outcome is unknown.
-            - success: False
+            Final structured export outcome from the repaired add-in. A legacy
+            Empty return remains completion-unconfirmed.
+            - success: The final operation verdict when known
             - started / completion_unconfirmed: True when the call returned
               normally; ``error`` then says to read the log
             - error / message: The failure, for a refusal or a COM exception
@@ -630,11 +649,11 @@ class VCSAddinIntegration:
         """
         export_path = self._get_export_folder(db_path, source_folder)
         command = "FullExport" if full_export else "Export"
-        result = self._start_only(command, "export", "Export")
+        result = self._start_only(command, "export", "Export", *([decision_policy] if decision_policy else []))
         result["export_path"] = export_path
         return result
     
-    def export_vba(self, db_path: str, source_folder: Optional[str] = None) -> dict[str, Any]:
+    def export_vba(self, db_path: str, source_folder: Optional[str] = None, decision_policy: Optional[str] = None) -> dict[str, Any]:
         """
         Export only VBA components (modules, class modules).
         
@@ -646,10 +665,10 @@ class VCSAddinIntegration:
             source_folder: Optional custom export folder
             
         Returns:
-            Dictionary with the start result, as for ``export_source``
+            Final structured outcome, as for ``export_source``
         """
         export_path = self._get_export_folder(db_path, source_folder)
-        result = self._start_only("ExportVBA", "VBA export", "Export")
+        result = self._start_only("ExportVBA", "VBA export", "Export", *([decision_policy] if decision_policy else []))
         result["export_path"] = export_path
         return result
     
@@ -889,7 +908,7 @@ class VCSAddinIntegration:
         Call a VBA function asynchronously using the APIAsync entry point.
         
         This calls the new APIAsync function which:
-        - Spawns a detached process for long-running operations
+        - Reserves queued work without changing another operation
         - Returns immediately with async marker and timeout hint
         - Sends progress updates via HTTP callbacks
         - Sends completion or error when done
@@ -922,6 +941,9 @@ class VCSAddinIntegration:
                 raise RuntimeError("Access Application object not set.")
             
             envelope = ensure_session(self._app, self.addin_path)
+            refusal = request_policy_refusal(envelope, command, args)
+            if refusal:
+                return refusal
             # Bind every asynchronous dispatch to its accepted session.
             dispatched = True
             if args:

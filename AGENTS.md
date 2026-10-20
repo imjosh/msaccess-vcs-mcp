@@ -8,6 +8,7 @@ operate on users' Access databases; contributor work here changes the bridge.
 | Working on | Read |
 | --- | --- |
 | Editing/syncing a user's project, fresh build, verification, or project tests | [docs/AGENT_WORKFLOWS.md](docs/AGENT_WORKFLOWS.md); optional [access-vcs-sync](skills/access-vcs-sync/SKILL.md) |
+| Request policies, blocked conflicts, skipped transfers, or deletion review | [docs/DIALOGS.md](docs/DIALOGS.md), [docs/AGENT_WORKFLOWS.md](docs/AGENT_WORKFLOWS.md) |
 | Busy server, timeouts, dialogs, cancellation, interruption, or cleanup | [docs/DIALOGS.md](docs/DIALOGS.md); optional [access-vcs-recover](skills/access-vcs-recover/SKILL.md) |
 | Installing/distributing these workflow skills | [docs/AGENT_WORKFLOWS.md](docs/AGENT_WORKFLOWS.md#optional-skill-installation-and-distribution) |
 | Compatibility preflight, refused admission, or changed connection | [docs/AGENT_WORKFLOWS.md](docs/AGENT_WORKFLOWS.md#required-compatibility-preflight), [docs/RELEASE_COMPATIBILITY.md](docs/RELEASE_COMPATIBILITY.md) |

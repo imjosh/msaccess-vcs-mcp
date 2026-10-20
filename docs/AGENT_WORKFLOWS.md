@@ -13,6 +13,24 @@ without installing them. For bridge development, read
 [CONTRIBUTING.md](CONTRIBUTING.md); add-in rebuilds and its own tests are covered
 in [ADDIN_DEVELOPMENT.md](ADDIN_DEVELOPMENT.md).
 
+## Preserve conflicts during each edit cycle
+
+Import and export tools default to an explicit request-owned `block` policy.
+Single-object calls protect independent destination changes, including both export
+branches. Follow [the policy and deletion rules](DIALOGS.md#conflict-outcomes).
+Export, edit source, import, and test after confirmed transfers. Read `skipped`,
+`transferred`, and `decisions` on every result. A skipped transfer did not apply
+the proposed change. Reconcile blocked or uncertain results before continuing.
+
+Use a preference policy only when existing user instructions authorize its actual
+direction and scope. `prefer_source` preserves source on export, while
+`prefer_database` exports the database version. `skip` preserves conflicting source
+on export. Do not automatically retry a blocked call with an overwrite policy.
+No policy authorizes conflicting edited deletions in this stage. Resolve those
+items interactively, or preserve them if that is the requested outcome. Omitting
+the policy restores legacy automatic choices and is not conflict recovery.
+
+
 ## Required compatibility preflight
 
 This workflow owns the server requirement: **>=0.3.0 <0.4.0** for stable
@@ -319,7 +337,7 @@ git_commit("Merged changes from team")
 - Database-versus-source conflicts require an authorized winner: default `block`
   reports `decision_required`; inspect the decisions instead of silently choosing
 - Use `prefer_source` or `prefer_database` only when the user's intent authorizes
-  that outcome; source-winning actions may include deletion
+  that outcome within the selected scope; conflicting edited deletions require review
 - See [DIALOGS.md](DIALOGS.md) for policy semantics and partial outcomes
 
 ### 6. Build Fresh Database from Source
@@ -407,10 +425,9 @@ vcs_import_object(
 )
 ```
 
-This path bypasses index-based conflict detection even with `block`; establish
-source-replacement intent first. Use conflict-aware merge when independent
-Access edits must be reconciled. A single import is not a way around a previously
-reported conflict.
+This path enforces its explicit policy and protects independent database edits.
+The object name selects scope and does not authorize overwriting a conflict.
+Read skipped and blocked outcomes before treating the import as applied.
 
 For complete categories:
 
@@ -424,10 +441,10 @@ vcs_import_objects(
 )
 ```
 
-Category import deletes objects absent from the category source and takes no
-backup. Confirm complete source and intended deletions first. `full_import=True`
-forces source replacement and skips conflict detection; it is ignored for a
-whole-project merge. Use the operation-choice reference for scope and backup
+Category import reconciles absent source objects and takes no backup.
+Confirm complete source and intended scope first. A policy protects conflicting
+edited deletions. `full_import=True` reloads all source in scope while retaining
+explicit policy protection; it is ignored for a whole-project merge. Use the operation-choice reference for scope and backup
 tradeoffs.
 
 ## Best Practices

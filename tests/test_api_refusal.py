@@ -50,6 +50,8 @@ class FakeApp:
         return MagicMock()
 
     def Run(self, name, *args):
+        if name.endswith(".APIMCP"):
+            name, args = name[:-6] + "API", args[1:]
         if name.endswith(".APIExecuteAsync"):
             name, args = name[:-15] + "APIAsync", args[1:]
         elif name.endswith(".APIExecute"):
@@ -141,13 +143,9 @@ def _call(tool_name, db, src, **extra):
 # than vcs_call_vba and the RunVBA worker (tested separately below).
 ROWS = [
     ("vcs_export_object", "ExportObject", {}),
-    ("vcs_export_object", "SetOperationPolicy", {}),
     ("vcs_import_object", "ImportObject", {}),
-    ("vcs_import_object", "SetOperationPolicy", {}),
     ("vcs_export_database", "ExportByType", {}),
     ("vcs_import_objects", "ImportByType", {}),
-    ("vcs_import_objects", "SetOperationPolicy", {}),
-    ("vcs_import_objects", "SetInteractionMode", {"noninteractive": False}),
     ("vcs_check_vba_compiled", "IsVBACompiled", {}),
     ("vcs_compile_vba", "CompileVBA", {}),
     ("vcs_execute_sql", "ExecuteSQL", {}),
@@ -173,11 +171,14 @@ def test_refusal_is_a_failure_with_pattern(tmp_path, tool_name, refused, extra, 
 
 
 @pytest.mark.parametrize("tool_name", ["vcs_export_object", "vcs_import_object"])
-def test_clear_policy_refusal_becomes_policy_cleanup_error(tmp_path, tool_name):
+def test_request_completion_sends_no_persistent_policy_cleanup(tmp_path, tool_name):
     app = FakeApp("ClearOperationPolicy")
     with _tool_env(tmp_path, app) as (db, src):
         result = _call(tool_name, db, src)
-    assert "another API command is still running" in result["policy_cleanup_error"]
+    assert result["success"] is True
+    assert "policy_cleanup_error" not in result
+    assert "ClearOperationPolicy" not in app.calls
+    assert "SetOperationPolicy" not in app.calls
 
 
 def test_run_vba_refusal_is_a_failure(tmp_path):
@@ -264,6 +265,8 @@ def test_call_async_normal_results_unchanged():
 def test_non_json_from_a_json_contract_method_is_a_failure(tmp_path, tool_name, method):
     class Garbled(FakeApp):
         def Run(self, name, *args):
+            if name.endswith(".APIMCP"):
+                name, args = name[:-6] + "API", args[1:]
             if name.endswith(".APIExecuteAsync"):
                 name, args = name[:-15] + "APIAsync", args[1:]
             elif name.endswith(".APIExecute"):
@@ -281,6 +284,8 @@ def test_non_json_from_a_json_contract_method_is_a_failure(tmp_path, tool_name, 
 def test_raw_contract_methods_keep_wrapping(tmp_path):
     class Raw(FakeApp):
         def Run(self, name, *args):
+            if name.endswith(".APIMCP"):
+                name, args = name[:-6] + "API", args[1:]
             if name.endswith(".APIExecuteAsync"):
                 name, args = name[:-15] + "APIAsync", args[1:]
             elif name.endswith(".APIExecute"):
