@@ -88,3 +88,30 @@ def test_policy_slot_is_checked_case_insensitively_before_dispatch(command, argu
     result = s.request_policy_refusal("unadvertised-envelope", command, arguments)
     assert result["error_pattern"] == "request_policy_unsupported"
     assert result["started"] is False
+
+
+def test_marker_lives_and_dies_with_its_session_record(transport):
+    app, path = transport
+    original = app.Run
+    def run(procedure, *arguments):
+        response = original(procedure, *arguments)
+        if procedure.endswith(".APIIdentity"):
+            return json.dumps({**json.loads(response), "request_policy_contract": s.REQUEST_POLICY_CONTRACT})
+        return response
+    app.Run = run
+    envelope = s.ensure_session(app, path)
+    assert s.request_policy_contract_confirmed(envelope)
+    # Other sessions fill the cache; a cache hit keeps this session and its marker.
+    with s._lock:
+        for i in range(s.MAX_SESSIONS - 1):
+            s._sessions[("other", i)] = ("other-%d" % i, None)
+    assert s.ensure_session(app, path) == envelope
+    assert app.calls["APIHandshake"] == 1
+    assert next(reversed(s._sessions.values())) == (envelope, s.REQUEST_POLICY_CONTRACT)
+    assert s.request_policy_contract_confirmed(envelope)
+    # A replaced session takes its marker with it.
+    app.sessions.clear()
+    replacement = s.ensure_session(app, path)
+    assert replacement != envelope
+    assert not s.request_policy_contract_confirmed(envelope)
+    assert s.request_policy_contract_confirmed(replacement)

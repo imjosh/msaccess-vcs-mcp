@@ -17,8 +17,8 @@ _local_connection = str(uuid.uuid4())
 _connection = contextvars.ContextVar("compatibility_connection", default=_local_connection)
 _target_library = contextvars.ContextVar("compatibility_target_library", default=None)
 _connections = OrderedDict()
+# key -> (envelope, request_policy_contract); the marker lives and dies with its session.
 _sessions = OrderedDict()
-_request_policy_contracts = OrderedDict()
 REQUEST_POLICY_CONTRACT = "msaccess-vcs.request-policy/1"
 _POLICY_ARGUMENTS = {name.casefold(): position for name, position in {
     "Export": 0, "FullExport": 0, "ExportVBA": 0, "Build": 1,
@@ -97,7 +97,8 @@ def _reply(app, library, procedure, *args):
 
 def request_policy_contract_confirmed(envelope):
     with _lock:
-        return _request_policy_contracts.get(envelope) == REQUEST_POLICY_CONTRACT
+        return any(saved == envelope and contract == REQUEST_POLICY_CONTRACT
+                   for saved, contract in _sessions.values())
 
 
 def request_policy_refusal(envelope, command, arguments):
@@ -139,10 +140,14 @@ def ensure_session(app, path):
                ADDIN_REQUIREMENT.text, PROTOCOL)
         library = os.path.splitext(os.path.abspath(path))[0]
         with _lock:
-            cached = _sessions.get(key)
+            entry = _sessions.get(key)
+        cached = entry[0] if entry else None
         if cached:
             verdict = _reply(app, library, "APIValidateSession", cached)
             if verdict.get("success") is True:
+                with _lock:
+                    if key in _sessions:
+                        _sessions.move_to_end(key)
                 return cached
             # Validation-only: execution has definitely not been dispatched.
             with _lock:
@@ -169,11 +174,7 @@ def ensure_session(app, path):
         envelope = json.dumps({k: request[k] for k in
                                ("session_id", "server_instance", "connection_id", "addin_instance")})
         with _lock:
-            _sessions[key] = envelope
-            _request_policy_contracts[envelope] = identity.get("request_policy_contract")
-            _request_policy_contracts.move_to_end(envelope)
-            while len(_request_policy_contracts) > MAX_SESSIONS:
-                _request_policy_contracts.popitem(last=False)
+            _sessions[key] = (envelope, identity.get("request_policy_contract"))
             _sessions.move_to_end(key)
             while len(_sessions) > MAX_SESSIONS:
                 _sessions.popitem(last=False)
