@@ -20,6 +20,8 @@ pytestmark = pytest.mark.version_gate
     ("6.10.0", None), ("7.0.0", "unsupported_boundary"),
     ("7.0.0-rc.1", "unsupported_boundary"),
     ("6.0.0-dev.18", None), ("6.0.0-dev.18+local.009", None),
+    ("6.0.0-dev.19", None), ("6.0.0-dev.17", "prerelease_not_admitted"),
+    ("6.0.0-dev.20", "prerelease_not_admitted"),
     ("6.0.0-rc.1", "prerelease_not_admitted"),
     ("6.1.0-beta.1", "prerelease_not_admitted"), ("6.0.0+build.001", None),
     ("6.00.0", "invalid_version"), ("v6.0.0", "invalid_version"),

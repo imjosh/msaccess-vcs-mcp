@@ -9,7 +9,7 @@ is the existing procedure-call transport; compatibility does not drive the UI.
 
 | Consumer | Authoritative declaration | Supported provider |
 |---|---|---|
-| Server | compatibility.ADDIN_REQUIREMENT | Add-in >=6.0.0 <7.0.0; explicit 6.0.0-dev.18 |
+| Server | compatibility.ADDIN_REQUIREMENT | Add-in >=6.0.0 <7.0.0; explicit 6.0.0-dev.18, 6.0.0-dev.19 |
 | Add-in | modCompatibilitySession.SERVER_* | Server >=0.3.0 <0.4.0; explicit 0.3.0-dev.18 |
 | Workflow | [workflow_requirement.json](../src/msaccess_vcs_mcp/workflow_requirement.json) | Server >=0.3.0 <0.4.0; explicit 0.3.0-dev.18 |
 
@@ -18,7 +18,8 @@ workflow requirement. Protocol: **msaccess-vcs.session/1**. Development pair:
 add-in **6.0.0-dev.18**, server **0.3.0-dev.18**; package metadata uses PEP 440
 **0.3.0.dev18+verify2.0**, reported by the server as **0.3.0-dev.18+verify2.0**.
 The coordinated development bump includes the A36–A40 fixes; consumer declarations
-admit the new development pair. These assignments are **unpublished**.
+admit the new development pair. The server also admits add-in **6.0.0-dev.19**,
+which merges upstream add-in v5.1.0 and needs no server or protocol change. These assignments are **unpublished**.
 Legacy refusal breaks the add-in API (major 6) and the major-zero server API
 (minor 0.3). Historical X16 receipts qualify only the previous contract.
 Release owners must verify and separately authorize publication of stable identities.
